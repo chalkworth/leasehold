@@ -1,16 +1,9 @@
-"""The machine agent's HTTP/JSON API, as a function of (method, path, body, peer): no sockets here,
-so any listener answers the same way.
+"""The machine agent's HTTP/JSON API, as a function (`handle`) of (method, path, body, peer): no
+sockets here, so any listener answers the same way.
 
-* `GET /v1/status`: the machine, as `leasehold.status` builds it.
-* `GET /v1/leases`: `{"leases": [...], "queue": [...]}`.
-* `GET /v1/events?since=N&limit=M`: what happened after event `N` (`leasehold.events`).
-* `POST /v1/acquire` {`kind`, `pool`, `weight`, `labels`, `lease_id`, `session`, `wait_s`,
-  `ttl_s`}: `granted` (with `lease`), `queued` (with `position` and `blocked`) or `refused`.
-* `POST /v1/renew` {`lease_id`, `ttl_s`}: `ok`, `revoked`, `queued` or `unknown`, with
-  `expires_at`.
-* `POST /v1/release` {`lease_id`}: `released`.
-* `POST /v1/lend` {`open`: bool}, administrators only: the lend state.
-* `POST /v1/pools/<name>` {`max`: int, or null to reset}, administrators only: the pool's `max`.
+`ROUTES` is every route: the model its body (or, for `GET /v1/events`, its query) is read into,
+whether only an administrator may call it, and what answers it. `docs/reference.md` describes
+each one. An administrator-only route checks who asks before it reads the body.
 
 A well-formed request is answered 200 with a `status` field (the lend and pool routes answer
 their state); a malformed one 400, one the peer may not make 403, an unknown path 404, one the
@@ -26,7 +19,9 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import parse_qsl
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -35,8 +30,6 @@ from leasehold.access import Forbidden, may_administer
 from leasehold.agent import AcquireRequest, MachineAgent
 from leasehold.events import CAPACITY
 from leasehold.ledger import LedgerUnavailable
-
-_POOLS = "/v1/pools/"
 
 
 @dataclass(frozen=True)
@@ -92,38 +85,93 @@ def _admin(agent: MachineAgent, peer: Peer) -> None:
         )
 
 
+#: What answers a route: (agent, the validated request or None, peer, the rest of the path after
+#: a prefix route's stem, `""` for any other route) to the answer.
+Handler = Callable[[MachineAgent, Any, Peer, str], dict]
+
+
+@dataclass(frozen=True)
+class Route:
+    """One route. `request` is the model the body (with `query`, the query string) is
+    validated into, or None to read neither. With `admin`, only an administrator may call it.
+    With `prefix`, its path ends in a `<name>` part: it answers every path that starts with
+    the part before that, and the handler is given the rest."""
+
+    request: type[BaseModel] | None
+    handler: Handler
+    admin: bool = False
+    query: bool = False
+    prefix: bool = False
+
+
+def _events(agent: MachineAgent, req: _EventsRequest, peer: Peer, rest: str) -> dict:
+    return agent.events.since(req.since, req.limit)
+
+
+def _acquire(agent: MachineAgent, req: AcquireRequest, peer: Peer, rest: str) -> dict:
+    return agent.acquire_wait(req, user=peer.user)
+
+
+def _renew(agent: MachineAgent, req: _LeaseRequest, peer: Peer, rest: str) -> dict:
+    return agent.renew(req.lease_id, user=peer.user, ttl_s=req.ttl_s)
+
+
+def _release(agent: MachineAgent, req: _LeaseRequest, peer: Peer, rest: str) -> dict:
+    return agent.release(req.lease_id, user=peer.user)
+
+
+def _lend(agent: MachineAgent, req: _LendRequest, peer: Peer, rest: str) -> dict:
+    return agent.set_lend(req.open)
+
+
+def _pool(agent: MachineAgent, req: _PoolRequest, peer: Peer, rest: str) -> dict:
+    return agent.set_pool_max(rest, req.max)
+
+
+#: Every route, by (method, path).
+ROUTES: dict[tuple[str, str], Route] = {
+    ("GET", "/v1/status"): Route(None, lambda agent, req, peer, rest: agent.status()),
+    ("GET", "/v1/events"): Route(_EventsRequest, _events, query=True),
+    ("GET", "/v1/leases"): Route(None, lambda agent, req, peer, rest: agent.leases()),
+    ("GET", "/v1/commands"): Route(None, lambda agent, req, peer, rest: agent.commands()),
+    ("POST", "/v1/acquire"): Route(AcquireRequest, _acquire),
+    ("POST", "/v1/renew"): Route(_LeaseRequest, _renew),
+    ("POST", "/v1/release"): Route(_LeaseRequest, _release),
+    ("POST", "/v1/lend"): Route(_LendRequest, _lend, admin=True),
+    ("POST", "/v1/pools/<name>"): Route(_PoolRequest, _pool, admin=True, prefix=True),
+}
+
+
+def _route(method: str, path: str) -> tuple[Route, str] | None:
+    """The route for `method` and `path`, with the rest of the path after a prefix route's
+    stem; None when there is none. A path matches a prefix route only through its stem."""
+    route = ROUTES.get((method, path))
+    if route is not None and not route.prefix:
+        return route, ""
+    for (m, pattern), route in ROUTES.items():
+        stem = pattern.partition("<")[0]
+        if route.prefix and m == method and path.startswith(stem):
+            return route, path[len(stem) :]
+    return None
+
+
 def handle(
     agent: MachineAgent, method: str, path: str, raw: bytes | None, peer: Peer
 ) -> tuple[int, dict]:
     path, _, query = path.partition("?")
     path = path.rstrip("/")
     try:
-        if method == "GET" and path == "/v1/status":
-            return 200, agent.status()
-        if method == "GET" and path == "/v1/events":
-            req = _EventsRequest.model_validate(dict(parse_qsl(query)))
-            return 200, agent.events.since(req.since, req.limit)
-        if method == "GET" and path == "/v1/leases":
-            return 200, agent.leases()
-        if method == "GET" and path == "/v1/commands":
-            return 200, agent.commands()
-        if method == "POST" and path == "/v1/acquire":
-            req = AcquireRequest.model_validate(_body(raw))
-            return 200, agent.acquire_wait(req, user=peer.user)
-        if method == "POST" and path == "/v1/renew":
-            req = _LeaseRequest.model_validate(_body(raw))
-            return 200, agent.renew(req.lease_id, user=peer.user, ttl_s=req.ttl_s)
-        if method == "POST" and path == "/v1/release":
-            req = _LeaseRequest.model_validate(_body(raw))
-            return 200, agent.release(req.lease_id, user=peer.user)
-        if method == "POST" and path == "/v1/lend":
+        found = _route(method, path)
+        if found is None:
+            return 404, {"error": "not_found", "detail": f"{method} {path}"}
+        route, rest = found
+        if route.admin:
             _admin(agent, peer)  # who asks decides first, whatever the body
-            req = _LendRequest.model_validate(_body(raw))
-            return 200, agent.set_lend(req.open)
-        if method == "POST" and path.startswith(_POOLS):
-            _admin(agent, peer)
-            req = _PoolRequest.model_validate(_body(raw))
-            return 200, agent.set_pool_max(path[len(_POOLS) :], req.max)
+        req = None
+        if route.request is not None:
+            fields = dict(parse_qsl(query)) if route.query else _body(raw)
+            req = route.request.model_validate(fields)
+        return 200, route.handler(agent, req, peer, rest)
     except (ValidationError, ValueError) as exc:
         detail = exc.errors(include_url=False) if isinstance(exc, ValidationError) else str(exc)
         return 400, {"error": "bad_request", "detail": json.loads(json.dumps(detail, default=str))}
@@ -134,4 +182,3 @@ def handle(
     except Exception as exc:  # noqa: BLE001 -- answered as a 500, its traceback on stderr
         sys.stderr.write(f"leasehold: {method} {path} failed:\n{traceback.format_exc()}")
         return 500, {"error": "internal", "detail": f"{type(exc).__name__}: {exc}"}
-    return 404, {"error": "not_found", "detail": f"{method} {path}"}

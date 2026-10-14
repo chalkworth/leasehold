@@ -96,6 +96,14 @@ def test_anyone_may_acquire_renew_and_release_their_own_lease(agent):
     assert post(agent, "/v1/release", {"lease_id": "w"}, OUTSIDER)[1]["status"] == "released"
 
 
+def test_the_pool_route_needs_a_pool_name_and_post(agent):
+    assert post(agent, "/v1/pools/", {"max": 1})[0] == 404
+    assert post(agent, "/v1/pools", {"max": 1})[0] == 404
+    assert handle(agent, "GET", "/v1/pools/work", None, ADMIN)[0] == 404
+    code, answer = post(agent, "/v1/pools/nope", {"max": 1})
+    assert code == 400 and "nope" in answer["detail"]
+
+
 def test_malformed_bodies_are_400_and_unknown_routes_404(agent):
     assert handle(agent, "POST", "/v1/acquire", b"not json", ADMIN)[0] == 400
     assert handle(agent, "POST", "/v1/acquire", b"[1, 2]", ADMIN)[0] == 400
