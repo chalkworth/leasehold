@@ -726,18 +726,18 @@ def _who(e: Mapping) -> str:
     return e.get("user") or "-"
 
 
-def _size(e: Mapping) -> str:
+def _event_slots(e: Mapping) -> str:
     return _slots(int(e.get("weight") or 0))
 
 
 def _queued(e: Mapping) -> str:
     place = f", #{e['position']}" if e.get("position") else ""
-    return f"{_who(e)} queued for {_size(e)} in {e.get('pool')}{place}"
+    return f"{_who(e)} queued for {_event_slots(e)} in {e.get('pool')}{place}"
 
 
 def _granted(e: Mapping) -> str:
     after = " after waiting" if e.get("waited") else ""
-    return f"{_who(e)} took {_size(e)} in {e.get('pool')}{after}"
+    return f"{_who(e)} took {_event_slots(e)} in {e.get('pool')}{after}"
 
 
 def _pool_max(e: Mapping) -> str:
@@ -763,17 +763,17 @@ _EVENTS: dict[EventType, _Shown] = {
     EventType.RELEASED: _Shown(
         "released",
         "",
-        lambda e: f"{_who(e)} released {_size(e)} in {e.get('pool')}",
+        lambda e: f"{_who(e)} released {_event_slots(e)} in {e.get('pool')}",
     ),
     EventType.ENDED: _Shown(
         "ended",
         "",
-        lambda e: f"{_who(e)}'s {_size(e)} in {e.get('pool')} ended: {e.get('reason')}",
+        lambda e: f"{_who(e)}'s {_event_slots(e)} in {e.get('pool')} ended: {e.get('reason')}",
     ),
     EventType.REVOKED: _Shown(
         "revoked",
         "bad",
-        lambda e: f"revoked {_who(e)}'s {_size(e)} in {e.get('pool')}: {e.get('reason')}",
+        lambda e: f"revoked {_who(e)}'s {_event_slots(e)} in {e.get('pool')}: {e.get('reason')}",
     ),
     EventType.LEND_OPENED: _Shown("lend on", "ok", lambda e: f"lending opened: {e.get('reason')}"),
     EventType.LEND_CLOSED: _Shown(

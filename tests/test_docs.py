@@ -31,12 +31,18 @@ def _generator():
     return module
 
 
+#: A row of the reference's route table: its method, path and the rest of the row.
+ROUTE_ROW = re.compile(r"^\| `(GET|POST|PUT|PATCH|DELETE) (/v1/[^`?\s]*)[^`]*` \|(.*)$", re.M)
+
+
 def test_the_reference_describes_every_api_route_and_no_other():
-    text = (ROOT / "docs" / "reference.md").read_text()
-    for method, path in ROUTES:
-        assert f"`{method} {path}" in text, f"docs/reference.md does not describe {method} {path}"
-    named = set(re.findall(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[^`?\s]*)", text))
-    assert named <= set(ROUTES), f"docs/reference.md names routes there are not: {named}"
+    rows = {
+        (m, p): rest
+        for m, p, rest in ROUTE_ROW.findall((ROOT / "docs" / "reference.md").read_text())
+    }
+    assert set(rows) == set(ROUTES), "docs/reference.md's route table is not api.ROUTES"
+    for key, route in ROUTES.items():
+        assert ("administrators only" in rows[key]) == route.admin, key
 
 
 def test_the_command_line_reference_is_the_parsers():

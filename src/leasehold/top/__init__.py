@@ -8,7 +8,10 @@
 `run` keeps the last `KEEP_EVENTS` events and `HISTORY` pressure samples and redraws. Off a
 terminal, on one smaller than `MIN_SIZE`, or with `once`, it prints one plain render instead.
 
-Every public name of the modules is importable from `leasehold.top` as well.
+Every public name of the modules is importable from `leasehold.top` as well. Two of them share
+a module's name: `leasehold.top.cells` and `leasehold.top.render` are the functions, so reach
+those modules with `from leasehold.top.cells import ...` (or `importlib.import_module`), not
+with `import leasehold.top.render as ...`.
 """
 
 from __future__ import annotations

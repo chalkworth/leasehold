@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib
 import io
 import json
 import os
@@ -171,6 +172,12 @@ def test_each_kind_has_its_own_mark_with_and_without_unicode():
     for glyphs in (top.UNICODE, top.ASCII):
         marks = [glyphs.marks[k] for k in KINDS]
         assert len({*marks, glyphs.other}) == len(KINDS) + 1
+
+
+def test_the_package_names_the_functions_and_from_imports_reach_the_modules():
+    assert callable(top.render) and callable(top.cells)
+    assert importlib.import_module("leasehold.top.render")._EVENTS is _EVENTS
+    assert importlib.import_module("leasehold.top.cells").cells is top.cells
 
 
 def test_every_event_type_has_a_word_a_style_and_a_sentence():
