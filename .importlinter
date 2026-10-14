@@ -1,0 +1,88 @@
+# leasehold's import contracts, checked by `uv run lint-imports` (pre-commit and CI).
+#
+# The library (model, admission, ledger, quota) is pure policy and storage: it never imports
+# the daemon. Commands that talk to a daemon (hold, handoff, report, top, the views and the MCP
+# server) reach it only through `leasehold.client`, never by importing the agent, the API or the
+# ledger.
+
+[importlinter]
+root_package = leasehold
+
+[importlinter:contract:layers]
+name = leasehold layers, top first: a module may import its own layer and those below
+type = layers
+layers =
+    cli
+    demo | mcp_server
+    setup
+    server | doctor | template | top | claude_code | shims
+    api
+    agent
+    status | lend | guard | events
+    machine
+    quota | observe | commands
+    shell
+    ledger
+    admission
+    model | discovery
+    paths
+containers =
+    leasehold
+
+[importlinter:contract:clients]
+name = commands that talk to a daemon use only the client
+type = forbidden
+source_modules =
+    leasehold.busy
+    leasehold.hold
+    leasehold.handoff
+    leasehold.report
+    leasehold.webui
+    leasehold.top
+    leasehold.claude_code
+    leasehold.shims
+    leasehold.mcp_server
+forbidden_modules =
+    leasehold.agent
+    leasehold.api
+    leasehold.server
+    leasehold.ledger
+    leasehold.machine
+    leasehold.admission
+
+[importlinter:contract:leaves]
+name = leaf modules import nothing else of leasehold's
+type = forbidden
+source_modules =
+    leasehold.model
+    leasehold.contain
+    leasehold.units
+    leasehold.process
+    leasehold.kinds
+    leasehold.exits
+    leasehold.client
+    leasehold.facts
+    leasehold.access
+    leasehold.paths
+    leasehold.jobs
+    leasehold.proctable
+    leasehold.metrics
+    leasehold.shell
+    leasehold.terminal
+    leasehold.hooknotes
+forbidden_modules =
+    leasehold.admission
+    leasehold.ledger
+    leasehold.quota
+    leasehold.machine
+    leasehold.agent
+    leasehold.api
+    leasehold.server
+    leasehold.cli
+    leasehold.hold
+    leasehold.handoff
+    leasehold.report
+    leasehold.top
+    leasehold.status
+    leasehold.lend
+    leasehold.load

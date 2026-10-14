@@ -1,0 +1,40 @@
+leasehold  buildbox  system  v0.2.0  site=rack1  16 cpus   ############  12/12 held  FULL  2 waiting
+
+PRESSURE  cpu      38.2%  -------========+++++++ 0-50%   above the 10% lending limit  60s 30.6%
+          memory    2.1%  ...................... 0-10%   60s 1.7%  full 0.5%
+          io        6.4%  +*-==+*-==+*-==+*-==+* 0-10%   60s 5.1%  full 1.6%
+          load    11.4  9.8  7.2  on 16 cpus    memory available 20 GiB of 64 GiB
+
+SLOTS        1      2      3      4      5      6      7      8      9     10     11     12
+  held    #bob   #alice pytes~ #alice cargo~ ^runner acme/api test       %carol training-prep
+  waiting #bob npm test ^runner acme/web e2e~~~~~~~
+
+POOLS     # work      #####-......   5/6  reserved 4  3 running  1 waiting
+          ^ external  ####----....   4/8              1 running  1 waiting
+          o lend      --------....   0/8              0 running  0 waiting  closed  preemptible
+          % observed  ###---------  3/12              1 running  0 waiting  observed
+
+LEASES    KIND        USER    SESSION  POOL      W     HELD  EXPIRES  LEASE  (sort: pool)
+          # work      bob     -        work      1  20m 10s    in 6s  3c1f0a9e2b7d  make -j
+          # work      alice   cc-7f3a  work      2   1m 35s    in 9s  cc.toolu_01H8  pytest -n auto
+          # work      alice   cc-91be  work      2      31s   in 13s  cc.toolu_01K2  cargo build --r
+          ^ external  runner  -        external  4   6m 52s   in 11s  gh.buildbox-1.8812.1.test  acm
+          % observed  carol   -        observed  3   1h 00m  at exit  observed.training-prep.48211
+
+QUEUE     #1 work      # bob     codex-2  npm test  cc.toolu_01M9         needs 2 slots  waiting 48s
+            > pool work is at 5 of 6; this needs 2
+          #1 external  ^ runner  acme/web e2e  gh.buildbox-2.8813.1.lint  needs 4 slots  waiting 20s
+            > machine has 0 of 12 slots free
+
+LENDING   closed  cpu pressure 38.2% is above 10%  |  needs 10m quiet  |  into lend
+
+EVENTS        20s ago  queued    runner queued for 4 slots in external, #1
+              31s ago  granted   alice took 2 slots in work  cc.toolu_01K2
+              48s ago  queued    bob queued for 2 slots in work, #1  cc.toolu_01M9
+           1m 35s ago  granted   alice took 2 slots in work  cc.toolu_01H8
+           6m 35s ago  released  dave released 6 slots in lend  lend.golden
+           6m 51s ago  lend off  lending closed: non-lend work waiting
+           6m 51s ago  revoked   revoked dave's 6 slots in lend: non-lend work waiting  lend.golden
+           6m 52s ago  granted   runner took 4 slots in external  gh.buildbox-1.8812.1.test
+          11m 30s ago  granted   dave took 6 slots in lend  lend.golden
+          11m 40s ago  lend on   lending opened: idle for 600s

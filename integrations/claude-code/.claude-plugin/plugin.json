@@ -1,0 +1,16 @@
+{
+  "name": "leasehold",
+  "version": "0.2.0",
+  "description": "Heavy Bash commands (builds, test suites) wait for a lease on a shared machine instead of piling on. Needs the leasehold daemon.",
+  "author": {
+    "name": "Matthew Strudwick"
+  },
+  "license": "Apache-2.0",
+  "repository": "https://github.com/chalkworth/leasehold",
+  "keywords": [
+    "admission-control",
+    "shared-machine",
+    "builds",
+    "tests"
+  ]
+}

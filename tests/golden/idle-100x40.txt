@@ -1,0 +1,40 @@
+leasehold  buildbox  system  v0.2.0  site=rack1  16 cpus  64 GiB    ░░░░░░░░░░░░  0/12 held  12 free
+
+PRESSURE  cpu       0.4%  ▄▄▄▄▄▄▄▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆ 0-50%   60s 0.3%  full 0.1%
+          memory    0.0%  ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂ 0-10%   60s 0.0%  full 0.0%
+          io        0.1%  ▆▇▄▅▅▆▇▄▅▅▆▇▄▅▅▆▇▄▅▅▆▇ 0-10%   60s 0.1%  full 0.0%
+          load    0.3  0.4  0.5  on 16 cpus    memory available 20 GiB of 64 GiB
+
+SLOTS        1      2      3      4      5      6      7      8      9     10     11     12
+  held    work╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ························································
+
+POOLS     ■ work      ░░░░░░······   0/6  reserved 4  0 running  0 waiting
+          ▲ external  ░░░░░░░░····   0/8              0 running  0 waiting
+          ○ lend      ░░░░░░░░····   0/8              0 running  0 waiting  closed  preemptible
+          ▨ observed  ░░░░░░░░░░░░  0/12              0 running  0 waiting  observed
+
+LEASES    none held
+
+QUEUE     nobody waiting
+
+LENDING   closed  quiet for 120s of 600s  ·  into lend
+
+EVENTS    none yet
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

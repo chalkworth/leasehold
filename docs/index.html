@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="leasehold: fair, load-aware admission control for one shared Linux machine. Leases of weighted slots, turn-taking per user and agent session, idle capacity lent out and taken back.">
+<title>leasehold</title>
+<script>
+(function () {
+  var t = null;
+  try { t = new URLSearchParams(location.search).get('theme') || localStorage.getItem('leasehold-theme'); } catch (e) {}
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+<style>
+:root {
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", "Roboto Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+
+  --t-s: 12px; --t-m: 14px; --t-l: 20px; --t-xl: 32px;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+
+  --ground: #e9edf1;
+  --surface: #ffffff;
+  --surface-2: #f3f5f8;
+  --ink: #111921;
+  --ink-2: #434f5c;
+  --ink-3: #5f6b78;
+  --rule: #d6dce2;
+  --rule-strong: #aeb8c3;
+  --bay-line: #c3ccd5;
+
+  --band: #0a4a8a;
+  --band-2: #083d73;
+  --band-ink: #ffffff;
+  --band-ink-2: #cddcee;
+  --band-rule: #2d679f;
+
+  --focus: #0a5cc2;
+
+  --work: #0b72b5;      --on-work: #ffffff;   --k-work: #0b72b5;
+  --external: #e69f00;  --on-external: #1d1300; --k-external: #a86b00;
+  --lend: #009e73;      --on-lend: #00140e;   --k-lend: #007a59;
+  --observed: #737d88;  --obs-a: #dfe3e8; --obs-b: #c9cfd6; --k-observed: #5f6b78;
+  --x0: #56b4e9; --on-x0: #04121c; --x1: #cc79a7; --on-x1: #1f0614; --x2: #f0e442; --on-x2: #1c1a00;
+
+  --wait-bg: #fff1b3;
+  --wait-ink: #3a2f00;
+  --wait-mark: #8a6d00;
+
+  --ok: #1d7a4a;
+  --warn: #9a5b00;
+  --bad: #b3261e;
+  --bad-bg: #fbe9e7;
+  --over: #b3261e;
+  --spark: #2f3b47;
+  --spark-fill: rgba(47, 59, 71, .10);
+  --thresh: #b3261e;
+  --select: #cfe1f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0a0e12;
+    --surface: #12181e;
+    --surface-2: #182028;
+    --ink: #e4e9ee;
+    --ink-2: #aab5c0;
+    --ink-3: #8794a1;
+    --rule: #242e38;
+    --rule-strong: #3a4754;
+    --bay-line: #2c3844;
+    --band: #0d3b6b;
+    --band-2: #0a2f56;
+    --band-ink: #ffffff;
+    --band-ink-2: #b4c9e2;
+    --band-rule: #24527f;
+    --focus: #7fb6ff;
+    --work: #4fa8e0; --on-work: #04121c; --k-work: #5fb3e8;
+    --external: #e69f00; --on-external: #1d1300; --k-external: #eaa521;
+    --lend: #1fb386; --on-lend: #00140e; --k-lend: #2fc394;
+    --observed: #7d8894; --obs-a: #2a333d; --obs-b: #36404b; --k-observed: #95a1ad;
+    --wait-bg: #2e2810; --wait-ink: #f4e4a0; --wait-mark: #e2c44a;
+    --ok: #4cc38a; --warn: #e3a33a; --bad: #ff8a80; --bad-bg: #3a1714; --over: #ff6b5e;
+    --spark: #c2ccd6; --spark-fill: rgba(194, 204, 214, .10); --thresh: #ff8a80;
+    --select: #1f3f63;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0a0e12;
+  --surface: #12181e;
+  --surface-2: #182028;
+  --ink: #e4e9ee;
+  --ink-2: #aab5c0;
+  --ink-3: #8794a1;
+  --rule: #242e38;
+  --rule-strong: #3a4754;
+  --bay-line: #2c3844;
+  --band: #0d3b6b;
+  --band-2: #0a2f56;
+  --band-ink: #ffffff;
+  --band-ink-2: #b4c9e2;
+  --band-rule: #24527f;
+  --focus: #7fb6ff;
+  --work: #4fa8e0; --on-work: #04121c; --k-work: #5fb3e8;
+  --external: #e69f00; --on-external: #1d1300; --k-external: #eaa521;
+  --lend: #1fb386; --on-lend: #00140e; --k-lend: #2fc394;
+  --observed: #7d8894; --obs-a: #2a333d; --obs-b: #36404b; --k-observed: #95a1ad;
+  --wait-bg: #2e2810; --wait-ink: #f4e4a0; --wait-mark: #e2c44a;
+  --ok: #4cc38a; --warn: #e3a33a; --bad: #ff8a80; --bad-bg: #3a1714; --over: #ff6b5e;
+  --spark: #c2ccd6; --spark-fill: rgba(194, 204, 214, .10); --thresh: #ff8a80;
+  --select: #1f3f63;
+}
+
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 64px; }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+body { margin: 0; background: var(--surface); color: var(--ink); font: 400 16px/1.55 var(--sans); font-variant-numeric: tabular-nums; caret-color: var(--focus); }
+::selection { background: var(--select); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+code, kbd, pre, .mono { font-family: var(--mono); }
+code { font-size: .9em; }
+* { scrollbar-width: thin; scrollbar-color: var(--rule-strong) transparent; }
+.vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 var(--s5); }
+
+/* ---------- kind marks / pips ---------- */
+.km { width: 12px; height: 12px; flex: none; vertical-align: -1px; }
+.c-work { color: var(--k-work); } .c-external { color: var(--k-external); } .c-lend { color: var(--k-lend); } .c-observed { color: var(--k-observed); }
+.c-x0 { color: var(--x0); } .c-x1 { color: var(--x1); } .c-x2 { color: var(--x2); }
+.kind { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pips { display: inline-flex; gap: 2px; vertical-align: middle; }
+.pips i { width: 7px; height: 10px; border-radius: 1px; background: currentColor; }
+.pips-n { font-family: var(--mono); font-size: var(--t-s); color: var(--ink-2); margin-left: 6px; }
+
+/* ---------- slots / bays ---------- */
+.slots { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: var(--s5); align-items: start; }
+.fc { display: flex; align-items: center; gap: var(--s3); }
+.plate { display: inline-flex; align-items: baseline; gap: 8px; background: var(--band); color: var(--band-ink); border-radius: 4px; padding: 8px 12px 7px; box-shadow: inset 0 0 0 2px var(--band-2); }
+.plate .n { font: 600 36px/1 var(--mono); letter-spacing: -0.03em; }
+.plate b { font-size: var(--t-m); font-weight: 750; letter-spacing: .1em; }
+.plate b.full { font-size: 28px; line-height: 1; letter-spacing: .12em; color: #ffd34d; }
+.free .nl { display: flex; flex-direction: column; line-height: 1.2; }
+.free .nl span { font-size: var(--t-s); color: var(--ink-2); }
+.free .sub { font-size: var(--t-s); color: var(--ink-2); margin-top: var(--s2); }
+.free .sub b { color: var(--ink); font-weight: 600; }
+.heldspark { margin-top: var(--s3); }
+.heldspark .cap { font-size: var(--t-s); color: var(--ink-3); display: flex; justify-content: space-between; }
+.heldspark svg { display: block; width: 100%; height: 34px; color: var(--spark); }
+
+.lanes { display: grid; grid-template-columns: 80px minmax(0, 1fr); row-gap: var(--s2); align-items: center; }
+.lane-k { font-size: var(--t-s); font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-2); }
+.lane { position: relative; height: 46px; }
+.lane .bays { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(var(--n), 1fr); background: var(--surface-2); border: 1px solid var(--rule-strong); border-radius: 3px; overflow: hidden; }
+.lane .bays i { border-right: 1px solid var(--bay-line); }
+.lane .bays i:last-child { border-right: 0; }
+.lane .bays i.over { background: var(--bad-bg); }
+.lane.wait .bays { background: transparent; border-style: dashed; border-color: var(--rule); }
+.lane.wait .bays i { border-right-color: transparent; }
+.blk {
+  position: absolute; top: 4px; bottom: 4px;
+  left: calc(var(--x) / var(--n) * 100% + 2px);
+  width: calc(var(--w) / var(--n) * 100% - 4px);
+  border-radius: 2px; padding: 4px 7px; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: center; line-height: 1.2;
+  container-type: inline-size;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .18);
+}
+.blk .u { font-size: var(--t-s); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blk .d { font: 11px/1.25 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+.blk .i { display: none; font-size: var(--t-s); font-weight: 700; text-align: center; }
+@container (max-width: 88px) { .blk .d { display: none; } }
+@container (max-width: 34px) { .blk .u { display: none; } .blk .i { display: block; } }
+.blk.p-work { background: var(--work); color: var(--on-work); }
+.blk.p-external { background: var(--external); color: var(--on-external); }
+.blk.p-lend { background: var(--lend); color: var(--on-lend); }
+.blk.p-x0 { background: var(--x0); color: var(--on-x0); }
+.blk.p-x1 { background: var(--x1); color: var(--on-x1); }
+.blk.p-x2 { background: var(--x2); color: var(--on-x2); }
+.blk.p-observed { background: repeating-linear-gradient(135deg, var(--obs-a) 0 5px, var(--obs-b) 5px 10px); color: var(--ink); box-shadow: inset 0 0 0 1px var(--observed); }
+.blk.res { background: transparent; box-shadow: none; border: 1.5px dashed currentColor; }
+.blk.res .u { font-weight: 600; text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
+.blk.res .d { font-family: var(--sans); color: var(--ink-2); opacity: 1; }
+.blk.q { background: var(--surface); color: var(--ink); box-shadow: none; border: 1.5px dashed currentColor; }
+.blk.q .u, .blk.q .d, .blk.q .i { color: var(--ink); }
+.blk.q.p-work { border-color: var(--k-work); } .blk.q.p-external { border-color: var(--k-external); } .blk.q.p-lend { border-color: var(--k-lend); } .blk.q.p-observed { border-color: var(--k-observed); }
+.blk.rv { background-image: repeating-linear-gradient(45deg, transparent 0 6px, rgba(179, 38, 30, .55) 6px 8px); }
+.blk.rv .u { text-decoration: line-through; }
+.bayno { display: grid; grid-template-columns: repeat(var(--n), 1fr); margin-top: -4px; font: 10px/1 var(--mono); color: var(--ink-3); text-align: center; }
+.bayno i { font-style: normal; }
+.lane-note { position: absolute; inset: 0; display: flex; align-items: center; padding-left: var(--s3); font-size: var(--t-s); color: var(--ink-3); }
+.legend { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); font-size: var(--t-s); color: var(--ink-2); padding-top: var(--s1); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend b { color: var(--ink); font-weight: 600; }
+.legend .sw { width: 12px; height: 12px; border-radius: 2px; }
+.sw.p-work { background: var(--work); } .sw.p-external { background: var(--external); } .sw.p-lend { background: var(--lend); }
+.sw.p-observed { background: repeating-linear-gradient(135deg, var(--obs-a) 0 3px, var(--obs-b) 3px 6px); box-shadow: inset 0 0 0 1px var(--observed); }
+.sw.p-x0 { background: var(--x0); } .sw.p-x1 { background: var(--x1); } .sw.p-x2 { background: var(--x2); }
+.sw.res { background: transparent; border: 1.5px dashed var(--ink-3); }
+
+
+
+/* ---------- nav and hero (the sign) ---------- */
+.band { background: var(--band); color: var(--band-ink); }
+.nav { display: flex; align-items: center; gap: var(--s5); padding-top: var(--s3); padding-bottom: var(--s3); flex-wrap: wrap; }
+.brand { display: inline-flex; align-items: center; gap: var(--s2); font-weight: 700; font-size: 17px; text-decoration: none; }
+.brand svg { width: 22px; height: 22px; }
+.nav ul { list-style: none; margin: 0 0 0 auto; padding: 0; display: flex; gap: var(--s1) var(--s4); flex-wrap: wrap; font-size: var(--t-m); }
+.nav a { color: var(--band-ink-2); text-decoration: none; }
+.nav a:hover { color: var(--band-ink); text-decoration: underline; }
+.theme { display: inline-flex; border: 1px solid var(--band-rule); border-radius: 4px; overflow: hidden; padding: 0; margin: 0; }
+.theme legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.theme label { position: relative; font-size: var(--t-s); padding: 4px 10px; cursor: pointer; color: var(--band-ink-2); }
+.theme label + label { border-left: 1px solid var(--band-rule); }
+.theme input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.theme input:checked + span { color: var(--band-ink); font-weight: 650; }
+.theme label:has(input:checked) { background: var(--band-2); }
+.theme label:has(input:focus-visible) { outline: 2px solid #fff; outline-offset: -2px; }
+
+.hero { padding-top: var(--s7); padding-bottom: calc(var(--s7) + 96px); }
+.band .nav { border-bottom: 1px solid var(--band-rule); }
+.hero h1 { margin: 0 0 var(--s4); font-size: clamp(32px, 5vw, 52px); line-height: 1.08; letter-spacing: -0.025em; font-weight: 750; max-width: 21ch; text-wrap: balance; }
+.hero p { margin: 0 0 var(--s5); font-size: 18px; color: var(--band-ink-2); max-width: 62ch; }
+.hero p b { color: var(--band-ink); font-weight: 600; }
+.install { display: flex; align-items: stretch; max-width: 640px; border: 1px solid var(--band-rule); border-radius: 4px; background: var(--band-2); }
+.install code { flex: 1; padding: 12px 16px; font-size: 14px; overflow-x: auto; white-space: nowrap; }
+.install code::before { content: "$ "; color: var(--band-ink-2); }
+.copy { font: 600 var(--t-s) var(--sans); background: transparent; color: var(--band-ink); border: 0; border-left: 1px solid var(--band-rule); padding: 0 16px; cursor: pointer; }
+.copy:hover { background: var(--band); }
+.hero .alt { margin: var(--s3) 0 0; font-size: var(--t-m); color: var(--band-ink-2); }
+.hero .alt code { color: var(--band-ink); }
+
+/* ---------- demo ---------- */
+.demo { position: relative; margin-top: -96px; background: var(--surface); border: 1px solid var(--rule-strong); border-radius: 4px; padding: var(--s4) var(--s5) var(--s4); }
+.demo-h { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s3); }
+.demo-h h2 { margin: 0; font-size: var(--t-s); font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.demo-h .aside { font-size: var(--t-s); color: var(--ink-3); display: flex; gap: var(--s3); align-items: center; }
+.demo-h button { font: 600 var(--t-s) var(--sans); color: var(--ink); background: var(--surface-2); border: 1px solid var(--rule-strong); border-radius: 3px; padding: 3px 10px; cursor: pointer; }
+.demo-h button:hover { border-color: var(--ink-3); }
+.demo .lanes { --n: 12; }
+.demo .blk { transition: left .7s cubic-bezier(.16, 1, .3, 1), width .7s cubic-bezier(.16, 1, .3, 1), opacity .35s ease-out, background-color .3s; }
+.demo .blk.gone { opacity: 0; }
+.cap-row { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 0; margin-top: var(--s3); align-items: start; }
+.cap-row .step { font: 600 var(--t-s) var(--mono); color: var(--ink-3); padding-top: 3px; }
+.caption { margin: 0; font-size: 15px; min-height: 3.1em; }
+.caption .why { display: inline-block; margin-top: 4px; background: var(--wait-bg); color: var(--wait-ink); padding: 1px 8px; border-radius: 3px; font-size: var(--t-m); font-weight: 550; }
+.ticks { display: flex; gap: 4px; margin-top: var(--s2); }
+.ticks button { width: 22px; height: 6px; padding: 0; border: 0; border-radius: 1px; background: var(--rule); cursor: pointer; }
+.ticks button[aria-current="step"] { background: var(--ink-2); }
+
+/* ---------- sections ---------- */
+section.s { padding: var(--s7) 0 0; }
+.s h2 { margin: 0 0 var(--s2); font-size: 28px; line-height: 1.2; letter-spacing: -0.02em; font-weight: 700; }
+.s .lede { margin: 0 0 var(--s5); color: var(--ink-2); max-width: 66ch; font-size: 17px; }
+.s h3 { margin: 0 0 var(--s1); font-size: 17px; font-weight: 650; letter-spacing: -0.005em; }
+.s p { max-width: 68ch; }
+
+.kinds { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--rule-strong); }
+.kinds div { padding: var(--s4) var(--s4) var(--s4) 0; }
+.kinds div + div { padding-left: var(--s4); border-left: 1px solid var(--rule); }
+.kinds h3 { display: flex; align-items: center; gap: var(--s2); font-family: var(--mono); font-size: 15px; }
+.kinds p { margin: 0; font-size: 15px; color: var(--ink-2); }
+
+.who { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--rule-strong); }
+.who > div { padding: var(--s5) var(--s5) var(--s5) 0; border-bottom: 1px solid var(--rule); }
+.who > div:nth-child(2n) { padding-left: var(--s5); padding-right: 0; border-left: 1px solid var(--rule); }
+.who p { margin: 0 0 var(--s3); color: var(--ink-2); font-size: 15px; }
+.who pre, .steps pre { margin: 0; font-size: 13px; background: var(--surface-2); border: 1px solid var(--rule); border-radius: 3px; padding: 8px 12px; overflow-x: auto; color: var(--ink); }
+
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: st; display: grid; gap: 0; border-top: 1px solid var(--rule-strong); }
+.steps li { counter-increment: st; display: grid; grid-template-columns: 48px minmax(0, 1fr) minmax(0, 1.2fr); gap: var(--s4); align-items: start; padding: var(--s4) 0; border-bottom: 1px solid var(--rule); }
+.steps li::before { content: counter(st); font: 600 var(--t-m)/1 var(--mono); color: var(--ink-3); border: 1px solid var(--rule-strong); border-radius: 3px; width: 28px; height: 28px; display: grid; place-items: center; }
+.steps p { margin: 0; color: var(--ink-2); font-size: 15px; }
+.steps p b { color: var(--ink); }
+.try { margin-top: var(--s4); display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; background: var(--surface-2); border: 1px solid var(--rule); border-radius: 4px; padding: var(--s3) var(--s4); }
+.try b { font-weight: 650; }
+.try code { font-size: 14px; background: var(--surface); border: 1px solid var(--rule-strong); padding: 3px 8px; border-radius: 3px; }
+.try span { color: var(--ink-2); font-size: 15px; }
+.try code, .alt code { overflow-wrap: anywhere; }
+
+.shots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s5); }
+.shots figure { margin: 0; }
+.frame { position: relative; aspect-ratio: 16 / 10; border: 1px solid var(--rule-strong); border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.frame img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+.frame .ph { position: absolute; inset: 0; display: none; place-content: center; text-align: center; padding: var(--s4); font-size: var(--t-s); color: var(--ink-3); }
+.frame .ph code { color: var(--ink-2); }
+.frame.missing img { display: none; }
+.frame.missing .ph { display: grid; }
+.frame.missing { background: repeating-linear-gradient(90deg, var(--surface-2) 0 calc(100% / 12 - 1px), var(--bay-line) calc(100% / 12 - 1px) calc(100% / 12)); }
+.shots figcaption { margin-top: var(--s2); font-size: var(--t-m); color: var(--ink-2); }
+.shots figcaption b { color: var(--ink); font-weight: 600; }
+
+.agents { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--s6); }
+.agents > div { padding: var(--s4) 0; border-top: 1px solid var(--rule); }
+.agents p { margin: 0; color: var(--ink-2); font-size: 15px; }
+
+.ex { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule-strong); }
+.ex li { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: var(--s5); padding: var(--s3) 0; border-bottom: 1px solid var(--rule); }
+.ex a { font-weight: 600; }
+.ex span { color: var(--ink-2); font-size: 15px; }
+
+.cmp-wrap { overflow-x: auto; border-top: 1px solid var(--rule-strong); }
+.num-wrap { overflow-x: auto; border-top: 1px solid var(--rule-strong); }
+table.num { width: 100%; border-collapse: collapse; font-size: 15px; }
+.num th, .num td { text-align: right; padding: var(--s2) 0 var(--s2) var(--s3); border-bottom: 1px solid var(--rule); font-variant-numeric: tabular-nums; }
+.num th:first-child { text-align: left; padding-left: 0; font-weight: 400; color: var(--ink-2); }
+.num thead th { font-size: var(--t-s); font-weight: 650; color: var(--ink-3); border-bottom-color: var(--rule-strong); }
+.num td:last-child, .num thead th:last-child { color: var(--ink); font-weight: 650; }
+.num-note { margin-top: var(--s3); color: var(--ink-2); }
+.num code { white-space: nowrap; }
+table.cmp { width: 100%; border-collapse: collapse; font-size: 15px; min-width: 720px; }
+.cmp th, .cmp td { text-align: left; vertical-align: top; padding: var(--s3) var(--s4) var(--s3) 0; border-bottom: 1px solid var(--rule); }
+.cmp thead th { font-size: var(--t-s); font-weight: 650; color: var(--ink-3); padding-top: var(--s2); border-bottom-color: var(--rule-strong); }
+.cmp tbody th { font-weight: 650; white-space: nowrap; }
+.cmp tbody th span { display: block; font-weight: 400; font-size: var(--t-s); color: var(--ink-3); white-space: normal; }
+.cmp td { color: var(--ink-2); }
+.cmp td:last-child { color: var(--ink); }
+
+.not { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s5); border-top: 1px solid var(--rule-strong); padding-top: var(--s4); }
+.not h3 { font-size: 20px; }
+.not p { margin: 0; color: var(--ink-2); font-size: 15px; }
+
+.ref { border-top: 1px solid var(--rule-strong); }
+.ref dl { margin: 0; display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); }
+.ref dt, .ref dd { margin: 0; padding: var(--s3) 0; border-bottom: 1px solid var(--rule); }
+.ref dt code { font-size: 14px; font-weight: 600; }
+.ref dd { color: var(--ink-2); font-size: 15px; }
+
+footer { margin-top: var(--s7); background: var(--band); color: var(--band-ink-2); font-size: var(--t-m); }
+footer .wrap { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); padding-top: var(--s5); padding-bottom: var(--s5); align-items: center; }
+footer a { color: var(--band-ink); }
+footer .brand { color: var(--band-ink); margin-right: auto; }
+
+@media (max-width: 900px) {
+  .kinds { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kinds div:nth-child(3) { padding-left: 0; border-left: 0; }
+  .kinds div:nth-child(n+3) { border-top: 1px solid var(--rule); }
+  .shots { grid-template-columns: 1fr; max-width: 560px; }
+  .steps li { grid-template-columns: 40px minmax(0, 1fr); }
+  .steps li pre { grid-column: 2; }
+  .not { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .wrap { padding: 0 var(--s4); }
+  .nav ul { margin-left: 0; width: 100%; order: 3; }
+  .nav .theme { margin-left: auto; }
+  .hero { padding-top: var(--s6); padding-bottom: calc(var(--s6) + 96px); }
+  .demo .legend { grid-column: 1; }
+  .demo .lanes > div:empty { display: none; }
+  .hero p { font-size: 16px; }
+  .demo { padding: var(--s3) var(--s3); }
+  .demo .lanes { grid-template-columns: 1fr; }
+  .cap-row { grid-template-columns: 1fr; }
+  .kinds, .who, .agents { grid-template-columns: 1fr; }
+  .kinds div, .kinds div + div { padding-left: 0; border-left: 0; border-top: 1px solid var(--rule); }
+  .kinds div:first-child { border-top: 0; }
+  .who > div, .who > div:nth-child(2n) { padding-left: 0; padding-right: 0; border-left: 0; }
+  .ex li, .ref dl { grid-template-columns: 1fr; gap: 0; }
+  .ref dt { border-bottom: 0; padding-bottom: 0; }
+  .s h2 { font-size: 24px; }
+  .install code { font-size: 12px; padding: 10px 12px; }
+  .cmp-wrap { overflow: visible; }
+  table.cmp, .cmp tbody, .cmp tr, .cmp th, .cmp td { display: block; min-width: 0; }
+  .cmp thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .cmp tr { padding: var(--s3) 0; border-bottom: 1px solid var(--rule); }
+  .cmp th, .cmp td { border: 0; padding: 0; }
+  .cmp tbody th { white-space: normal; margin-bottom: var(--s1); }
+  .cmp td::before { display: block; font-size: var(--t-s); font-weight: 650; color: var(--ink-3); margin-top: var(--s2); }
+  .cmp td:nth-of-type(1)::before { content: "What it does"; }
+  .cmp td:nth-of-type(2)::before { content: "Next to leasehold"; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<header class="band">
+  <div class="wrap nav">
+    <a class="brand" href="#top" aria-label="leasehold, top of page">
+      <svg viewBox="0 0 22 22" aria-hidden="true"><rect x="1" y="4" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7.67 4v14M14.33 4v14" stroke="currentColor" stroke-width="1.5"/><rect x="2.5" y="5.5" width="3.9" height="11" fill="currentColor"/><rect x="9" y="5.5" width="4" height="11" fill="currentColor"/></svg>
+      leasehold
+    </a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#quickstart">Quickstart</a></li>
+        <li><a href="#agents">For agents</a></li>
+        <li><a href="#examples">Examples</a></li>
+        <li><a href="#compare">Compare</a></li>
+        <li><a href="#reference">Reference</a></li>
+        <li><a href="https://github.com/chalkworth/leasehold">GitHub</a></li>
+      </ul>
+    </nav>
+    <fieldset class="theme" id="theme">
+      <legend>Theme</legend>
+      <label><input type="radio" name="theme" value="auto"><span>Auto</span></label>
+      <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+      <label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+    </fieldset>
+  </div>
+  <div class="wrap hero" id="top">
+    <h1>Run several coding agents on one Linux machine without it grinding to a halt.</h1>
+    <p>Each agent sizes its builds and test runs for the whole machine, so four at once ask for four machines. leasehold makes a heavy command take a <b>lease</b> on a share of the machine first: it waits its turn when the machine is full, runs sized to its share, and, where systemd allows it, runs in a cgroup weighted to that share. What an agent leaves running is stopped when it exits.</p>
+    <div class="install">
+      <code id="install-cmd">uv tool install leasehold</code>
+      <button class="copy" type="button" data-copy="install-cmd">Copy</button>
+    </div>
+    <p class="alt">Or try it in 30 seconds without installing: <code>uvx leasehold demo</code></p>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <section class="demo" aria-labelledby="demo-h">
+      <div class="demo-h">
+        <h2 id="demo-h">One machine, twelve slots</h2>
+        <span class="aside"><span>Illustration: a scripted sequence, not a live machine</span><button type="button" id="demo-toggle" aria-pressed="false">Pause</button></span>
+      </div>
+      <div class="lanes" id="demo-lanes" style="--n:12">
+        <div class="lane-k">Held</div>
+        <div class="lane" id="lane-held"><div class="bays"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+        <div class="lane-k">Waiting</div>
+        <div class="lane wait" id="lane-wait"><div class="bays"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+        <div></div>
+        <div class="legend"><span><i class="sw p-work"></i>work, reserves 4, max 6</span><span><i class="sw p-external"></i>external, max 8</span><span><i class="sw p-lend"></i>lend, preemptible</span><span><i class="sw p-observed"></i>observed</span><span><i class="sw res"></i>reserved, free</span></div>
+      </div>
+      <div class="cap-row">
+        <span class="step" id="demo-step">1 / 8</span>
+        <div>
+          <p class="caption" id="demo-caption" aria-live="off"></p>
+          <div class="ticks" id="demo-ticks" role="group" aria-label="Jump to step"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="s" aria-labelledby="h-kinds">
+      <h2 id="h-kinds">Four kinds of lease</h2>
+      <p class="lede">Every lease weighs one or more slots and lives as long as its holder keeps renewing it. A holder that dies stops renewing, and its slots come back on their own.</p>
+      <div class="kinds">
+        <div><h3><svg class="km c-work" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="currentColor"/></svg>work</h3><p>The owner's own work: builds, tests, agent tool calls. Its pool can reserve slots nobody else may take.</p></div>
+        <div><h3><svg class="km c-external" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1 11 11H1Z" fill="currentColor"/></svg>external</h3><p>Work that arrives from outside: CI runner jobs, test gates, other people's scripts.</p></div>
+        <div><h3><svg class="km c-lend" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.25" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>lend</h3><p>Spare capacity lent out only while the machine is idle, and revoked the moment other work needs it back.</p></div>
+        <div><h3><svg class="km c-observed" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2 7 7 2M5 10 10 5" stroke="currentColor" stroke-width="1.5"/></svg>observed</h3><p>A known app someone started outside leasehold, counted against the machine so others wait for it.</p></div>
+      </div>
+    </section>
+
+    <section class="s" aria-labelledby="h-who">
+      <h2 id="h-who">Who it is for</h2>
+      <p class="lede">First, one developer running several coding agents on one machine. The same daemon also serves machines that people and CI runners share.</p>
+      <div class="who">
+        <div><h3>Several coding agents</h3><p>Agents start builds and test runs whenever they like. Under <code>leasehold run</code>, their heavy commands take turns by agent session, sized to the share they hold.</p><pre>leasehold run -- claude</pre></div>
+        <div><h3>Test suites</h3><p>A parallel test run sized for an empty machine is wrong on a busy one. A lease sizes the run to the slots it holds, and the next suite waits its turn.</p><pre>leasehold hold -- pytest -n auto</pre></div>
+        <div><h3>CI runners on a shared box</h3><p>Several self-hosted runners on one machine start their jobs together and starve each other and the people working there. Each job step holds a lease, so heavy jobs queue instead of piling up.</p><pre>leasehold hold --kind external -- make test</pre></div>
+        <div><h3>People sharing a workstation</h3><p>A lab machine or a team build box. Everyone can see what holds the machine and why their job waits, in a terminal or a browser.</p><pre>leasehold top</pre></div>
+      </div>
+    </section>
+
+    <section class="s" id="measured" aria-labelledby="h-num">
+      <h2 id="h-num">What it changes, measured</h2>
+      <p class="lede">Eight simulated agents start test runs and memory-hungry builds at random on an 8-CPU, 16 GiB machine. The same 52 jobs each time.</p>
+      <div class="num-wrap">
+        <table class="num">
+          <thead><tr><th scope="col"></th><th scope="col">Unmanaged</th><th scope="col">nice, a slice or <code>-j4</code></th><th scope="col">leasehold</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Jobs killed by the OOM killer</th><td>0</td><td>5 to 9</td><td>0</td></tr>
+            <tr><th scope="row"><code>git status</code>, p95</th><td>981 ms</td><td>970 to 1130 ms</td><td>103 ms</td></tr>
+            <tr><th scope="row">How late a 10 ms sleep wakes, p99</th><td>25 ms</td><td>19 to 27 ms</td><td>3.3 ms</td></tr>
+            <tr><th scope="row">Swap read back</th><td>2.8 GiB</td><td>4.9 to 9.8 GiB</td><td>0.2 GiB</td></tr>
+            <tr><th scope="row">Time for all the work</th><td>566 s</td><td>579 to 630 s</td><td>848 s</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="num-note">The machine stays usable and nothing is lost, at a price: the work took up to 1.5 times as long, because heavy jobs wait their turn instead of overlapping. One machine and one run per condition so far. <a href="https://github.com/chalkworth/leasehold/blob/main/docs/bench.md">Method, full tables and caveats</a>.</p>
+    </section>
+
+    <section class="s" id="quickstart" aria-labelledby="h-quick">
+      <h2 id="h-quick">Quickstart</h2>
+      <p class="lede">Linux with Python and <a href="https://docs.astral.sh/uv/">uv</a>. The daemon runs as you; nothing needs root.</p>
+      <ol class="steps">
+        <li><p><b>Install</b> the command-line tool.</p><pre>uv tool install leasehold</pre></li>
+        <li><p><b>Set up</b>: a config sized for this machine, your own daemon as a systemd user service, and the PATH shims. Safe to repeat; <code>--remove</code> undoes it.</p><pre>leasehold setup</pre></li>
+        <li><p><b>Run an agent</b> as one session. Its heavy commands take leases; what it leaves running is stopped when it exits.</p><pre>leasehold run -- claude</pre></li>
+        <li><p><b>Watch</b> who holds the machine, who waits and why.</p><pre>leasehold top</pre></li>
+      </ol>
+      <div class="try"><b>Thirty-second try</b><code>uvx leasehold demo</code><span>runs a daemon and a scripted crowd of jobs, then shows them taking turns.</span></div>
+    </section>
+
+    <section class="s" aria-labelledby="h-shots">
+      <h2 id="h-shots">What it looks like</h2>
+      <p class="lede">The terminal view and the web view show the same thing: who holds the machine, who waits and why, and how much pressure it is under.</p>
+      <div class="shots">
+        <figure><div class="frame"><img src="media/top.png" alt="leasehold top in a terminal on a busy twelve-slot machine: an observed data-prep program pushes it two slots over its ceiling, pools with held and maximum slots, a table of leases, and three queued leases each with the reason it waits." width="956" height="630" loading="lazy" onerror="this.parentNode.classList.add('missing')"><div class="ph"><span>Screenshot pending<br><code>media/top.png</code></span></div></div><figcaption><b>leasehold top</b> in a terminal</figcaption></figure>
+        <figure><div class="frame"><img src="media/ui-dark.png" alt="The leasehold web view in the dark theme on a busy machine: nine of twelve slots held, three leases waiting, each with its reason, and CPU pressure above the lending limit." width="1440" height="1100" loading="lazy" onerror="this.parentNode.classList.add('missing')"><div class="ph"><span>Screenshot pending<br><code>media/ui-dark.png</code></span></div></div><figcaption><b>leasehold ui</b>, dark theme</figcaption></figure>
+        <figure><div class="frame"><img src="media/ui-light.png" alt="The same moment in the light theme: nine of twelve slots held, three leases waiting with their reasons, pressure sparklines for CPU, memory and IO." width="1440" height="1100" loading="lazy" onerror="this.parentNode.classList.add('missing')"><div class="ph"><span>Screenshot pending<br><code>media/ui-light.png</code></span></div></div><figcaption><b>leasehold ui</b>, light theme</figcaption></figure>
+      </div>
+    </section>
+
+    <section class="s" id="agents" aria-labelledby="h-agents">
+      <h2 id="h-agents">For agents</h2>
+      <p class="lede">Coding agents are the users most likely to start three builds at once. leasehold meets them where they already run commands.</p>
+      <div class="agents">
+        <div><h3>Claude Code plugin</h3><p>Takes a lease around an agent's heavy commands and labels it with the agent session, so one person's sessions take turns with each other as well as with everyone else.</p></div>
+        <div><h3>PATH shims</h3><p>Stand-ins for build and test commands that run the real command under a lease. Agents and scripts get turn-taking without changing how they call their tools.</p></div>
+        <div><h3>MCP server</h3><p>Lets an agent ask how busy the machine is, why its work is waiting, and hold a lease, through MCP tools instead of parsing terminal output.</p></div>
+        <div><h3>Jobserver sizing</h3><p>A lease can size a GNU make jobserver, so <code>make -j</code> and other jobserver-aware tools run as many jobs as the lease holds slots, not as many as the machine has cores.</p></div>
+      </div>
+    </section>
+
+    <section class="s" id="examples" aria-labelledby="h-ex">
+      <h2 id="h-ex">Examples</h2>
+      <p class="lede">Each one is a short, runnable setup in the repository.</p>
+      <ul class="ex">
+        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/github-runner">GitHub runner</a><span>Self-hosted runners on one box, each job step holding an <code>external</code> lease weighted by how heavy it is.</span></li>
+        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/test-suite">Test suite and <code>make -j</code></a><span>A test run and a parallel build sized to the slots they hold.</span></li>
+        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/agents">Several agents, fairly</a><span>Two users and four agent sessions on one machine, taking turns per user and then per session.</span></li>
+        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/lend">Lending and revocation</a><span>An idle machine lends slots; other work arrives and the lent lease is revoked.</span></li>
+        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/library">Library-only use</a><span>The admission policy as a Python library, with no daemon.</span></li>
+        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/observed">Observed apps</a><span>A rule that counts a known app started outside leasehold, so others wait while it runs.</span></li>
+      </ul>
+    </section>
+
+    <section class="s" id="compare" aria-labelledby="h-cmp">
+      <h2 id="h-cmp">How it compares</h2>
+      <p class="lede">Most of these are good tools that solve a nearby problem. Pick the one whose shape fits yours.</p>
+      <div class="cmp-wrap">
+        <table class="cmp">
+          <thead><tr><th scope="col">Tool</th><th scope="col">What it does</th><th scope="col">Next to leasehold</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">flock, sem<span>util-linux, GNU parallel</span></th><td>One lock file, or a counting semaphore of N slots, around a command.</td><td>No weights, users, sessions or load. Enough for one person and one kind of job; leasehold adds turn-taking across users and weighted slots.</td></tr>
+            <tr><th scope="row">pueue, task-spooler, nq</th><td>Hand a command to a queue that runs it later, with a limit on how many run at once.</td><td>They own and run the job; leasehold only admits it, so the job keeps running in your shell, CI step or agent. Their queues are per user, not shared fairly across users.</td></tr>
+            <tr><th scope="row">consul lock</th><td>A lock or semaphore held in a Consul cluster's key-value store.</td><td>Spans many machines but needs a Consul cluster, and knows nothing about the machine's load.</td></tr>
+            <tr><th scope="row">systemd slices</th><td>cgroup weights and limits for the CPU, memory and IO of running processes.</td><td>Shares resources among what already runs; never makes work wait to start. They combine well: slices shape running work, leasehold decides when it starts.</td></tr>
+            <tr><th scope="row">Slurm, HTCondor, Nomad</th><td>Cluster schedulers: submit jobs, place them on nodes, account for use.</td><td>Built for many machines and much more to run. leasehold suits the one shared box where a cluster scheduler would be out of proportion.</td></tr>
+            <tr><th scope="row">agent-semaphore</th><td>Coordinates parallel coding agents on one repository: claims on code scopes, conflict warnings, a landing queue.</td><td>About who edits and merges what, not the machine: it does not limit how many builds and test runs share the CPUs and memory. The two fit together.</td></tr>
+            <tr><th scope="row">steve<span>system-wide jobserver</span></th><td>One GNU make jobserver shared by every jobserver-aware build on the machine.</td><td>Reaches only tools that speak the jobserver protocol, with no users, pools or expiry. leasehold can size a jobserver from a lease instead.</td></tr>
+            <tr><th scope="row">GitHub Actions concurrency</th><td>At most one running job per concurrency group in a repository or organisation.</td><td>Knows workflows, not the machine: it cannot see other users, agents or the load on a self-hosted runner's box.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="s" aria-labelledby="h-not">
+      <h2 id="h-not">What it is not</h2>
+      <div class="not">
+        <div><h3>Not a sandbox</h3><p>Where a systemd user manager is available, each command runs in a scope weighted to its lease, with soft memory limits (<b>enforced</b>). Elsewhere leases and sizing still apply, but a command that ignores its job count is not held back (<b>advisory</b>). <code>leasehold doctor</code> says which.</p></div>
+        <div><h3>Not a scheduler</h3><p>It never runs, places or retries your jobs. It says when they may start and how many slots they may hold; your shell, CI runner or agent runs them.</p></div>
+        <div><h3>One machine only</h3><p>One daemon per machine, with no cluster, no federation and no network of daemons. Several machines means several independent daemons.</p></div>
+        <div><h3>Linux only</h3><p>It reads pressure stall information from <code>/proc/pressure</code> and works with cgroup v2. It does not run on macOS or Windows.</p></div>
+      </div>
+    </section>
+
+    <section class="s" id="reference" aria-labelledby="h-ref">
+      <h2 id="h-ref">Reference</h2>
+      <p class="lede">The full reference, configuration and API live in the repository: <a href="https://github.com/chalkworth/leasehold#readme">README</a> and <a href="https://github.com/chalkworth/leasehold/blob/main/docs/reference.md">the reference</a>.</p>
+      <div class="ref">
+        <dl>
+          <dt><code>leasehold setup</code></dt><dd>Config, your own daemon and the PATH shims, in one step.</dd>
+          <dt><code>leasehold run -- &lt;agent&gt;</code></dt><dd>Run an agent as one session: its heavy commands leased, its leftovers stopped.</dd>
+          <dt><code>leasehold hold -- &lt;cmd&gt;</code></dt><dd>Wait for a lease, run the command while holding it, release it on exit.</dd>
+          <dt><code>leasehold top</code></dt><dd>Live terminal view of slots, pools, leases and the queue.</dd>
+          <dt><code>leasehold ui</code></dt><dd>Print a local link to the web view, with its access token.</dd>
+          <dt><code>leasehold demo</code></dt><dd>Run a daemon and a scripted crowd of jobs to watch them take turns.</dd>
+        </dl>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="brand">leasehold</span>
+    <a href="https://github.com/chalkworth/leasehold">Source on GitHub</a>
+    <a href="https://github.com/chalkworth/leasehold#readme">README</a>
+    <a href="https://github.com/chalkworth/leasehold/issues">Issues</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+'use strict';
+/* theme */
+var cur = document.documentElement.getAttribute('data-theme') || 'auto';
+Array.prototype.forEach.call(document.querySelectorAll('#theme input'), function (r) {
+  r.checked = r.value === cur;
+  r.addEventListener('change', function () {
+    var v = r.value;
+    if (v === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', v);
+    try { if (v === 'auto') localStorage.removeItem('leasehold-theme'); else localStorage.setItem('leasehold-theme', v); } catch (e) {}
+  });
+});
+/* copy */
+Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (b) {
+  b.addEventListener('click', function () {
+    var text = document.getElementById(b.getAttribute('data-copy')).textContent;
+    var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); };
+    try { navigator.clipboard.writeText(text).then(done, function () { b.textContent = 'Select and copy'; }); } catch (e) { b.textContent = 'Select and copy'; }
+  });
+});
+
+/* demo: illustrative frames of one 12-slot machine */
+var POOLS = ['work', 'external', 'lend', 'observed'];
+var RES = { work: 4 };
+var L = {
+  dave:  { u: 'dave', d: 'lend', pool: 'lend', w: 6 },
+  ci:    { u: 'runner', d: 'acme/api test', pool: 'external', w: 4 },
+  a1:    { u: 'alice', d: 'pytest -n auto', pool: 'work', w: 2 },
+  a2:    { u: 'alice', d: 'cargo build', pool: 'work', w: 2 },
+  a3:    { u: 'alice', d: 'npm run lint', pool: 'work', w: 2 },
+  bm:    { u: 'bob', d: 'make -j', pool: 'work', w: 1 },
+  bc:    { u: 'bob', d: 'npm test', pool: 'work', w: 2 },
+  carol: { u: 'carol', d: 'training-prep', pool: 'observed', w: 3 }
+};
+var F = [
+  { held: [], wait: [], c: 'An idle machine: all 12 slots free, 4 of them reserved for the <b>work</b> pool.' },
+  { held: ['dave'], wait: [], c: 'Quiet for ten minutes, so lending opens. dave borrows 6 spare slots from the <b>lend</b> pool.' },
+  { held: ['dave'], rv: ['dave'], wait: ['ci'], c: 'A CI job asks for 4 slots. Lent capacity is needed back, so dave’s lease is revoked at once.', why: 'Machine has 2 slots free outside work’s reservation; this needs 4.' },
+  { held: ['ci'], wait: [], c: 'dave releases. The CI job starts with 4 slots, and lending stays closed while work is waiting.' },
+  { held: ['bm', 'a1', 'a2', 'ci'], wait: [], c: 'Two of alice’s agent sessions take 2 slots each in <b>work</b>; bob’s build takes 1.' },
+  { held: ['bm', 'a1', 'a2', 'ci'], wait: ['a3', 'bc'], c: 'alice’s third session asks first, then bob’s agent. Both wait: work is at 5 of its maximum 6.', why: 'Pool work is at 5 of 6; this needs 2.' },
+  { held: ['bm', 'a2', 'bc', 'ci'], wait: ['a3'], c: 'alice’s test run finishes. The turn goes to bob, not to alice’s third session: turns rotate by user first.', why: 'Pool work is at 5 of 6; this needs 2.' },
+  { held: ['bm', 'a2', 'bc', 'ci', 'carol'], wait: ['a3'], c: 'carol starts a known training job outside leasehold. It is <b>observed</b> and counted as 3 slots, so the machine is full.', why: 'Machine has 0 of 12 slots free.' }
+];
+var held = document.getElementById('lane-held'), wait = document.getElementById('lane-wait');
+var cap = document.getElementById('demo-caption'), stepEl = document.getElementById('demo-step');
+var ticks = document.getElementById('demo-ticks'), btn = document.getElementById('demo-toggle');
+var els = {};
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function el(key, lane) {
+  var id = key + ':' + lane;
+  if (!els[id]) {
+    var d = document.createElement('div'), l = L[key] || {};
+    d.className = 'blk gone';
+    d.innerHTML = '<span class="u">' + esc(l.u || '') + '</span><span class="d">' + esc(l.d || '') + '</span><span class="i">' + esc((l.u || 'R').charAt(0)) + '</span>';
+    (lane === 'w' ? wait : held).appendChild(d);
+    els[id] = d;
+  }
+  return els[id];
+}
+function place(d, x, w) { d.style.setProperty('--x', x); d.style.setProperty('--w', w); }
+var resEl = document.createElement('div');
+resEl.className = 'blk res c-work gone';
+resEl.innerHTML = '<span class="u">work</span><span class="d">reserved</span><span class="i">R</span>';
+held.appendChild(resEl);
+function show(i) {
+  var f = F[i], seen = {}, x = 0, wx = 0;
+  POOLS.forEach(function (p) {
+    var inPool = 0;
+    f.held.forEach(function (k) {
+      if (L[k].pool !== p) return;
+      var d = el(k, 'h');
+      d.className = 'blk p-' + p + ((f.rv || []).indexOf(k) >= 0 ? ' rv' : '');
+      place(d, x, L[k].w); x += L[k].w; inPool += L[k].w; seen[k + ':h'] = 1;
+    });
+    if (RES[p] && RES[p] > inPool) {
+      resEl.classList.remove('gone'); place(resEl, x, RES[p] - inPool); x += RES[p] - inPool; seen.res = 1;
+    }
+  });
+  if (!seen.res) resEl.classList.add('gone');
+  f.wait.forEach(function (k) {
+    var d = el(k, 'w');
+    d.className = 'blk q p-' + L[k].pool;
+    place(d, wx, L[k].w); wx += L[k].w; seen[k + ':w'] = 1;
+  });
+  Object.keys(els).forEach(function (id) { if (!seen[id]) els[id].classList.add('gone'); });
+  cap.innerHTML = f.c + (f.why ? '<br><span class="why">' + esc(f.why) + '</span>' : '');
+  stepEl.textContent = (i + 1) + ' / ' + F.length;
+  Array.prototype.forEach.call(ticks.children, function (b, j) { if (j === i) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current'); });
+}
+F.forEach(function (_, j) {
+  var b = document.createElement('button');
+  b.type = 'button'; b.setAttribute('aria-label', 'Step ' + (j + 1));
+  b.addEventListener('click', function () { at = j; show(j); stop(); });
+  ticks.appendChild(b);
+});
+var at = 0, timer = null;
+var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+function start() { if (timer) return; timer = setInterval(function () { at = (at + 1) % F.length; show(at); }, 3600); btn.textContent = 'Pause'; btn.setAttribute('aria-pressed', 'false'); }
+function stop() { clearInterval(timer); timer = null; btn.textContent = 'Play'; btn.setAttribute('aria-pressed', 'true'); }
+btn.addEventListener('click', function () { if (timer) stop(); else start(); });
+var q = new URLSearchParams(location.search).get('step');
+if (q) { at = Math.max(0, Math.min(F.length - 1, parseInt(q, 10) - 1 || 0)); show(at); stop(); }
+else { at = 5; show(at); if (!reduce) start(); else stop(); }
+})();
+</script>
+</body>
+</html>

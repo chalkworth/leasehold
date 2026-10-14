@@ -1,0 +1,60 @@
+# leasehold config for your own daemon on $name.
+# $about
+# Made by `leasehold init` (or `leasehold setup`); `leasehold doctor` checks it. Only
+# [ceiling] slots is required; the reference (docs/reference.md) lists every key.
+
+name = "$name"
+mode = "user"            # your own daemon; `leasehold init --system` writes the machine's
+# socket and ledger_dir: by default $$XDG_RUNTIME_DIR/leasehold/leasehold.sock and
+# $$XDG_STATE_HOME/leasehold; the socket is yours alone (mode 0600)
+
+# Slots are what leases share, one per CPU given to leasehold's work; what is left is kept for
+# you (your editor, browser and shell). cpus and memory are the most one lease may be given.
+[ceiling]
+slots = $slots
+cpus = $cpus
+memory = "$memory"
+
+# Two pools. Your agents' and your own commands go in `work`; `hold --kind external` (a CI
+# runner's job, a batch run) goes in `background`, which never takes work's reserved slots and
+# is served after it.
+[pools.work]
+reserved = $work_reserved
+max = $slots
+priority = 0
+
+[pools.background]
+reserved = 0
+max = $background_max
+priority = 1
+
+[kinds]
+work = "work"
+external = "background"
+
+[lend]
+pools = []               # no lending on a personal machine; see docs/reference.md, Lending
+
+# Containment: commands leasehold starts run in a systemd user scope weighted to their lease
+# (CPUWeight 100 per slot) where your systemd user manager allows it.
+[contain]
+mode = "auto"            # "off": never
+hard_cpu = false         # true: also cap a command at its weight in CPUs
+
+# While memory is short, every pool admits only its reserved slots: what runs keeps running,
+# the rest waits in line and says why.
+[guard]
+memory_pressure_on = 20.0     # PSI some avg10, percent
+memory_pressure_off = 5.0
+# min_available = "2g"        # default: 5% of memory, at least 512 MiB
+settle_s = 30
+
+# Which commands take a lease when an agent (or you, through the shims) runs them. The built-in
+# rules cover common builds and test runs; `leasehold commands` lists them.
+[commands]
+wait_s = 20              # how long a command waits for its lease...
+when_busy = "deny"       # ...then: "deny" it with the reason, or "run" it without a lease
+# [[commands.rule]]
+# programs = ["pytest"]
+# weight = 8
+# memory = "8g"          # held to this when contained (MemoryHigh)

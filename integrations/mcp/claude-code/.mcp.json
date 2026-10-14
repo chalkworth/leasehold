@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "leasehold": {
+      "type": "stdio",
+      "command": "leasehold",
+      "args": ["mcp"]
+    }
+  }
+}

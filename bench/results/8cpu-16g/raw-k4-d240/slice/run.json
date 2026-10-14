@@ -1,0 +1,21 @@
+{
+ "start": 1792003101.8982632,
+ "end": 1792003405.2988255,
+ "aborted": null,
+ "cgroups": {
+  "harness": {
+   "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/lhbench-slice-740407.scope",
+   "oom_kill": 0,
+   "high": 0,
+   "max": 0,
+   "peak": 35004416
+  },
+  "jobs": {
+   "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/lhbenchjobs_a54843.slice",
+   "oom_kill": 0,
+   "high": 0,
+   "max": 0,
+   "peak": 4027076608
+  }
+ }
+}

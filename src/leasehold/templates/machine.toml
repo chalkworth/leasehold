@@ -1,0 +1,88 @@
+# leasehold machine config for $name.
+# $about
+# Made by `leasehold init`; `leasehold doctor` checks it. Only [ceiling] slots is required; the
+# reference (docs/reference.md) lists every key.
+
+name = "$name"
+mode = "$mode"           # which daemon this is for: "system" (one for the machine) or "user"
+$paths
+# admin_group = "wheel"     # may switch lending and change pool limits; root and the daemon's
+#                           # own user always may
+tick_s = 2.0
+lease_ttl_s = 15.0          # a holder renews every ttl/3; one that stops loses its lease
+
+[labels]
+# site = "rack1"            # free key = "value" pairs, shown in status
+
+# The self-cap: nothing a client asks for exceeds it. Slots are what the pools share, often one
+# per CPU; cpus and memory are the most one lease may be given (default: the whole machine).
+[ceiling]
+slots = $slots
+cpus = $cpus
+memory = "$memory"
+
+# How the slots are split. A pool's `reserved` slots are never taken by another pool; `max` is
+# the most it may hold; lower `priority` is served first. Leave [pools] out for this same split.
+[pools.work]                # your own builds, tests and agents' tool calls
+reserved = $work_reserved
+max = $work_max
+priority = 0
+
+[pools.external]            # work that arrives from outside: CI runners, other people's jobs
+reserved = 0
+max = $external_max
+priority = 1
+
+[pools.lend]                # spare capacity, lent only while the machine is idle and revoked
+reserved = 0                # when other work needs it; a lend pool never reserves
+max = $lend_max
+priority = 2
+
+# Programs seen running that never asked for a lease ([[observe]] below) are charged here. It
+# may hold the whole machine: an observed program is already running, so it is never refused.
+[pools.observed]
+reserved = 0
+max = $slots
+priority = 3
+
+# Long-lived work outside leasehold that permanently occupies capacity: a VM, a database. Its
+# weight counts as held in its pool without being a lease. cpus, memory and note only describe
+# it.
+# [[standing]]
+# name = "test-vm"
+# kind = "vm"
+# pool = "external"
+# weight = 2
+# note = "the integration-test VM"
+
+# Known heavy programs people start by hand, outside leasehold: while one runs, its weight is
+# held in the observed pool, so new work waits instead of piling on. A process counts when it
+# matches and no ancestor matches the same rule (a job's workers are part of the job). Seen
+# within one tick. `leasehold observe` shows what the rules match right now.
+# [[observe]]
+# name = "training-prep"
+# weight = 6
+# max_count = 2             # count at most two at once (default: no limit)
+# [observe.match]           # every field given must match
+# cmdline = "prep_dataset\\.py"   # a regular expression, searched in the command line
+# comm = "python3"          # the kernel's process name, exactly
+# user = "ann"              # the process's owner
+
+# Which pool a kind goes to when a request names none (these are the defaults).
+[kinds]
+work = "work"
+external = "external"
+lend = "lend"
+observed = "observed"
+
+[lend]
+pools = ["lend"]
+quiet_s = 600               # idle this long before lending
+cpu_pressure_max = 10.0     # PSI some avg10, percent
+memory_pressure_max = 5.0
+load_per_cpu_max = 0.25     # used only without PSI
+# window = "00:00-07:00"    # local time; may wrap midnight
+revoke_grace_s = 30
+# Measure pressure over everything but lend.slice, so lent work never revokes itself. Lent
+# work must then run in lend.slice (systemd-run --slice=lend.slice ...).
+# pressure_cgroups = ["work.slice", "runner.slice", "system.slice", "user.slice"]

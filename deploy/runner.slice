@@ -1,0 +1,9 @@
+# CI runners (leasehold kind: external). Start an ephemeral runner only while it holds a lease.
+# Install as /etc/systemd/system/runner.slice. The numbers are placeholders.
+[Unit]
+Description=CI runners (leasehold kind: external)
+Before=slices.target
+
+[Slice]
+CPUWeight=200
+MemoryMax=16G

@@ -1,0 +1,15 @@
+## Shared machine: leasehold
+
+This machine is shared, and leasehold decides who runs heavy work when. Builds, test suites
+and container builds take a lease of some slots; when the machine is full they wait their turn
+instead of slowing everyone down.
+
+- Before heavy work, `leasehold status` shows how busy the machine is and who is waiting. When
+  it is full, do light work (read, edit, write tests) first.
+- Run heavy commands as `leasehold hold --weight N -- <command>`, unless this machine's shims
+  or agent hooks already do it for you (`leasehold commands --test "<command>"` says whether
+  a command takes a lease, and how heavy it is).
+- Exit 75 means the machine stayed busy until the timeout: retry later. Exit 77 means the
+  request can never fit: ask for a smaller weight. Exit 69 means no daemon: run without it.
+- Never run a heavy command a way that avoids the lease (another name, a full path, a
+  wrapper): it only makes everyone's work slower, yours included.

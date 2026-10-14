@@ -1,0 +1,74 @@
+[project]
+name = "leasehold"
+dynamic = ["version"]
+description = "Fair, load-aware admission for one shared Linux machine: CI runners, test suites and coding agents take turns"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Matthew Strudwick" }]
+keywords = [
+    "admission-control", "scheduling", "fair-share", "semaphore", "lease", "jobserver",
+    "ci", "github-actions", "self-hosted-runner", "coding-agents", "mcp", "psi", "linux",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
+# Only pydantic: the admission decision, the ledger and the process identity are otherwise stdlib.
+dependencies = ["pydantic>=2.7"]
+
+[project.urls]
+Homepage = "https://github.com/chalkworth/leasehold"
+Documentation = "https://github.com/chalkworth/leasehold/blob/main/docs/reference.md"
+Changelog = "https://github.com/chalkworth/leasehold/blob/main/CHANGELOG.md"
+Issues = "https://github.com/chalkworth/leasehold/issues"
+
+[project.optional-dependencies]
+# `leasehold mcp`: an MCP server for coding agents, on the official MCP Python SDK.
+mcp = ["mcp>=2.3"]
+
+[project.scripts]
+leasehold = "leasehold.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]  # PEP 639 licence metadata
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/leasehold/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/leasehold"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "import-linter>=2.1", "mcp>=2.3"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Pyflakes and pycodestyle, plus import order, bugbear, pyupgrade, simplify, blind excepts
+# and ruff's own rules.
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "BLE"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["leasehold"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

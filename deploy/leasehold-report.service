@@ -1,0 +1,33 @@
+# Pushes this machine's leasehold status (GET /v1/status, as JSON) to a URL every 30 s: a
+# dashboard, an alerting system, a fleet view. Install as
+# /etc/systemd/system/leasehold-report.service and set the URL. The bearer token, if the
+# receiver wants one, is /etc/leasehold/report.token (root-only, mode 0600): systemd hands the
+# reporter a private copy. Drop LoadCredential and --token-file if there is none.
+#
+# It runs as a user of its own (DynamicUser) in the leasehold group: it may read the status
+# but is not the daemon's user, so it is no administrator.
+[Unit]
+Description=leasehold status reporter
+After=network-online.target leasehold.service
+Wants=network-online.target leasehold.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+SupplementaryGroups=leasehold
+LoadCredential=report.token:/etc/leasehold/report.token
+ExecStart=/opt/leasehold/bin/leasehold --socket /run/leasehold/leasehold.sock report --url https://status.example.com/leasehold --token-file ${CREDENTIALS_DIRECTORY}/report.token
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+# The daemon's socket is AF_UNIX; the report itself leaves the machine.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

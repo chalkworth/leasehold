@@ -1,0 +1,163 @@
+{
+ "machine": {
+  "cpus": 8,
+  "memory_bytes": 16775348224,
+  "swap_bytes": 8589930496,
+  "kernel": "6.12.101+deb13-amd64",
+  "virt": "kvm",
+  "python": "3.12.14",
+  "class": "8cpu-16g"
+ },
+ "seed": 1,
+ "agents": 4,
+ "preset_name": "full",
+ "preset": {
+  "duration_s": 240.0,
+  "think_s": 30,
+  "cpu_s": 10,
+  "mem_s": 6,
+  "p_mem": 0.35
+ },
+ "conditions": [
+  "unmanaged",
+  "nice",
+  "slice",
+  "lh-advisory",
+  "lh-enforced",
+  "lh-advisory-greedy",
+  "lh-enforced-greedy",
+  "lh-hardcpu-greedy",
+  "static-jobs"
+ ],
+ "plan": [
+  [
+   [
+    38.84,
+    "cpu"
+   ],
+   [
+    13.89,
+    "cpu"
+   ],
+   [
+    52.06,
+    "mem"
+   ],
+   [
+    21.97,
+    "mem"
+   ],
+   [
+    14.59,
+    "cpu"
+   ],
+   [
+    61.77,
+    "cpu"
+   ]
+  ],
+  [
+   [
+    37.8,
+    "cpu"
+   ],
+   [
+    0.15,
+    "cpu"
+   ],
+   [
+    45.7,
+    "mem"
+   ],
+   [
+    1.41,
+    "cpu"
+   ],
+   [
+    42.87,
+    "cpu"
+   ],
+   [
+    12.42,
+    "mem"
+   ],
+   [
+    62.25,
+    "cpu"
+   ]
+  ],
+  [
+   [
+    3.1,
+    "mem"
+   ],
+   [
+    18.98,
+    "cpu"
+   ],
+   [
+    103.51,
+    "mem"
+   ],
+   [
+    120,
+    "mem"
+   ]
+  ],
+  [
+   [
+    5.82,
+    "cpu"
+   ],
+   [
+    12.24,
+    "mem"
+   ],
+   [
+    6.71,
+    "mem"
+   ],
+   [
+    4.79,
+    "cpu"
+   ],
+   [
+    31.72,
+    "cpu"
+   ],
+   [
+    13.44,
+    "cpu"
+   ],
+   [
+    25.69,
+    "cpu"
+   ],
+   [
+    70.78,
+    "mem"
+   ]
+  ]
+ ],
+ "nominal_s": {
+  "cpu": 10,
+  "mem": 8.936410410702464
+ },
+ "rate_bytes_per_cpu_s": 757013643.3329049,
+ "touch_s_per_gib": 0.8055051025003195,
+ "work": {
+  "cpu": 60561091466,
+  "mem": 36336654879
+ },
+ "mem_bytes": 3914247918,
+ "cap_bytes": 9297727488,
+ "swap_bytes": 2147483648,
+ "weights": {
+  "cpu": 4,
+  "mem": 4
+ },
+ "slice_weight": 20,
+ "git_repo": "a 50000-file repository",
+ "abort_available_bytes": 536870912,
+ "job_timeout_s": 400
+}

@@ -1,0 +1,291 @@
+{
+ "schema": 2,
+ "time": 1760400000.0,
+ "version": "0.2.0",
+ "machine": {
+  "name": "buildbox",
+  "labels": {
+   "site": "rack1"
+  }
+ },
+ "facts": {
+  "arch": "x86_64",
+  "cpus_logical": 16,
+  "cpus_physical": 8,
+  "memory_bytes": 68719476736,
+  "kvm": true,
+  "kernel": "6.12.0",
+  "os": "Debian GNU/Linux 13"
+ },
+ "ceiling": {
+  "slots": 12,
+  "cpus": 16.0,
+  "memory": "48g",
+  "memory_bytes": 51539607552
+ },
+ "slots": 12,
+ "held": 12,
+ "overcommitted": 0,
+ "mode": "system",
+ "pools": {
+  "work": {
+   "reserved": 4,
+   "max": 6,
+   "priority": 0,
+   "preemptible": false,
+   "observed": false,
+   "closed": false,
+   "held_weight": 5,
+   "running": 3,
+   "revoked": 0,
+   "queued": 1,
+   "overcommitted": 0
+  },
+  "external": {
+   "reserved": 0,
+   "max": 8,
+   "priority": 1,
+   "preemptible": false,
+   "observed": false,
+   "closed": false,
+   "held_weight": 4,
+   "running": 1,
+   "revoked": 0,
+   "queued": 1,
+   "overcommitted": 0
+  },
+  "lend": {
+   "reserved": 0,
+   "max": 8,
+   "priority": 2,
+   "preemptible": true,
+   "observed": false,
+   "closed": true,
+   "held_weight": 0,
+   "running": 0,
+   "revoked": 0,
+   "queued": 0,
+   "overcommitted": 0
+  },
+  "observed": {
+   "reserved": 0,
+   "max": 12,
+   "priority": 3,
+   "preemptible": false,
+   "observed": true,
+   "closed": false,
+   "held_weight": 3,
+   "running": 1,
+   "revoked": 0,
+   "queued": 0,
+   "overcommitted": 0
+  }
+ },
+ "load": {
+  "pressure": {
+   "cpu": {
+    "some": {
+     "avg10": 38.2,
+     "avg60": 30.560000000000002
+    },
+    "full": {
+     "avg10": 9.55,
+     "avg60": 7.640000000000001
+    }
+   },
+   "memory": {
+    "some": {
+     "avg10": 2.1,
+     "avg60": 1.6800000000000002
+    },
+    "full": {
+     "avg10": 0.525,
+     "avg60": 0.42000000000000004
+    }
+   },
+   "io": {
+    "some": {
+     "avg10": 6.4,
+     "avg60": 5.120000000000001
+    },
+    "full": {
+     "avg10": 1.6,
+     "avg60": 1.28
+    }
+   }
+  },
+  "loadavg": [
+   11.4,
+   9.8,
+   7.2
+  ],
+  "mem_available_bytes": 21474836480,
+  "mem_total_bytes": 68719476736,
+  "cgroup_v2": true,
+  "slices": {}
+ },
+ "lend": {
+  "eligible": false,
+  "reason": "cpu pressure 38.2% is above 10%",
+  "quiet_since": null,
+  "quiet_s": 600,
+  "window": null,
+  "pools": [
+   "lend"
+  ],
+  "switch": true,
+  "thresholds": {
+   "cpu": 10.0,
+   "memory": 5.0,
+   "load_per_cpu": 0.25
+  }
+ },
+ "standing": [],
+ "observe": [
+  {
+   "name": "training-prep",
+   "weight": 3,
+   "pool": "observed",
+   "max_count": null,
+   "running": 1
+  }
+ ],
+ "leases": [
+  {
+   "lease_id": "gh.buildbox-1.8812.1.test",
+   "kind": "external",
+   "pool": "external",
+   "weight": 4,
+   "user": "runner",
+   "session": null,
+   "labels": {
+    "consumer": "github-runner",
+    "repository": "acme/api",
+    "job": "test"
+   },
+   "ttl_s": 15,
+   "expires_at": 1760400011.0,
+   "acquired_at": 1760399588.0,
+   "grant": 1841,
+   "revoked": false,
+   "revoked_at": null,
+   "revoke_reason": null,
+   "revoke_deadline": null
+  },
+  {
+   "lease_id": "cc.toolu_01H8",
+   "kind": "work",
+   "pool": "work",
+   "weight": 2,
+   "user": "alice",
+   "session": "cc-7f3a",
+   "labels": {
+    "agent": "claude-code",
+    "cmd": "pytest -n auto"
+   },
+   "ttl_s": 15,
+   "expires_at": 1760400009.0,
+   "acquired_at": 1760399905.0,
+   "grant": 1852,
+   "revoked": false,
+   "revoked_at": null,
+   "revoke_reason": null,
+   "revoke_deadline": null
+  },
+  {
+   "lease_id": "cc.toolu_01K2",
+   "kind": "work",
+   "pool": "work",
+   "weight": 2,
+   "user": "alice",
+   "session": "cc-91be",
+   "labels": {
+    "agent": "claude-code",
+    "cmd": "cargo build --release"
+   },
+   "ttl_s": 15,
+   "expires_at": 1760400013.0,
+   "acquired_at": 1760399969.0,
+   "grant": 1855,
+   "revoked": false,
+   "revoked_at": null,
+   "revoke_reason": null,
+   "revoke_deadline": null
+  },
+  {
+   "lease_id": "3c1f0a9e2b7d",
+   "kind": "work",
+   "pool": "work",
+   "weight": 1,
+   "user": "bob",
+   "session": null,
+   "labels": {
+    "cmd": "make -j"
+   },
+   "ttl_s": 15,
+   "expires_at": 1760400006.0,
+   "acquired_at": 1760398790.0,
+   "grant": 1799,
+   "revoked": false,
+   "revoked_at": null,
+   "revoke_reason": null,
+   "revoke_deadline": null
+  },
+  {
+   "lease_id": "observed.training-prep.48211",
+   "kind": "observed",
+   "pool": "observed",
+   "weight": 3,
+   "user": "carol",
+   "session": null,
+   "labels": {
+    "rule": "training-prep"
+   },
+   "ttl_s": null,
+   "expires_at": null,
+   "acquired_at": 1760396400.0,
+   "grant": 1700,
+   "revoked": false,
+   "revoked_at": null,
+   "revoke_reason": null,
+   "revoke_deadline": null
+  }
+ ],
+ "queue": [
+  {
+   "lease_id": "cc.toolu_01M9",
+   "kind": "work",
+   "pool": "work",
+   "weight": 2,
+   "user": "bob",
+   "session": "codex-2",
+   "labels": {
+    "agent": "codex",
+    "cmd": "npm test"
+   },
+   "ttl_s": 15,
+   "expires_at": 1760400014.0,
+   "queued_at": 1760399952.0,
+   "position": 1,
+   "blocked": "pool work is at 5 of 6; this needs 2"
+  },
+  {
+   "lease_id": "gh.buildbox-2.8813.1.lint",
+   "kind": "external",
+   "pool": "external",
+   "weight": 4,
+   "user": "runner",
+   "session": null,
+   "labels": {
+    "consumer": "github-runner",
+    "repository": "acme/web",
+    "job": "e2e"
+   },
+   "ttl_s": 15,
+   "expires_at": 1760400012.0,
+   "queued_at": 1760399980.0,
+   "position": 1,
+   "blocked": "machine has 0 of 12 slots free"
+  }
+ ]
+}

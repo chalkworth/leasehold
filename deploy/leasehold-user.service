@@ -1,0 +1,18 @@
+# A leasehold daemon of your own, no root needed. Install as
+# ~/.config/systemd/user/leasehold.service, then `systemctl --user enable --now leasehold`.
+# Its socket is $XDG_RUNTIME_DIR/leasehold/leasehold.sock (yours alone) and its ledger is under
+# ~/.local/state/leasehold; clients find it without being told.
+[Unit]
+Description=leasehold daemon (your own)
+
+[Service]
+Type=simple
+# `uv tool install` puts leasehold in ~/.local/bin; change the path if yours is elsewhere.
+ExecStart=%h/.local/bin/leasehold serve --user
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,9 @@
+# The machine owner's own work: never preempted, first call on CPU.
+# Install as /etc/systemd/system/work.slice. The numbers are placeholders: size them to the box.
+[Unit]
+Description=Owner's own work (leasehold kind: work)
+Before=slices.target
+
+[Slice]
+CPUWeight=1000
+MemoryMax=40G

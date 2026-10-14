@@ -1,0 +1,9 @@
+# Test gates and other bounded jobs run for someone else (leasehold kind: external).
+# Install as /etc/systemd/system/gates.slice. The numbers are placeholders.
+[Unit]
+Description=Test gates (leasehold kind: external)
+Before=slices.target
+
+[Slice]
+CPUWeight=400
+MemoryMax=32G

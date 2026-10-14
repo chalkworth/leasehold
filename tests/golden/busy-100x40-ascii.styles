@@ -1,0 +1,40 @@
+[dim]leasehold  [title]buildbox[dim]  system  v0.2.0  site=rack1  16 cpus[]   [pool:work]#####[pool:external]####[pool:observed]###[bold]  12/12 held[warn]  FULL  2 waiting
+[]
+[title]PRESSURE  []cpu     [warn] 38.2%[]  [warn]-------========+++++++[dim] 0-50% [warn]  above the 10% lending limit[dim]  60s 30.6%[]
+[]          memory  [bold]  2.1%[]  ......................[dim] 0-10%   60s 1.7%  full 0.5%[]
+[]          io      [bold]  6.4%[]  +*-==+*-==+*-==+*-==+*[dim] 0-10%   60s 5.1%  full 1.6%[]
+[]          load    [bold]11.4  9.8  7.2[dim]  on 16 cpus    memory available 20 GiB of 64 GiB[]
+[]
+[title]SLOTS     []   [dim]1[]      [dim]2[]      [dim]3[]      [dim]4[]      [dim]5[]      [dim]6[]      [dim]7[]      [dim]8[]      [dim]9[]     [dim]10[]     [dim]11[]     [dim]12[]
+[dim]  held    [bay:work]#bob  [] [bay:work]#alice pytes~[] [bay:work]#alice cargo~[] [bay:external]^runner acme/api test      [] [bay:observed]%carol training-prep[]
+[dim]  waiting [pool:work]#bob npm test[] [pool:external]^runner acme/web e2e~~~~~~~[]
+[]
+[title]POOLS     [pool:work]#[] [bold]work[]      [pool:work]#####[dim]-......[]   [bold]5/6[]  [dim]reserved 4[]  3 running  [warn]1 waiting[]
+[]          [pool:external]^[] [bold]external[]  [pool:external]####[dim]----....[]   [bold]4/8[]              1 running  [warn]1 waiting[]
+[]          [pool:lend]o[] [bold]lend[]      [dim]--------....[]   [bold]0/8[]              0 running  [dim]0 waiting[]  [warn]closed[]  [dim]preemptible[]
+[]          [pool:observed]%[] [bold]observed[]  [pool:observed]###[dim]---------[]  [bold]3/12[]              1 running  [dim]0 waiting[]  [dim]observed[]
+[]
+[title]LEASES    [dim]KIND        USER    SESSION  POOL      W     HELD  EXPIRES  LEASE  (sort: pool)[]
+[]          [pool:work]#[] work      [bold]bob[]     [dim]-[]        work      1  20m 10s    in 6s  3c1f0a9e2b7d[dim]  make -j[]
+[]          [pool:work]#[] work      [bold]alice[]   [dim]cc-7f3a[]  work      2   1m 35s    in 9s  cc.toolu_01H8[dim]  pytest -n auto[]
+[]          [pool:work]#[] work      [bold]alice[]   [dim]cc-91be[]  work      2      31s   in 13s  cc.toolu_01K2[dim]  cargo build --r
+[]          [pool:external]^[] external  [bold]runner[]  [dim]-[]        external  4   6m 52s   in 11s  gh.buildbox-1.8812.1.test[dim]  acm
+[]          [pool:observed]%[] observed  [bold]carol[]   [dim]-[]        observed  3   1h 00m  [dim]at exit[]  observed.training-prep.48211[dim]
+[]
+[title]QUEUE     [bold]#1 work    []  [pool:work]#[] [bold]bob   [dim]  codex-2[]  npm test[dim]  cc.toolu_01M9[]         needs 2 slots[bold]  waiting 48s
+[]            [wait]> pool work is at 5 of 6; this needs 2[]
+[title]          [bold]#1 external[]  [pool:external]^[] [bold]runner[]  acme/web e2e[dim]  gh.buildbox-2.8813.1.lint[]  needs 4 slots[bold]  waiting 20s
+[]            [wait]> machine has 0 of 12 slots free[]
+[]
+[title]LENDING   [bold]closed[]  cpu pressure 38.2% is above 10%[dim]  |  needs 10m quiet  |  into lend[]
+[]
+[title]EVENTS    [dim]    20s ago[]  [warn]queued  []  runner queued for 4 slots in external, #1
+[]          [dim]    31s ago[]  [ok]granted []  alice took 2 slots in work[dim]  cc.toolu_01K2[]
+[]          [dim]    48s ago[]  [warn]queued  []  bob queued for 2 slots in work, #1[dim]  cc.toolu_01M9[]
+[]          [dim] 1m 35s ago[]  [ok]granted []  alice took 2 slots in work[dim]  cc.toolu_01H8[]
+[]          [dim] 6m 35s ago[]  released  dave released 6 slots in lend[dim]  lend.golden[]
+[]          [dim] 6m 51s ago[]  [warn]lend off[]  lending closed: non-lend work waiting
+[]          [dim] 6m 51s ago[]  [bad]revoked []  revoked dave's 6 slots in lend: non-lend work waiting[dim]  lend.golden[]
+[]          [dim] 6m 52s ago[]  [ok]granted []  runner took 4 slots in external[dim]  gh.buildbox-1.8812.1.test[]
+[]          [dim]11m 30s ago[]  [ok]granted []  dave took 6 slots in lend[dim]  lend.golden[]
+[]          [dim]11m 40s ago[]  [ok]lend on []  lending opened: idle for 600s

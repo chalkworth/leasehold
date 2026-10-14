@@ -1,0 +1,15 @@
+# A 4-slot machine that charges a known data-prep program to the `observed` pool while it runs.
+# Without [pools], 4 slots split as: `work` reserves 2 and may use all 4; `external` and `lend`
+# may use 2 each; `observed` may use 4.
+[ceiling]
+slots = 4
+
+# Each running `python3 prep_dataset.py` holds 3 slots, though nobody asked for them. A process
+# counts when it matches and no ancestor matches the same rule, so a job's own workers are not
+# counted again. The daemon sees it within one tick (tick_s, 2 s by default).
+[[observe]]
+name = "data-prep"
+weight = 3
+[observe.match]
+comm = "python3"              # the kernel's process name, exactly
+cmdline = 'prep_dataset\.py'  # a regular expression, searched anywhere in the command line

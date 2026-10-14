@@ -1,0 +1,16 @@
+{
+  "name": "leasehold",
+  "owner": {
+    "name": "Matthew Strudwick"
+  },
+  "metadata": {
+    "description": "leasehold's Claude Code plugin: heavy commands take turns on a shared machine."
+  },
+  "plugins": [
+    {
+      "name": "leasehold",
+      "source": "./integrations/claude-code",
+      "description": "Heavy Bash commands wait for a lease on a shared machine instead of piling on."
+    }
+  ]
+}

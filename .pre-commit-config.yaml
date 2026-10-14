@@ -1,0 +1,15 @@
+# `uv tool install pre-commit && pre-commit install` runs these on every commit.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.0
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: import-contracts
+        name: import contracts (.importlinter)
+        entry: uv run --no-sync lint-imports
+        language: system
+        pass_filenames: false
+        files: ^src/

@@ -1,0 +1,4 @@
+# One slot, so the agents' commands run one at a time and the order they get in is plain to see.
+# Without [pools], one slot gives `work` (and each other pool) a max of 1 and no reservation.
+[ceiling]
+slots = 1

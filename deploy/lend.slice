@@ -1,0 +1,13 @@
+# Lent capacity (leasehold kind: lend): only spare CPU (CPUWeight=idle, systemd 252+ on a
+# 5.15+ kernel), and revoked as soon as the machine needs it back. Memory has no such protection,
+# so MemoryMax is what keeps the owner's work alive during the revocation grace: keep it well
+# under what the other slices need. The numbers are placeholders.
+# Install as /etc/systemd/system/lend.slice.
+[Unit]
+Description=Lent capacity (leasehold kind: lend, preemptible)
+Before=slices.target
+
+[Slice]
+CPUWeight=idle
+MemoryMax=16G
+MemorySwapMax=0

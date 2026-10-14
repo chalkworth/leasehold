@@ -1,0 +1,24 @@
+leasehold  buildbox  system  v0.2.0    ████████████  12/12 held  FULL  2 waiting
+PRESSURE  cpu      38.2%  ▄▄▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆ 0-50%   above the 10% lending limit
+          memory    2.1%  ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂ 0-10%   60s 1.7%  full 0.5%
+          io        6.4%  ▆▇▄▅▅▆▇▄▅▅▆▇▄▅▅▆▇ 0-10%   60s 5.1%  full 1.6%
+          load    11.4  9.8  7.2  on 16 cpus
+SLOTS       1    2    3    4    5    6    7    8    9   10   11   12
+  held    ■bob ■alice    ■alice    ▲runner acme/api t… ▨carol traini…
+  waiting ■bob░░░░░ ▲runner acme/web e…
+POOLS     ■ work      █████░······   5/6  1 waiting
+          ▲ external  ████░░░░····   4/8  1 waiting
+          ○ lend      ░░░░░░░░····   0/8  0 waiting  closed  preemptible
+          ▨ observed  ███░░░░░░░░░  3/12  0 waiting  observed
+LEASES    KIND        USER    SESSION  W     HELD  EXPIRES  LEASE  (sort: pool)
+          ■ work      bob     -        1  20m 11s    in 5s  3c1f0a9e2b7d  make -
+          ■ work      alice   cc-7f3a  2   1m 36s    in 8s  cc.toolu_01H8  pytes
+          ■ work      alice   cc-91be  2      32s   in 12s  cc.toolu_01K2  cargo
+          ▲ external  runner  -        4   6m 53s   in 10s  gh.buildbox-1.8812.1
+          ▨ observed  carol   -        3   1h 00m  at exit  observed.training-pr
+QUEUE     #1 work      ■ bob     codex-2  npm test    needs 2 slots  waiting 49s
+            ▸ pool work is at 5 of 6; this needs 2
+          #1 external  ▲ runner  acme/web e2e         needs 4 slots  waiting 21s
+            ▸ machine has 0 of 12 slots free
+LENDING   closed  cpu pressure 38.2% is above 10%  ·  needs 10m quiet
+EVENTS        21s ago  queued    runner queued for 4 slots in external, #1

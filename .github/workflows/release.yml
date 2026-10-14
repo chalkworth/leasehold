@@ -1,0 +1,42 @@
+# Publishes to PyPI when a GitHub release is published, with PyPI's trusted publishing (no
+# token is stored anywhere). It needs, once: a PyPI project with this repository and workflow
+# named as a trusted publisher, and an environment "pypi" here. Nothing else triggers it.
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0  # it publishes no moving major tag
+      - run: uv build
+      - name: The version is the release's
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ls dist/leasehold-"$tag"-py3-none-any.whl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

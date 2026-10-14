@@ -1,0 +1,12 @@
+# A 4-slot machine that lends what it does not use. Without [pools], 4 slots split as: `work`
+# reserves 2 and may use all 4; `external` and `lend` may use 2 each; `observed` may use 4.
+[ceiling]
+slots = 4
+
+[lend]
+# Lend once the machine has been idle this long (the default is 600 s; 10 s keeps the example
+# quick). Idle also means CPU pressure (PSI some avg10) at most cpu_pressure_max, 10% by default.
+quiet_s = 10
+# With lent work in lend.slice, measure pressure over the other slices only, so the lent work's
+# own load never revokes it:
+# pressure_cgroups = ["work.slice", "runner.slice", "system.slice", "user.slice"]

@@ -1,0 +1,100 @@
+{
+ "events": [
+  {
+   "seq": 901,
+   "time": 1760399300.0,
+   "type": "lend_opened",
+   "reason": "idle for 600s"
+  },
+  {
+   "seq": 902,
+   "time": 1760399310.0,
+   "type": "granted",
+   "lease_id": "lend.golden",
+   "kind": "lend",
+   "pool": "lend",
+   "user": "dave",
+   "weight": 6
+  },
+  {
+   "seq": 903,
+   "time": 1760399588.0,
+   "type": "granted",
+   "lease_id": "gh.buildbox-1.8812.1.test",
+   "kind": "external",
+   "pool": "external",
+   "user": "runner",
+   "weight": 4
+  },
+  {
+   "seq": 904,
+   "time": 1760399589.0,
+   "type": "revoked",
+   "lease_id": "lend.golden",
+   "kind": "lend",
+   "pool": "lend",
+   "user": "dave",
+   "weight": 6,
+   "reason": "non-lend work waiting"
+  },
+  {
+   "seq": 905,
+   "time": 1760399589.0,
+   "type": "lend_closed",
+   "reason": "non-lend work waiting"
+  },
+  {
+   "seq": 906,
+   "time": 1760399605.0,
+   "type": "released",
+   "lease_id": "lend.golden",
+   "kind": "lend",
+   "pool": "lend",
+   "user": "dave",
+   "weight": 6
+  },
+  {
+   "seq": 907,
+   "time": 1760399905.0,
+   "type": "granted",
+   "lease_id": "cc.toolu_01H8",
+   "kind": "work",
+   "pool": "work",
+   "user": "alice",
+   "weight": 2
+  },
+  {
+   "seq": 908,
+   "time": 1760399952.0,
+   "type": "queued",
+   "lease_id": "cc.toolu_01M9",
+   "kind": "work",
+   "pool": "work",
+   "user": "bob",
+   "weight": 2,
+   "position": 1
+  },
+  {
+   "seq": 909,
+   "time": 1760399969.0,
+   "type": "granted",
+   "lease_id": "cc.toolu_01K2",
+   "kind": "work",
+   "pool": "work",
+   "user": "alice",
+   "weight": 2
+  },
+  {
+   "seq": 910,
+   "time": 1760399980.0,
+   "type": "queued",
+   "lease_id": "gh.buildbox-2.8813.1.lint",
+   "kind": "external",
+   "pool": "external",
+   "user": "runner",
+   "weight": 4,
+   "position": 1
+  }
+ ],
+ "next": 911
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "leasehold": {
+      "command": "leasehold",
+      "args": ["mcp"]
+    }
+  }
+}

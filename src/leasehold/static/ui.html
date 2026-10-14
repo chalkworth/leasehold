@@ -1,0 +1,1135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>leasehold</title>
+<script>
+(function () {
+  var t = null;
+  try { t = new URLSearchParams(location.search).get('theme') || localStorage.getItem('leasehold-theme'); } catch (e) {}
+  if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+<style>
+:root {
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", "Roboto Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+
+  --t-s: 12px; --t-m: 14px; --t-l: 20px; --t-xl: 32px;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+
+  --ground: #e9edf1;
+  --surface: #ffffff;
+  --surface-2: #f3f5f8;
+  --ink: #111921;
+  --ink-2: #434f5c;
+  --ink-3: #5f6b78;
+  --rule: #d6dce2;
+  --rule-strong: #aeb8c3;
+  --bay-line: #c3ccd5;
+
+  --band: #0a4a8a;
+  --band-2: #083d73;
+  --band-ink: #ffffff;
+  --band-ink-2: #cddcee;
+  --band-rule: #2d679f;
+
+  --focus: #0a5cc2;
+
+  --work: #0b72b5;      --on-work: #ffffff;   --k-work: #0b72b5;
+  --external: #e69f00;  --on-external: #1d1300; --k-external: #a86b00;
+  --lend: #009e73;      --on-lend: #00140e;   --k-lend: #007a59;
+  --observed: #737d88;  --obs-a: #dfe3e8; --obs-b: #c9cfd6; --k-observed: #5f6b78;
+  --x0: #56b4e9; --on-x0: #04121c; --x1: #cc79a7; --on-x1: #1f0614; --x2: #f0e442; --on-x2: #1c1a00;
+
+  --wait-bg: #fff1b3;
+  --wait-ink: #3a2f00;
+  --wait-mark: #8a6d00;
+
+  --ok: #1d7a4a;
+  --warn: #9a5b00;
+  --bad: #b3261e;
+  --bad-bg: #fbe9e7;
+  --over: #b3261e;
+  --spark: #2f3b47;
+  --spark-fill: rgba(47, 59, 71, .10);
+  --thresh: #b3261e;
+  --select: #cfe1f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0a0e12;
+    --surface: #12181e;
+    --surface-2: #182028;
+    --ink: #e4e9ee;
+    --ink-2: #aab5c0;
+    --ink-3: #8794a1;
+    --rule: #242e38;
+    --rule-strong: #3a4754;
+    --bay-line: #2c3844;
+    --band: #0d3b6b;
+    --band-2: #0a2f56;
+    --band-ink: #ffffff;
+    --band-ink-2: #b4c9e2;
+    --band-rule: #24527f;
+    --focus: #7fb6ff;
+    --work: #4fa8e0; --on-work: #04121c; --k-work: #5fb3e8;
+    --external: #e69f00; --on-external: #1d1300; --k-external: #eaa521;
+    --lend: #1fb386; --on-lend: #00140e; --k-lend: #2fc394;
+    --observed: #7d8894; --obs-a: #2a333d; --obs-b: #36404b; --k-observed: #95a1ad;
+    --wait-bg: #2e2810; --wait-ink: #f4e4a0; --wait-mark: #e2c44a;
+    --ok: #4cc38a; --warn: #e3a33a; --bad: #ff8a80; --bad-bg: #3a1714; --over: #ff6b5e;
+    --spark: #c2ccd6; --spark-fill: rgba(194, 204, 214, .10); --thresh: #ff8a80;
+    --select: #1f3f63;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0a0e12;
+  --surface: #12181e;
+  --surface-2: #182028;
+  --ink: #e4e9ee;
+  --ink-2: #aab5c0;
+  --ink-3: #8794a1;
+  --rule: #242e38;
+  --rule-strong: #3a4754;
+  --bay-line: #2c3844;
+  --band: #0d3b6b;
+  --band-2: #0a2f56;
+  --band-ink: #ffffff;
+  --band-ink-2: #b4c9e2;
+  --band-rule: #24527f;
+  --focus: #7fb6ff;
+  --work: #4fa8e0; --on-work: #04121c; --k-work: #5fb3e8;
+  --external: #e69f00; --on-external: #1d1300; --k-external: #eaa521;
+  --lend: #1fb386; --on-lend: #00140e; --k-lend: #2fc394;
+  --observed: #7d8894; --obs-a: #2a333d; --obs-b: #36404b; --k-observed: #95a1ad;
+  --wait-bg: #2e2810; --wait-ink: #f4e4a0; --wait-mark: #e2c44a;
+  --ok: #4cc38a; --warn: #e3a33a; --bad: #ff8a80; --bad-bg: #3a1714; --over: #ff6b5e;
+  --spark: #c2ccd6; --spark-fill: rgba(194, 204, 214, .10); --thresh: #ff8a80;
+  --select: #1f3f63;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 var(--t-m)/1.45 var(--sans);
+  font-variant-numeric: tabular-nums;
+  caret-color: var(--focus);
+}
+::selection { background: var(--select); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+* { scrollbar-width: thin; scrollbar-color: var(--rule-strong) transparent; }
+.vh { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------- band ---------- */
+.band { background: var(--band); color: var(--band-ink); }
+.band-in { max-width: 1600px; margin: 0 auto; padding: var(--s3) var(--s5) var(--s3); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s5); }
+.ident { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); min-width: 0; flex: 1 1 auto; }
+.ident .sep { color: var(--band-rule); font-size: var(--t-l); margin: 0 -4px; }
+.mark { flex: none; width: 22px; height: 22px; }
+.ident h1 { margin: 0; font-size: var(--t-l); line-height: 1.2; font-weight: 650; letter-spacing: -0.01em; }
+.ident .prod { font-size: var(--t-m); font-weight: 600; color: var(--band-ink-2); }
+.tags { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); align-items: center; font-size: var(--t-s); color: var(--band-ink-2); }
+.tags .tag { font-family: var(--mono); padding: 1px 6px; border: 1px solid var(--band-rule); border-radius: 3px; color: var(--band-ink); }
+.facts { flex-basis: 100%; font-size: var(--t-s); color: var(--band-ink-2); display: flex; flex-wrap: wrap; gap: 0 var(--s4); border-top: 1px solid var(--band-rule); padding-top: var(--s2); }
+.facts[hidden] { display: none; }
+.facts span { white-space: nowrap; }
+.facts b { color: var(--band-ink); font-weight: 600; }
+.right { display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap; }
+.conn { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--t-s); color: var(--band-ink-2); }
+.conn .state { display: inline-flex; align-items: center; gap: 6px; font-weight: 650; color: var(--band-ink); text-transform: uppercase; letter-spacing: .06em; }
+.conn .dot { width: 8px; height: 8px; border-radius: 1px; background: currentColor; }
+.conn[data-c="live"] .dot { background: #5fe0a0; }
+.conn[data-c="reconnecting"] .dot, .conn[data-c="connecting"] .dot { background: #ffd34d; border-radius: 50%; }
+.conn[data-c="down"] .dot, .conn[data-c="auth"] .dot { background: #ff8a80; transform: rotate(45deg); }
+.conn[data-c="demo"] .dot { background: transparent; border: 2px solid #ffd34d; }
+.theme { display: inline-flex; border: 1px solid var(--band-rule); border-radius: 4px; overflow: hidden; }
+.theme legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.theme { padding: 0; margin: 0; }
+.theme label { position: relative; font-size: var(--t-s); padding: 4px 10px; cursor: pointer; color: var(--band-ink-2); }
+.theme label + label { border-left: 1px solid var(--band-rule); }
+.theme input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.theme input:checked + span { color: var(--band-ink); font-weight: 650; }
+.theme label:has(input:checked) { background: var(--band-2); }
+.theme label:has(input:focus-visible) { outline: 2px solid #fff; outline-offset: -2px; }
+
+.notice { max-width: 1600px; margin: 0 auto; padding: var(--s2) var(--s5); font-size: var(--t-s); color: var(--ink-2); display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); }
+.notice:empty { display: none; }
+.notice b { color: var(--ink); }
+.notice.stale { color: var(--bad); }
+
+/* ---------- sheet ---------- */
+main { max-width: 1600px; margin: 0 auto; padding: var(--s4) var(--s5) var(--s7); }
+.sheet { background: var(--rule); border: 1px solid var(--rule); display: grid; gap: 1px; }
+.sheet.stale > * { opacity: .55; }
+.cols { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(330px, 1fr); gap: 1px; }
+.col { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.col > .panel:last-child { flex: 1 1 auto; }
+.panel { background: var(--surface); padding: var(--s4) var(--s5) var(--s5); min-width: 0; }
+.ph { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); margin: 0 0 var(--s3); }
+.ph h2 { margin: 0; font-size: var(--t-s); font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink); }
+.ph .aside { font-size: var(--t-s); color: var(--ink-3); }
+.empty { color: var(--ink-2); margin: 0; padding: var(--s3) 0; }
+.empty code { color: var(--ink); background: var(--surface-2); border: 1px solid var(--rule); padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
+.foot { margin: var(--s3) 0 0; font-size: var(--t-s); color: var(--ink-3); }
+
+/* ---------- kind marks / pips ---------- */
+.km { width: 12px; height: 12px; flex: none; vertical-align: -1px; }
+.c-work { color: var(--k-work); } .c-external { color: var(--k-external); } .c-lend { color: var(--k-lend); } .c-observed { color: var(--k-observed); }
+.c-x0 { color: var(--x0); } .c-x1 { color: var(--x1); } .c-x2 { color: var(--x2); }
+.kind { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pips { display: inline-flex; gap: 2px; vertical-align: middle; }
+.pips i { width: 7px; height: 10px; border-radius: 1px; background: currentColor; }
+.pips-n { font-family: var(--mono); font-size: var(--t-s); color: var(--ink-2); margin-left: 6px; }
+
+/* ---------- slots / bays ---------- */
+.slots { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: var(--s5); align-items: start; }
+.fc { display: flex; align-items: center; gap: var(--s3); }
+.plate { display: inline-flex; align-items: baseline; gap: 8px; background: var(--band); color: var(--band-ink); border-radius: 4px; padding: 8px 12px 7px; box-shadow: inset 0 0 0 2px var(--band-2); }
+.plate .n { font: 600 36px/1 var(--mono); letter-spacing: -0.03em; }
+.plate b { font-size: var(--t-m); font-weight: 750; letter-spacing: .1em; }
+.plate b.full { font-size: 28px; line-height: 1; letter-spacing: .12em; color: #ffd34d; }
+.free .nl { display: flex; flex-direction: column; line-height: 1.2; }
+.free .nl span { font-size: var(--t-s); color: var(--ink-2); }
+.free .sub { font-size: var(--t-s); color: var(--ink-2); margin-top: var(--s2); }
+.free .sub b { color: var(--ink); font-weight: 600; }
+.heldspark { margin-top: var(--s3); }
+.heldspark .cap { font-size: var(--t-s); color: var(--ink-3); display: flex; justify-content: space-between; }
+.heldspark svg { display: block; width: 100%; height: 34px; color: var(--spark); }
+
+.lanes { display: grid; grid-template-columns: 80px minmax(0, 1fr); row-gap: var(--s2); align-items: center; }
+.lane-k { font-size: var(--t-s); font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-2); }
+.lane { position: relative; height: 46px; }
+.lane .bays { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(var(--n), 1fr); background: var(--surface-2); border: 1px solid var(--rule-strong); border-radius: 3px; overflow: hidden; }
+.lane .bays i { border-right: 1px solid var(--bay-line); }
+.lane .bays i:last-child { border-right: 0; }
+.lane .bays i.over { background: var(--bad-bg); }
+.lane.wait .bays { background: transparent; border-style: dashed; border-color: var(--rule); }
+.lane.wait .bays i { border-right-color: transparent; }
+.blk {
+  position: absolute; top: 4px; bottom: 4px;
+  left: calc(var(--x) / var(--n) * 100% + 2px);
+  width: calc(var(--w) / var(--n) * 100% - 4px);
+  border-radius: 2px; padding: 4px 7px; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: center; line-height: 1.2;
+  container-type: inline-size;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .18);
+}
+.blk .u { font-size: var(--t-s); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blk .d { font: 11px/1.25 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+.blk .i { display: none; font-size: var(--t-s); font-weight: 700; text-align: center; }
+@container (max-width: 88px) { .blk .d { display: none; } }
+@container (max-width: 34px) { .blk .u { display: none; } .blk .i { display: block; } }
+.blk.p-work { background: var(--work); color: var(--on-work); }
+.blk.p-external { background: var(--external); color: var(--on-external); }
+.blk.p-lend { background: var(--lend); color: var(--on-lend); }
+.blk.p-x0 { background: var(--x0); color: var(--on-x0); }
+.blk.p-x1 { background: var(--x1); color: var(--on-x1); }
+.blk.p-x2 { background: var(--x2); color: var(--on-x2); }
+.blk.p-observed { background: repeating-linear-gradient(135deg, var(--obs-a) 0 5px, var(--obs-b) 5px 10px); color: var(--ink); box-shadow: inset 0 0 0 1px var(--observed); }
+.blk.res { background: transparent; box-shadow: none; border: 1.5px dashed currentColor; }
+.blk.res .u { font-weight: 600; text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
+.blk.res .d { font-family: var(--sans); color: var(--ink-2); opacity: 1; }
+.blk.q { background: var(--surface); color: var(--ink); box-shadow: none; border: 1.5px dashed currentColor; }
+.blk.q .u, .blk.q .d, .blk.q .i { color: var(--ink); }
+.blk.q.p-work { border-color: var(--k-work); } .blk.q.p-external { border-color: var(--k-external); } .blk.q.p-lend { border-color: var(--k-lend); } .blk.q.p-observed { border-color: var(--k-observed); }
+.blk.rv { background-image: repeating-linear-gradient(45deg, transparent 0 6px, rgba(179, 38, 30, .55) 6px 8px); }
+.blk.rv .u { text-decoration: line-through; }
+.bayno { display: grid; grid-template-columns: repeat(var(--n), 1fr); margin-top: -4px; font: 10px/1 var(--mono); color: var(--ink-3); text-align: center; }
+.bayno i { font-style: normal; }
+.lane-note { position: absolute; inset: 0; display: flex; align-items: center; padding-left: var(--s3); font-size: var(--t-s); color: var(--ink-3); }
+.legend { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); font-size: var(--t-s); color: var(--ink-2); padding-top: var(--s1); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend b { color: var(--ink); font-weight: 600; }
+.legend .sw { width: 12px; height: 12px; border-radius: 2px; }
+.sw.p-work { background: var(--work); } .sw.p-external { background: var(--external); } .sw.p-lend { background: var(--lend); }
+.sw.p-observed { background: repeating-linear-gradient(135deg, var(--obs-a) 0 3px, var(--obs-b) 3px 6px); box-shadow: inset 0 0 0 1px var(--observed); }
+.sw.p-x0 { background: var(--x0); } .sw.p-x1 { background: var(--x1); } .sw.p-x2 { background: var(--x2); }
+.sw.res { background: transparent; border: 1.5px dashed var(--ink-3); }
+
+/* ---------- queue ---------- */
+.queue { list-style: none; margin: 0; padding: 0; }
+.queue li { padding: var(--s3) 0; border-top: 1px solid var(--rule); }
+.queue li:first-child { border-top: 0; padding-top: 0; }
+.qh { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); }
+.qpos { font: 600 var(--t-s)/1 var(--mono); color: var(--ink-2); border: 1px solid var(--rule-strong); border-radius: 3px; padding: 3px 6px; white-space: nowrap; }
+.qwho b { font-weight: 650; }
+.qwho .sess { font-family: var(--mono); font-size: var(--t-s); color: var(--ink-3); margin-left: 6px; }
+.qcmd { font-family: var(--mono); font-size: var(--t-s); color: var(--ink-2); overflow-wrap: anywhere; }
+.qmeta { margin-left: auto; display: flex; gap: var(--s3); align-items: center; font-size: var(--t-s); color: var(--ink-2); white-space: nowrap; }
+.qmeta .wt { font-family: var(--mono); color: var(--ink); }
+.qwhy { margin: var(--s2) 0 0; display: flex; gap: var(--s2); align-items: flex-start; background: var(--wait-bg); color: var(--wait-ink); padding: var(--s2) var(--s3); border-radius: 3px; font-size: var(--t-m); font-weight: 550; }
+.qwhy svg { flex: none; margin-top: 2px; color: var(--wait-mark); }
+
+/* ---------- pressure ---------- */
+.pr { display: grid; grid-template-columns: 64px 84px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: var(--s3); align-items: center; padding: var(--s2) 0; border-top: 1px solid var(--rule); }
+.pr:first-of-type { border-top: 0; padding-top: 0; }
+.pr-k { font-size: var(--t-s); font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.pr-v { font: 600 var(--t-l)/1 var(--mono); letter-spacing: -0.02em; text-align: right; }
+.pr-v span { font-size: var(--t-s); font-weight: 500; color: var(--ink-3); margin-left: 1px; }
+.pr-v.hot { color: var(--bad); }
+.pr-s { position: relative; height: 40px; color: var(--spark); }
+.pr-s svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.pr-m { grid-column: 2 / 4; font-size: var(--t-s); color: var(--ink-3); text-align: right; margin-top: 2px; display: flex; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; }
+.pr-m .th { color: var(--thresh); }
+.pr-m .hotnote { color: var(--bad); font-weight: 600; }
+.collect { font-size: var(--t-s); color: var(--ink-3); display: flex; align-items: center; height: 100%; border-bottom: 1px dashed var(--rule-strong); }
+.sys { margin-top: var(--s3); border-top: 1px solid var(--rule); padding-top: var(--s3); display: grid; gap: var(--s2); font-size: var(--t-s); color: var(--ink-2); }
+.sys .row { display: flex; justify-content: space-between; gap: var(--s3); flex-wrap: wrap; }
+.sys .row b { color: var(--ink); font: 600 var(--t-m) var(--mono); }
+.membar { height: 6px; background: var(--surface-2); border: 1px solid var(--rule-strong); border-radius: 2px; overflow: hidden; }
+.membar i { display: block; height: 100%; background: var(--ok); }
+
+/* ---------- lending ---------- */
+.lend-line { display: flex; gap: var(--s2); align-items: flex-start; font-size: var(--t-m); font-weight: 600; margin: 0; }
+.lend-line svg { flex: none; margin-top: 3px; }
+.lend-line .rsn { font-weight: 400; color: var(--ink-2); }
+.lend-open { color: var(--k-lend); }
+.qp { margin-top: var(--s3); }
+.qp .cap { display: flex; justify-content: space-between; font-size: var(--t-s); color: var(--ink-2); margin-bottom: var(--s1); gap: var(--s2); flex-wrap: wrap; }
+.qp .bar { height: 8px; border: 1px solid var(--rule-strong); border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.qp .bar i { display: block; height: 100%; background: var(--lend); transition: width .4s cubic-bezier(.16, 1, .3, 1); }
+
+/* ---------- pools ---------- */
+.pools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--s6); }
+.pool { padding: var(--s3) 0; border-top: 1px solid var(--rule); }
+.pool:nth-child(-n+2) { border-top: 0; padding-top: 0; }
+.pool-h { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); }
+.pool-h .nm { font-weight: 650; display: inline-flex; align-items: center; gap: 6px; }
+.pool-h .nums { margin-left: auto; font-family: var(--mono); font-size: var(--t-s); color: var(--ink-2); }
+.pool-h .nums b { color: var(--ink); font-weight: 600; }
+.flag { font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--rule-strong); color: var(--ink-2); }
+.flag.closed { border-color: var(--ink-3); color: var(--ink); }
+.flag.over { border-color: var(--bad); color: var(--bad); }
+.pbar { position: relative; margin: var(--s2) 0 0; height: 30px; }
+.pbar .trk { position: absolute; left: 0; right: 0; top: 0; height: 12px; display: grid; grid-template-columns: repeat(var(--n), 1fr); border: 1px solid var(--rule-strong); border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.pbar .trk i { border-right: 1px solid var(--bay-line); }
+.pbar .trk i:last-child { border-right: 0; }
+.pbar .trk i.cap { background: repeating-linear-gradient(135deg, transparent 0 3px, var(--rule) 3px 5px); }
+.pbar .fill { position: absolute; top: 1px; height: 10px; left: 1px; width: calc(var(--h) / var(--n) * (100% - 2px)); }
+.pbar .fill.p-work { background: var(--work); } .pbar .fill.p-external { background: var(--external); } .pbar .fill.p-lend { background: var(--lend); }
+.pbar .fill.p-observed { background: repeating-linear-gradient(135deg, var(--obs-a) 0 3px, var(--observed) 3px 5px); }
+.pbar .fill.p-x0 { background: var(--x0); } .pbar .fill.p-x1 { background: var(--x1); } .pbar .fill.p-x2 { background: var(--x2); }
+.pbar .maxm { position: absolute; top: -3px; height: 18px; width: 2px; margin-left: -1px; background: var(--ink); left: calc(var(--m) / var(--n) * 100%); }
+.pbar .resm { position: absolute; top: 15px; height: 5px; left: 0; width: calc(var(--r) / var(--n) * 100%); border: 1.5px solid var(--ink-2); border-top: 0; }
+.pbar .lab { position: absolute; top: 17px; font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.pool-f { font-size: var(--t-s); color: var(--ink-3); display: flex; flex-wrap: wrap; gap: 0 var(--s3); }
+
+/* ---------- leases ---------- */
+.tbl-wrap { overflow-x: auto; margin: 0 calc(-1 * var(--s5)); padding: 0 var(--s5); }
+table.leases { width: 100%; border-collapse: collapse; font-size: var(--t-m); }
+.leases th { text-align: left; font-size: var(--t-s); font-weight: 650; color: var(--ink-3); letter-spacing: .02em; padding: 0 var(--s3) var(--s2) 0; border-bottom: 1px solid var(--rule-strong); white-space: nowrap; }
+.leases td { padding: var(--s2) var(--s3) var(--s2) 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.leases tr:last-child td { border-bottom: 0; }
+.leases .num { text-align: right; font-family: var(--mono); font-size: var(--t-s); white-space: nowrap; color: var(--ink-2); }
+.leases th.num { text-align: right; font-family: var(--sans); }
+.leases .who b { font-weight: 650; }
+.leases .who .sess, .leases .id { display: block; font-family: var(--mono); font-size: var(--t-s); color: var(--ink-3); overflow-wrap: anywhere; }
+.leases .what .cmd { font-family: var(--mono); font-size: var(--t-s); color: var(--ink); overflow-wrap: anywhere; }
+.leases .what .by { display: block; font-size: var(--t-s); color: var(--ink-3); }
+.leases tr.rv td { background: var(--bad-bg); }
+.rvnote { display: block; margin-top: 2px; font-size: var(--t-s); color: var(--bad); font-weight: 600; }
+.leases .soon { color: var(--warn); }
+
+/* ---------- events ---------- */
+.events { list-style: none; margin: 0; padding: 0; max-height: 520px; overflow-y: auto; }
+.events li { display: grid; grid-template-columns: 64px 76px minmax(0, 1fr); gap: var(--s3); padding: 5px 0; border-top: 1px solid var(--rule); font-size: var(--t-s); align-items: baseline; }
+.events li:first-child { border-top: 0; }
+.events .t { font-family: var(--mono); color: var(--ink-3); }
+.events .ty { white-space: nowrap; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; font-size: 11px; color: var(--ink-2); }
+.events .tx { color: var(--ink); overflow-wrap: anywhere; }
+.events .tx .id { font-family: var(--mono); color: var(--ink-3); }
+.events li.e-revoked .ty, .events li.e-expired .ty { color: var(--bad); }
+.events li.e-queued .ty { color: var(--wait-mark); }
+.events li.e-granted .ty { color: var(--ok); }
+.events li.e-lend_opened .ty, .events li.e-lend_closed .ty { color: var(--k-lend); }
+
+/* ---------- unreachable ---------- */
+.down { background: var(--surface); padding: var(--s6) var(--s5); }
+.down h2 { margin: 0 0 var(--s2); font-size: var(--t-l); font-weight: 650; }
+.down p { margin: 0 0 var(--s3); color: var(--ink-2); max-width: 64ch; }
+.down pre { margin: 0 0 var(--s3); font: 600 var(--t-m) var(--mono); background: var(--surface-2); border: 1px solid var(--rule); padding: var(--s3) var(--s4); border-radius: 3px; overflow-x: auto; max-width: 36rem; }
+.down .retry { font-size: var(--t-s); color: var(--ink-3); }
+
+@media (max-width: 1100px) {
+  .pools { grid-template-columns: 1fr; }
+  .pool:nth-child(2) { border-top: 1px solid var(--rule); padding-top: var(--s3); }
+  .slots { grid-template-columns: 1fr; gap: var(--s4); }
+  .free { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--s5); align-items: end; }
+  .free .sub { margin-top: 0; }
+  .heldspark { grid-column: 1 / -1; }
+}
+@media (max-width: 900px) {
+  .cols { grid-template-columns: 1fr; }
+  .cols, .col { display: contents; }
+  .sheet > .panel, .col > .panel { order: 10; }
+  #p-slots { order: 1; } #p-queue { order: 2; } #p-leases { order: 3; } #p-pressure { order: 4; } #p-lending { order: 5; } #p-pools { order: 6; } #p-events { order: 7; }
+  .events { max-height: none; }
+}
+@media (max-width: 640px) {
+  .band-in { padding: var(--s3) var(--s4); }
+  .notice { padding: var(--s2) var(--s4); }
+  main { padding: var(--s3) 0 var(--s6); }
+  .sheet { border-left: 0; border-right: 0; }
+  .panel { padding: var(--s4) var(--s4) var(--s5); }
+  .lanes { grid-template-columns: 1fr; row-gap: var(--s1); }
+  .lane-k { margin-top: var(--s1); }
+  .legend { grid-column: 1; }
+  .lane { height: 42px; }
+  .tbl-wrap { margin: 0; padding: 0; overflow: visible; }
+  table.leases, .leases tbody, .leases tr, .leases td { display: block; }
+  .leases thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .leases tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px var(--s3); padding: var(--s3) 0; border-bottom: 1px solid var(--rule); }
+  .leases tr:last-child { border-bottom: 0; }
+  .leases td { border: 0; padding: 0; }
+  .leases td.kindc { grid-column: 1; }
+  .leases td.slotc { grid-column: 2; grid-row: 1; text-align: right; }
+  .leases td.who { grid-column: 1 / -1; }
+  .leases td.what { grid-column: 1 / -1; }
+  .leases td.poolc { display: none; }
+  .leases td.num { text-align: left; grid-column: auto; }
+  .leases td.num::before { content: attr(data-l) " "; color: var(--ink-3); font-family: var(--sans); }
+  .leases tr.rv { background: var(--bad-bg); padding-left: var(--s2); padding-right: var(--s2); }
+  .leases tr.rv td { background: transparent; }
+  .qmeta { margin-left: 0; width: 100%; }
+  .pr { grid-template-columns: 56px 68px minmax(0, 1fr); }
+  .events li { grid-template-columns: 58px 70px minmax(0, 1fr); gap: var(--s2); }
+  .tags { flex-basis: 100%; }
+  .right { width: 100%; justify-content: space-between; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<header class="band">
+  <div class="band-in">
+    <div class="ident">
+      <svg class="mark" viewBox="0 0 22 22" aria-hidden="true"><rect x="1" y="4" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7.67 4v14M14.33 4v14" stroke="currentColor" stroke-width="1.5"/><rect x="2.5" y="5.5" width="3.9" height="11" fill="currentColor"/><rect x="9" y="5.5" width="4" height="11" fill="currentColor"/></svg>
+      <span class="prod">leasehold</span><span class="sep" aria-hidden="true">/</span>
+      <h1 id="m-name">this machine</h1>
+      <div class="tags" id="m-tags"></div>
+    </div>
+    <div class="right">
+      <div class="conn" id="conn" data-c="connecting"><span class="state"><span class="dot" aria-hidden="true"></span><span id="conn-t">Connecting</span></span><span id="conn-u"></span></div>
+      <fieldset class="theme" id="theme">
+        <legend>Theme</legend>
+        <label><input type="radio" name="theme" value="auto"><span>Auto</span></label>
+        <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+        <label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+      </fieldset>
+    </div>
+    <div class="facts" id="m-facts" hidden></div>
+  </div>
+</header>
+<div class="notice" id="notice" role="note"></div>
+<div class="vh" aria-live="polite" id="announce"></div>
+<main id="main">
+  <noscript><div class="down"><h2>This page needs JavaScript</h2><p>It polls the daemon for status. Without JavaScript, use <code>leasehold top</code> in a terminal.</p></div></noscript>
+</main>
+
+<script>
+(function () {
+'use strict';
+
+var FX = {"busy":{"schema":2,"time":1760400000.0,"version":"0.2.0","machine":{"name":"buildbox","labels":{"site":"rack1"}},"facts":{"arch":"x86_64","cpus_logical":16,"cpus_physical":8,"memory_bytes":68719476736,"kvm":true,"kernel":"6.12.0","os":"Debian GNU/Linux 13"},"ceiling":{"slots":12,"cpus":16.0,"memory":"48g","memory_bytes":51539607552},"slots":12,"mode":"system","pools":{"work":{"reserved":4,"max":6,"priority":0,"preemptible":false,"closed":false,"held_weight":5,"running":3,"revoked":0,"queued":1,"overcommitted":0},"external":{"reserved":0,"max":8,"priority":1,"preemptible":false,"closed":false,"held_weight":4,"running":1,"revoked":0,"queued":1,"overcommitted":0},"lend":{"reserved":0,"max":8,"priority":2,"preemptible":true,"closed":true,"held_weight":0,"running":0,"revoked":0,"queued":0,"overcommitted":0},"observed":{"reserved":0,"max":12,"priority":3,"preemptible":false,"closed":false,"held_weight":3,"running":1,"revoked":0,"queued":0,"overcommitted":0}},"load":{"pressure":{"cpu":{"some":{"avg10":38.2,"avg60":30.56},"full":{"avg10":9.55,"avg60":7.64}},"memory":{"some":{"avg10":2.1,"avg60":1.68},"full":{"avg10":0.53,"avg60":0.42}},"io":{"some":{"avg10":6.4,"avg60":5.12},"full":{"avg10":1.6,"avg60":1.28}}},"loadavg":[11.4,9.8,7.2],"mem_available_bytes":21474836480,"mem_total_bytes":68719476736,"cgroup_v2":true},"lend":{"eligible":false,"reason":"cpu pressure 38.2% is above 10%","quiet_since":null,"quiet_s":600,"window":null,"pools":["lend"],"switch":true,"thresholds":{"cpu":10.0}},"leases":[{"lease_id":"gh.buildbox-1.8812.1.test","kind":"external","pool":"external","weight":4,"user":"runner","session":null,"labels":{"consumer":"github-runner","repository":"acme/api","job":"test"},"ttl_s":15,"expires_at":1760400011.0,"acquired_at":1760399588.0,"grant":1841,"revoked":false,"revoked_at":null,"revoke_reason":null,"revoke_deadline":null},{"lease_id":"cc.toolu_01H8","kind":"work","pool":"work","weight":2,"user":"alice","session":"cc-7f3a","labels":{"agent":"claude-code","cmd":"pytest -n auto"},"ttl_s":15,"expires_at":1760400009.0,"acquired_at":1760399905.0,"grant":1852,"revoked":false,"revoked_at":null,"revoke_reason":null,"revoke_deadline":null},{"lease_id":"cc.toolu_01K2","kind":"work","pool":"work","weight":2,"user":"alice","session":"cc-91be","labels":{"agent":"claude-code","cmd":"cargo build --release"},"ttl_s":15,"expires_at":1760400013.0,"acquired_at":1760399969.0,"grant":1855,"revoked":false,"revoked_at":null,"revoke_reason":null,"revoke_deadline":null},{"lease_id":"3c1f0a9e2b7d","kind":"work","pool":"work","weight":1,"user":"bob","session":null,"labels":{"cmd":"make -j"},"ttl_s":15,"expires_at":1760400006.0,"acquired_at":1760398790.0,"grant":1799,"revoked":false,"revoked_at":null,"revoke_reason":null,"revoke_deadline":null},{"lease_id":"observed.training-prep.48211","kind":"observed","pool":"observed","weight":3,"user":"carol","session":null,"labels":{"rule":"training-prep"},"ttl_s":null,"expires_at":null,"acquired_at":1760396400.0,"grant":1700,"revoked":false,"revoked_at":null,"revoke_reason":null,"revoke_deadline":null}],"queue":[{"lease_id":"cc.toolu_01M9","kind":"work","pool":"work","weight":2,"user":"bob","session":"codex-2","labels":{"agent":"codex","cmd":"npm test"},"ttl_s":15,"expires_at":1760400014.0,"queued_at":1760399952.0,"position":1,"blocked":"pool work is at 5 of 6; this needs 2"},{"lease_id":"gh.buildbox-2.8813.1.lint","kind":"external","pool":"external","weight":4,"user":"runner","session":null,"labels":{"consumer":"github-runner","repository":"acme/web","job":"e2e"},"ttl_s":15,"expires_at":1760400012.0,"queued_at":1760399980.0,"position":1,"blocked":"machine has 0 of 12 slots free"}]},"idle":{"schema":2,"time":1760400000.0,"version":"0.2.0","machine":{"name":"buildbox","labels":{"site":"rack1"}},"facts":{"arch":"x86_64","cpus_logical":16,"cpus_physical":8,"memory_bytes":68719476736,"kvm":true,"kernel":"6.12.0","os":"Debian GNU/Linux 13"},"ceiling":{"slots":12,"cpus":16.0,"memory":"48g","memory_bytes":51539607552},"slots":12,"mode":"system","pools":{"work":{"reserved":4,"max":6,"priority":0,"preemptible":false,"closed":false,"held_weight":0,"running":0,"revoked":0,"queued":0,"overcommitted":0},"external":{"reserved":0,"max":8,"priority":1,"preemptible":false,"closed":false,"held_weight":0,"running":0,"revoked":0,"queued":0,"overcommitted":0},"lend":{"reserved":0,"max":8,"priority":2,"preemptible":true,"closed":true,"held_weight":0,"running":0,"revoked":0,"queued":0,"overcommitted":0},"observed":{"reserved":0,"max":12,"priority":3,"preemptible":false,"closed":false,"held_weight":0,"running":0,"revoked":0,"queued":0,"overcommitted":0}},"load":{"pressure":{"cpu":{"some":{"avg10":0.4,"avg60":0.32},"full":{"avg10":0.1,"avg60":0.08}},"memory":{"some":{"avg10":0,"avg60":0.0},"full":{"avg10":0.0,"avg60":0.0}},"io":{"some":{"avg10":0.1,"avg60":0.08},"full":{"avg10":0.03,"avg60":0.02}}},"loadavg":[0.3,0.4,0.5],"mem_available_bytes":21474836480,"mem_total_bytes":68719476736,"cgroup_v2":true},"lend":{"eligible":false,"reason":"quiet for 120s of 600s","quiet_since":1760399880.0,"quiet_s":600,"window":null,"pools":["lend"],"switch":true,"thresholds":{"cpu":10.0}},"leases":[],"queue":[]},"events":{"events":[{"seq":901,"time":1760399300.0,"type":"lend_opened","reason":"idle for 600s"},{"seq":902,"time":1760399310.0,"type":"granted","lease_id":"lend.golden","kind":"lend","pool":"lend","user":"dave","weight":6},{"seq":903,"time":1760399588.0,"type":"granted","lease_id":"gh.buildbox-1.8812.1.test","kind":"external","pool":"external","user":"runner","weight":4},{"seq":904,"time":1760399589.0,"type":"revoked","lease_id":"lend.golden","kind":"lend","pool":"lend","user":"dave","weight":6,"reason":"non-lend work waiting"},{"seq":905,"time":1760399589.0,"type":"lend_closed","reason":"non-lend work waiting"},{"seq":906,"time":1760399605.0,"type":"released","lease_id":"lend.golden","kind":"lend","pool":"lend","user":"dave","weight":6},{"seq":907,"time":1760399905.0,"type":"granted","lease_id":"cc.toolu_01H8","kind":"work","pool":"work","user":"alice","weight":2},{"seq":908,"time":1760399952.0,"type":"queued","lease_id":"cc.toolu_01M9","kind":"work","pool":"work","user":"bob","weight":2,"position":1},{"seq":909,"time":1760399969.0,"type":"granted","lease_id":"cc.toolu_01K2","kind":"work","pool":"work","user":"alice","weight":2},{"seq":910,"time":1760399980.0,"type":"queued","lease_id":"gh.buildbox-2.8813.1.lint","kind":"external","pool":"external","user":"runner","weight":4,"position":1}],"next":911}};
+
+var P = new URLSearchParams(location.search);
+// The token moves from the address into this tab's sessionStorage, so it stays out of the
+// address bar, history and anything copied from them; a reload in the tab still has it.
+var TOKEN = P.get('token');
+try {
+  if (TOKEN) {
+    sessionStorage.setItem('leasehold-token', TOKEN);
+    P.delete('token');
+    var rest = P.toString();
+    history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
+  } else {
+    TOKEN = sessionStorage.getItem('leasehold-token');
+  }
+} catch (e) { /* storage blocked: the token stays in the address */ }
+var FIXTURE = P.get('fixture');
+var POLL_MS = 2000;
+var HISTORY_S = 300;
+var KNOWN = ['work', 'external', 'lend', 'observed'];
+
+var S = {
+  source: null, fixtureName: null, fixtureWhy: null,
+  status: null, receivedAt: 0, everOk: false,
+  events: [], seen: {}, next: 0, history: [],
+  conn: 'connecting', failures: 0,
+  prevQueue: null, prevLend: null, prevConn: null
+};
+
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function $(id) { return document.getElementById(id); }
+function qs(extra) {
+  var parts = [];
+  if (extra) parts.push(extra);
+  if (TOKEN) parts.push('token=' + encodeURIComponent(TOKEN));
+  return parts.length ? '?' + parts.join('&') : '';
+}
+
+/* ---------- formatting ---------- */
+function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
+function dur(s) {
+  if (s == null || !isFinite(s)) return '';
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + 's';
+  var m = Math.floor(s / 60), r = s % 60;
+  if (m < 60) return r ? m + 'm ' + (r < 10 ? '0' : '') + r + 's' : m + 'm';
+  var h = Math.floor(m / 60), mm = m % 60;
+  if (h < 48) return h + 'h ' + (mm < 10 ? '0' : '') + mm + 'm';
+  return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+}
+function clock(t) {
+  var d = new Date(t * 1000);
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function gib(b) { return b == null ? '?' : (b / 1073741824).toFixed(b >= 10 * 1073741824 ? 0 : 1) + ' GiB'; }
+function pct(v) { return v == null ? '?' : (v >= 100 ? v.toFixed(0) : v.toFixed(1)); }
+function sentence(s) { s = String(s || ''); return s ? s.charAt(0).toUpperCase() + s.slice(1) + (/[.!?]$/.test(s) ? '' : '.') : ''; }
+function now() {
+  if (!S.status) return Date.now() / 1000;
+  if (S.source === 'fixture') return S.status.time;
+  return S.status.time + (Date.now() - S.receivedAt) / 1000;
+}
+
+/* ---------- pools and kinds ---------- */
+var extraIdx = {};
+function pk(name) {
+  if (KNOWN.indexOf(name) >= 0) return name;
+  if (!(name in extraIdx)) extraIdx[name] = 'x' + (Object.keys(extraIdx).length % 3);
+  return extraIdx[name];
+}
+function kindMark(kind) {
+  var c = 'km c-' + pk(kind);
+  switch (kind) {
+    case 'work': return '<svg class="' + c + '" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="currentColor"/></svg>';
+    case 'external': return '<svg class="' + c + '" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1 11 11H1Z" fill="currentColor"/></svg>';
+    case 'lend': return '<svg class="' + c + '" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.25" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>';
+    case 'observed': return '<svg class="' + c + '" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2 7 7 2M5 10 10 5" stroke="currentColor" stroke-width="1.5"/></svg>';
+    default: return '<svg class="' + c + '" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1 11 6 6 11 1 6Z" fill="currentColor"/></svg>';
+  }
+}
+function kindCell(kind) { return '<span class="kind">' + kindMark(kind) + '<span>' + esc(kind) + '</span></span>'; }
+function pips(w, pool) {
+  w = w || 0;
+  var out = '<span class="pips c-' + pk(pool) + '" aria-hidden="true">';
+  for (var i = 0; i < Math.min(w, 8); i++) out += '<i></i>';
+  out += '</span>';
+  return out + '<span class="pips-n">' + (w > 8 ? '×' : '') + w + '</span><span class="vh"> ' + plural(w, 'slot') + '</span>';
+}
+function poolsSorted(st) {
+  return Object.keys(st.pools || {}).map(function (n) { return [n, st.pools[n]]; })
+    .sort(function (a, b) { return (a[1].priority || 0) - (b[1].priority || 0) || a[0].localeCompare(b[0]); });
+}
+function slotsOf(st) { return (st.ceiling && st.ceiling.slots) || st.slots || 0; }
+function heldOf(st) { var h = 0; (st.leases || []).forEach(function (l) { h += l.weight || 0; }); return h; }
+function labelSummary(l) {
+  var L = l.labels || {};
+  var main = L.cmd || (L.repository && L.job ? L.repository + ' ' + L.job : (L.job || L.repository)) || L.rule || '';
+  var by = L.agent || L.consumer || (L.rule ? 'observed rule' : '');
+  return { main: main, by: by };
+}
+function pressure(st, res) {
+  var p = st.load && st.load.pressure;
+  if (!p || !p[res] || !p[res].some) return null;
+  return p[res].some;
+}
+function threshold(st, res) {
+  var lend = st.lend || {};
+  if (lend.thresholds && typeof lend.thresholds[res] === 'number') return lend.thresholds[res];
+  var m = /(cpu|memory|io) pressure [\d.]+% is above ([\d.]+)%/.exec(lend.reason || '');
+  if (m && m[1] === res) return parseFloat(m[2]);
+  return null;
+}
+
+/* ---------- history and fixtures ---------- */
+function sample(st) {
+  var c = pressure(st, 'cpu'), m = pressure(st, 'memory'), i = pressure(st, 'io');
+  return { t: st.time, cpu: c ? c.avg10 : null, memory: m ? m.avg10 : null, io: i ? i.avg10 : null, held: heldOf(st) };
+}
+function pushHistory(st) {
+  var s = sample(st), h = S.history;
+  if (h.length && h[h.length - 1].t >= s.t) return;
+  h.push(s);
+  while (h.length && h[0].t < s.t - HISTORY_S) h.shift();
+}
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function synthHistory(st, name) {
+  var r = rng(name === 'busy' ? 7 : 3), out = [], T = st.time;
+  var c = st.load.pressure.cpu.some.avg10, m = st.load.pressure.memory.some.avg10, io = st.load.pressure.io.some.avg10;
+  var ec = 0, em = 0, ei = 0;
+  for (var k = 149; k >= 0; k--) {
+    var t = T - k * 2, held, tc, tm, ti;
+    if (name === 'busy') {
+      held = 8 + (t >= T - 95 ? 2 : 0) + (t >= T - 31 ? 2 : 0);
+      tc = held === 8 ? 21 : held === 10 ? 29 : c;
+      tm = 1.2 + (held - 8) * 0.22;
+      ti = 4.2 + (held - 8) * 0.55 + (r() < 0.06 ? 6 : 0);
+    } else {
+      held = t < T - 130 ? 2 : 0;
+      tc = t < T - 130 ? 14 : 0.4;
+      tm = 0; ti = t < T - 130 ? 1.4 : 0.1;
+    }
+    var a = k === 149 ? 1 : 0.18;
+    ec = ec + (tc - ec) * a + (r() - 0.5) * (name === 'busy' ? 2.2 : 0.3);
+    em = em + (tm - em) * a + (r() - 0.5) * 0.15;
+    ei = ei + (ti - ei) * a + (r() - 0.5) * 0.6;
+    out.push({ t: t, cpu: Math.max(0, ec), memory: Math.max(0, em), io: Math.max(0, ei), held: held });
+  }
+  var last = out[out.length - 1];
+  last.cpu = c; last.memory = m; last.io = io; last.held = heldOf(st);
+  return out;
+}
+function loadFixture(name, why) {
+  if (!FX[name]) name = 'busy';
+  S.source = 'fixture'; S.fixtureName = name; S.fixtureWhy = why;
+  S.status = JSON.parse(JSON.stringify(FX[name]));
+  S.receivedAt = Date.now();
+  S.events = name === 'busy' ? FX.events.events.slice() : [];
+  S.history = synthHistory(S.status, name);
+  setConn('demo');
+  render();
+}
+
+/* ---------- networking ---------- */
+function fetchJSON(url) {
+  var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  var timer = ctl ? setTimeout(function () { ctl.abort(); }, 5000) : null;
+  return fetch(url, { cache: 'no-store', signal: ctl ? ctl.signal : undefined }).then(function (res) {
+    if (timer) clearTimeout(timer);
+    if (!res.ok) { var e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+    return res.json();
+  }, function (err) { if (timer) clearTimeout(timer); throw err; });
+}
+function pollStatus() {
+  if (S.source === 'fixture') return;
+  fetchJSON('api/status' + qs()).then(function (st) {
+    S.source = 'live';
+    S.failures = 0;
+    S.status = st; S.receivedAt = Date.now(); S.everOk = true;
+    pushHistory(st);
+    setConn('live');
+    render();
+    pollEvents();
+    setTimeout(pollStatus, POLL_MS);
+  }, function (err) {
+    S.failures++;
+    if (!TOKEN && !S.everOk) { loadFixture('busy', 'auto'); return; }
+    if (err && (err.status === 401 || err.status === 403)) setConn('auth');
+    else setConn(!S.everOk || S.failures >= 3 ? 'down' : 'reconnecting');
+    render();
+    setTimeout(pollStatus, Math.min(POLL_MS * Math.max(1, S.failures), 10000));
+  });
+}
+function pollEvents() {
+  fetchJSON('api/events' + qs('since=' + S.next)).then(function (r) {
+    (r.events || []).forEach(function (e) {
+      if (e.seq != null && S.seen[e.seq]) return;
+      if (e.seq != null) S.seen[e.seq] = 1;
+      S.events.push(e);
+    });
+    if (S.events.length > 300) S.events = S.events.slice(-300);
+    if (typeof r.next === 'number') S.next = r.next;
+    renderEvents();
+  }, function () { /* the status poll reports connection state */ });
+}
+
+/* ---------- announcements ---------- */
+function say(msg) {
+  var el = $('announce');
+  el.textContent = '';
+  setTimeout(function () { el.textContent = msg; }, 50);
+}
+function setConn(c) {
+  if (S.conn === c) return;
+  var was = S.conn;
+  S.conn = c;
+  if (was === 'connecting' && c === 'live') return;
+  var msg = { live: 'Connected to the daemon.', reconnecting: 'Lost the daemon; reconnecting.', down: 'No daemon is answering.', auth: 'The daemon refused this page\'s token.', demo: 'Showing demo data.' }[c];
+  if (msg) say(msg);
+}
+function announceDiff(st) {
+  var q = {}, msgs = [];
+  (st.queue || []).forEach(function (e) { q[e.lease_id] = e; });
+  if (S.prevQueue) {
+    Object.keys(q).forEach(function (id) {
+      if (!S.prevQueue[id]) msgs.push(q[id].user + ' is waiting for ' + plural(q[id].weight, 'slot') + ' in ' + q[id].pool + ': ' + q[id].blocked);
+    });
+    var held = {};
+    (st.leases || []).forEach(function (l) { held[l.lease_id] = l; });
+    Object.keys(S.prevQueue).forEach(function (id) {
+      if (!q[id] && held[id]) msgs.push(held[id].user + ' was granted ' + plural(held[id].weight, 'slot') + ' in ' + held[id].pool + '.');
+    });
+  }
+  var le = st.lend ? !!st.lend.eligible : null;
+  if (S.prevLend != null && le !== S.prevLend) msgs.push(le ? 'Lending opened.' : 'Lending closed: ' + (st.lend.reason || '') + '.');
+  S.prevQueue = q; S.prevLend = le;
+  if (msgs.length) say(msgs.slice(0, 3).join(' '));
+}
+
+/* ---------- rendering ---------- */
+function render() {
+  renderHeader();
+  renderNotice();
+  var main = $('main');
+  if (!S.status) { var down = renderDown(); if (main._down !== down) { main.innerHTML = down; main._down = down; } return; }
+  main._down = null;
+  var st = S.status;
+  if (st.schema != null && st.schema !== 2 && !S.warnedSchema) { S.warnedSchema = true; }
+  announceDiff(st);
+  var stale = S.source === 'live' && S.conn !== 'live';
+  if (!$('p-slots')) {
+    main.innerHTML =
+      '<div class="sheet" id="sheet">' +
+        '<section class="panel" id="p-slots" aria-labelledby="h-slots"></section>' +
+        '<div class="cols">' +
+          '<div class="col">' +
+            '<section class="panel" id="p-queue" aria-labelledby="h-queue"></section>' +
+            '<section class="panel" id="p-leases" aria-labelledby="h-leases"></section>' +
+            '<section class="panel" id="p-pools" aria-labelledby="h-pools"></section>' +
+          '</div>' +
+          '<div class="col">' +
+            '<section class="panel" id="p-pressure" aria-labelledby="h-pressure"></section>' +
+            '<section class="panel" id="p-lending" aria-labelledby="h-lending"></section>' +
+            '<section class="panel" id="p-events" aria-labelledby="h-events"></section>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+  }
+  $('sheet').className = 'sheet' + (stale ? ' stale' : '');
+  patch($('p-slots'), renderSlots(st));
+  var hs = $('held-spark'); if (hs && !hs.firstChild) hs._key = null;
+  patch(hs, heldSpark(st));
+  patch($('p-queue'), renderQueue(st));
+  patch($('p-leases'), renderLeases(st));
+  patch($('p-pools'), renderPools(st));
+  patch($('p-pressure'), renderPressure(st));
+  patch($('p-lending'), renderLending(st));
+  renderEvents();
+  tick();
+}
+
+/* Replace a panel's markup only when its content changed. Ages and countdowns are left to the
+   1 s ticker, and a lease renewal (a new expires_at) only rewrites the attributes, so text
+   selection, focus and a screen reader's place survive the 2 s poll. */
+function patch(el, html) {
+  if (!el) return;
+  var TIMED = / data-(since|until)="[^"]*">[^<]*/g;
+  var key = html.replace(TIMED, '>');
+  if (el._key === key) {
+    if (el._html === html) return;
+    var tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    var a = tmp.querySelectorAll('[data-since],[data-until]'), b = el.querySelectorAll('[data-since],[data-until]');
+    if (a.length === b.length) {
+      for (var i = 0; i < a.length; i++) {
+        ['data-since', 'data-until'].forEach(function (n) { if (a[i].hasAttribute(n)) b[i].setAttribute(n, a[i].getAttribute(n)); });
+      }
+      el._html = html;
+      return;
+    }
+  }
+  el._key = key; el._html = html;
+  el.innerHTML = html;
+}
+
+function renderHeader() {
+  var st = S.status;
+  var c = $('conn');
+  c.setAttribute('data-c', S.conn);
+  $('conn-t').textContent = { live: 'Live', reconnecting: 'Reconnecting', down: 'No daemon', auth: 'Token refused', demo: 'Demo data', connecting: 'Connecting' }[S.conn];
+  if (!st) { $('m-name').textContent = location.host || 'this machine'; $('m-tags').innerHTML = ''; $('m-facts').hidden = true; return; }
+  $('m-name').textContent = (st.machine && st.machine.name) || 'machine';
+  document.title = ((st.machine && st.machine.name) || 'machine') + ' · leasehold';
+  var tags = [];
+  if (st.mode) tags.push('<span class="tag" title="daemon mode">' + esc(st.mode) + '</span>');
+  if (st.version) tags.push('<span class="tag" title="leasehold version">v' + esc(st.version) + '</span>');
+  var labs = (st.machine && st.machine.labels) || {};
+  Object.keys(labs).forEach(function (k) { tags.push('<span>' + esc(k) + '=' + esc(labs[k]) + '</span>'); });
+  $('m-tags').innerHTML = tags.join('');
+  var f = st.facts || {}, ce = st.ceiling || {}, fx = [];
+  if (f.os) fx.push('<span>' + esc(f.os) + '</span>');
+  if (f.kernel) fx.push('<span>kernel <b>' + esc(f.kernel) + '</b></span>');
+  if (f.cpus_logical) fx.push('<span><b>' + esc(f.cpus_logical) + '</b> CPUs' + (f.cpus_physical ? ' (' + esc(f.cpus_physical) + ' cores)' : '') + '</span>');
+  if (f.memory_bytes) fx.push('<span><b>' + gib(f.memory_bytes) + '</b> RAM</span>');
+  fx.push('<span>ceiling <b>' + esc(slotsOf(st)) + '</b> slots' + (ce.cpus ? ', ' + esc(ce.cpus) + ' CPUs' : '') + (ce.memory_bytes ? ', ' + gib(ce.memory_bytes) : '') + '</span>');
+  $('m-facts').innerHTML = fx.join('');
+  $('m-facts').hidden = false;
+}
+
+function renderNotice() {
+  var n = $('notice');
+  n.className = 'notice';
+  if (S.source === 'fixture') {
+    var other = S.fixtureName === 'busy' ? 'idle' : 'busy';
+    n.innerHTML = '<span><b>Demo data</b> from the built-in “' + esc(S.fixtureName) + '” fixture; nothing here comes from a running daemon.' +
+      (S.fixtureWhy === 'auto' ? ' No daemon answered and the URL has no token.' : '') + '</span>' +
+      '<a href="?fixture=' + other + '">Show the ' + other + ' fixture</a>';
+  } else if (S.status && S.conn !== 'live') {
+    n.className = 'notice stale';
+    n.innerHTML = '<span><b>Stale.</b> Showing data from ' + clock(S.status.time) + '; ' + (S.conn === 'auth' ? 'the daemon refused the token.' : 'retrying every few seconds.') + '</span>';
+  } else n.innerHTML = '';
+}
+
+function renderDown() {
+  if (S.conn === 'connecting') return '<div class="sheet"><div class="down"><h2>Connecting to the daemon</h2><p>Asking <code>api/status</code> on this address.</p></div></div>';
+  if (S.conn === 'auth') return '<div class="sheet"><div class="down"><h2>The daemon refused this page’s token</h2>' +
+    '<p>The token in this URL is missing, mistyped or from an earlier run of the daemon. Ask for a fresh link on the machine itself:</p><pre>leasehold ui</pre>' +
+    '<p class="retry">Retrying every few seconds.</p></div></div>';
+  return '<div class="sheet"><div class="down"><h2>No daemon is answering</h2>' +
+    '<p>This page reads <code>api/status</code> from the leasehold daemon, and nothing answered. Start the daemon on this machine:</p>' +
+    '<pre>leasehold serve</pre>' +
+    '<p>Then open the link that <code>leasehold ui</code> prints; it carries the access token. In a terminal, <code>leasehold top</code> shows the same view.</p>' +
+    '<p class="retry">Retrying every few seconds. <a href="?fixture=busy">See demo data instead</a>.</p></div></div>';
+}
+
+function spark(points, key, opts) {
+  var W = 300, H = 40, t1 = now(), t0 = t1 - HISTORY_S;
+  var pts = points.filter(function (p) { return p[key] != null && p.t >= t0; });
+  if (pts.length < 2) return '<div class="collect">Collecting history: ' + (pts.length ? '1 sample' : 'no samples') + ' so far</div>';
+  var max = opts.max;
+  function X(t) { return ((t - t0) / (t1 - t0) * W).toFixed(1); }
+  function Y(v) { return (H - 1 - Math.min(v, max) / max * (H - 3)).toFixed(1); }
+  var d = '';
+  pts.forEach(function (p, i) {
+    if (opts.step && i) d += 'L' + X(p.t) + ' ' + Y(pts[i - 1][key]);
+    d += (i ? 'L' : 'M') + X(p.t) + ' ' + Y(p[key]);
+  });
+  var area = d + 'L' + X(pts[pts.length - 1].t) + ' ' + H + 'L' + X(pts[0].t) + ' ' + H + 'Z';
+  var out = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="' + esc(opts.label) + '">';
+  out += '<line x1="0" x2="' + W + '" y1="' + (H - 0.5) + '" y2="' + (H - 0.5) + '" stroke="var(--rule-strong)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+  if (opts.ceil != null) out += '<line x1="0" x2="' + W + '" y1="' + Y(opts.ceil) + '" y2="' + Y(opts.ceil) + '" stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"/>';
+  if (opts.threshold != null) out += '<line x1="0" x2="' + W + '" y1="' + Y(opts.threshold) + '" y2="' + Y(opts.threshold) + '" stroke="var(--thresh)" stroke-width="1" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>';
+  out += '<path d="' + area + '" fill="var(--spark-fill)" stroke="none"/>';
+  out += '<path d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>';
+  return out + '</svg>';
+}
+function niceMax(vals, floor) {
+  var m = Math.max.apply(null, [floor].concat(vals.filter(function (v) { return v != null; }))) * 1.15;
+  var steps = [5, 10, 20, 25, 50, 75, 100];
+  for (var i = 0; i < steps.length; i++) if (m <= steps[i]) return steps[i];
+  return 100;
+}
+
+function bayLayout(st) {
+  var slots = slotsOf(st), items = [], x = 0, by = {};
+  (st.leases || []).forEach(function (l) { (by[l.pool] = by[l.pool] || []).push(l); });
+  var order = poolsSorted(st).map(function (e) { return e[0]; });
+  Object.keys(by).forEach(function (p) { if (order.indexOf(p) < 0) order.push(p); });
+  order.forEach(function (name) {
+    var ls = (by[name] || []).slice().sort(function (a, b) { return (a.acquired_at || 0) - (b.acquired_at || 0); });
+    var held = 0;
+    ls.forEach(function (l) { items.push({ t: 'lease', l: l, x: x, w: l.weight || 0, pool: name }); x += l.weight || 0; held += l.weight || 0; });
+    var p = (st.pools || {})[name] || {};
+    var rf = Math.max(0, (p.reserved || 0) - held);
+    if (rf) { items.push({ t: 'res', x: x, w: rf, pool: name }); x += rf; }
+  });
+  var used = heldOf(st);
+  return { items: items, n: Math.max(slots, x, 1), slots: slots, used: used, reservedFree: x - used };
+}
+function blk(cls, x, w, inner, title) {
+  return '<div class="blk ' + cls + '" style="--x:' + x + ';--w:' + w + '" title="' + esc(title) + '">' + inner + '</div>';
+}
+function renderSlots(st) {
+  var L = bayLayout(st), n = L.n, free = L.slots - L.used, q = st.queue || [];
+  var cells = '';
+  for (var i = 0; i < n; i++) cells += '<i' + (i >= L.slots ? ' class="over"' : '') + '></i>';
+  var nums = '', every = n > 32 ? 8 : n > 16 ? 4 : 1;
+  for (var j = 0; j < n; j++) nums += '<i>' + ((j + 1) % every === 0 || j === 0 ? j + 1 : '') + '</i>';
+  var held = '';
+  L.items.forEach(function (it) {
+    var cls = 'p-' + pk(it.pool);
+    if (it.t === 'res') {
+      held += blk('res c-' + pk(it.pool), it.x, it.w, '<span class="u">' + esc(it.pool) + '</span><span class="d">reserved</span><span class="i">R</span>',
+        plural(it.w, 'slot') + ' reserved for pool ' + it.pool + ', free');
+      return;
+    }
+    var l = it.l, s = labelSummary(l);
+    held += blk(cls + (l.revoked ? ' rv' : ''), it.x, it.w,
+      '<span class="u">' + esc(l.user) + '</span><span class="d">' + esc(l.revoked ? 'revoked' : (s.main || l.kind)) + '</span><span class="i">' + esc((l.user || '?').charAt(0)) + '</span>',
+      l.user + (l.session ? ' (' + l.session + ')' : '') + ': ' + plural(it.w, 'slot') + ' in ' + it.pool + (s.main ? ', ' + s.main : '') + (l.revoked ? ', revoked' : ''));
+  });
+  var wait = '', qx = 0, hidden = 0;
+  q.forEach(function (e) {
+    var w = e.weight || 0;
+    if (qx + w > n) { hidden++; return; }
+    var s = labelSummary(e);
+    wait += blk('q p-' + pk(e.pool), qx, w,
+      '<span class="u">' + esc(e.user) + '</span><span class="d">' + esc(s.main || e.pool) + '</span><span class="i">' + esc((e.user || '?').charAt(0)) + '</span>',
+      e.user + ' waits for ' + plural(w, 'slot') + ' in ' + e.pool + ': ' + (e.blocked || ''));
+    qx += w;
+  });
+  if (!q.length) wait = '<div class="lane-note">Nobody waiting</div>';
+  else if (hidden) wait += '<div class="lane-note" style="justify-content:flex-end;padding-right:8px">+' + hidden + ' more</div>';
+
+  var legend = poolsSorted(st).map(function (e) {
+    return '<span><i class="sw p-' + pk(e[0]) + '"></i>' + esc(e[0]) + ' <b>' + (e[1].held_weight || 0) + '</b>/' + e[1].max + '</span>';
+  }).join('') + (L.reservedFree ? '<span><i class="sw res"></i>reserved, free</span>' : '') +
+    (L.used > L.slots ? '<span style="color:var(--bad)"><b>over the ceiling by ' + (L.used - L.slots) + '</b></span>' : '');
+
+  var summary = L.used + ' of ' + L.slots + ' slots held; ' + plural(q.length, 'lease') + ' waiting.';
+  var subFree = free <= 0 ? 'Every slot is held.' : (L.reservedFree ? L.reservedFree + ' of the free slots are reserved for ' + reservedNames(st, L) + '.' : 'Any pool with room can take them.');
+  var hmax = Math.max(L.slots, 1);
+  return '<div class="ph"><h2 id="h-slots">Slots</h2><span class="aside">one bay per slot, leases span their weight</span></div>' +
+    '<div class="slots">' +
+      '<div class="free' + (free <= 0 ? ' zero' : '') + '">' +
+        '<div class="fc"><span class="plate" aria-label="' + (free <= 0 ? 'Full: no slots free' : free + ' slots free') + '">' + (free <= 0 ? '<b class="full">FULL</b>' : '<span class="n">' + free + '</span><b>FREE</b>') + '</span><span class="nl"><span>' + (free <= 0 ? '0 of ' + L.slots + ' slots free' : 'of ' + L.slots + ' slots') + '</span></span></div>' +
+        '<div class="sub">' + esc(subFree) + '<br><b>' + L.used + '</b> held · <b>' + q.length + '</b> waiting</div>' +
+        '<div class="heldspark" id="held-spark"></div>' +
+      '</div>' +
+      '<div><div class="lanes" role="img" aria-label="' + esc(summary) + '" style="--n:' + n + '">' +
+        '<div class="lane-k">Held</div><div class="lane"><div class="bays">' + cells + '</div>' + held + '</div>' +
+        '<div class="lane-k">Waiting</div><div class="lane wait"><div class="bays">' + cells + '</div>' + wait + '</div>' +
+        '<div></div><div class="bayno" aria-hidden="true">' + nums + '</div>' +
+        '<div class="legend">' + legend + '</div>' +
+      '</div></div>' +
+    '</div>';
+}
+function heldSpark(st) {
+  var slots = slotsOf(st), hmax = Math.max(slots, 1);
+  return '<div class="cap"><span>held, last 5 min</span><span>' + hmax + '</span></div>' +
+    spark(S.history, 'held', { max: hmax, step: true, ceil: slots, label: 'Held slots over the last five minutes' });
+}
+function reservedNames(st, L) {
+  var names = [];
+  L.items.forEach(function (it) { if (it.t === 'res' && names.indexOf(it.pool) < 0) names.push(it.pool); });
+  return names.join(', ');
+}
+
+function renderQueue(st) {
+  var q = (st.queue || []).slice();
+  var head = '<div class="ph"><h2 id="h-queue">Waiting</h2><span class="aside">' + (q.length ? plural(q.length, 'lease') + ', why each one waits' : 'queue empty') + '</span></div>';
+  if (!q.length) return head + '<p class="empty">Nobody is waiting. A new lease is granted at once while its pool and the machine have room.</p>';
+  var t = now();
+  return head + '<ol class="queue">' + q.map(function (e) {
+    var s = labelSummary(e);
+    return '<li>' +
+      '<div class="qh">' +
+        '<span class="qpos" title="position in pool ' + esc(e.pool) + '">#' + esc(e.position) + ' in ' + esc(e.pool) + '</span>' +
+        kindMark(e.kind) +
+        '<span class="qwho"><b>' + esc(e.user) + '</b>' + (e.session ? '<span class="sess">' + esc(e.session) + '</span>' : '') + '</span>' +
+        (s.main ? '<span class="qcmd">' + esc(s.main) + '</span>' : '') +
+        '<span class="qmeta"><span>' + pips(e.weight, e.pool) + '</span><span>waiting <b class="mono" data-since="' + esc(e.queued_at) + '">' + dur(t - e.queued_at) + '</b></span></span>' +
+      '</div>' +
+      '<p class="qwhy"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="1" y="5.5" width="12" height="3" rx="0.5" fill="currentColor"/><rect x="1" y="2" width="1.6" height="10" fill="currentColor"/></svg><span><span class="vh">Waiting because: </span>' + esc(sentence(e.blocked || 'waiting for its turn')) + '</span></p>' +
+    '</li>';
+  }).join('') + '</ol>';
+}
+
+function renderPressure(st) {
+  var head = '<div class="ph"><h2 id="h-pressure">Pressure</h2><span class="aside">PSI some, avg10</span></div>';
+  var rows = '';
+  var noPsi = !pressure(st, 'cpu') && !pressure(st, 'memory') && !pressure(st, 'io');
+  if (noPsi) {
+    rows = '<p class="empty">This kernel reports no pressure stall information, so leasehold cannot judge idleness and lending stays closed. PSI needs Linux 4.20 or later built with <code>CONFIG_PSI</code>; some kernels also need <code>psi=1</code> on the boot line.</p>';
+  } else {
+    [['cpu', 'CPU'], ['memory', 'Memory'], ['io', 'IO']].forEach(function (r) {
+      var p = pressure(st, r[0]);
+      if (!p) { rows += '<div class="pr"><div class="pr-k">' + r[1] + '</div><div class="pr-v">–</div><div class="pr-s"><div class="collect">not reported</div></div></div>'; return; }
+      var th = threshold(st, r[0]);
+      var hot = th != null && p.avg10 > th;
+      var vals = S.history.map(function (h) { return h[r[0]]; }).concat([p.avg10, th]);
+      var max = niceMax(vals, 5);
+      var full = st.load.pressure[r[0]].full;
+      rows += '<div class="pr">' +
+        '<div class="pr-k">' + r[1] + '</div>' +
+        '<div class="pr-v' + (hot ? ' hot' : '') + '">' + pct(p.avg10) + '<span>%</span></div>' +
+        '<div class="pr-s">' + spark(S.history, r[0], { max: max, threshold: th, label: r[1] + ' pressure over the last five minutes, scale 0 to ' + max + ' percent' }) + '</div>' +
+        '<div class="pr-m"><span>' + (hot ? '<span class="hotnote">above the ' + th + '% lending limit</span>' : (th != null ? '<span class="th">- - ' + th + '% lending limit</span>' : 'scale 0–' + max + '%')) + '</span>' +
+          '<span>60s ' + pct(p.avg60) + '%' + (full ? ' · full ' + pct(full.avg10) + '%' : '') + '</span></div>' +
+      '</div>';
+    });
+  }
+  var ld = st.load || {}, la = ld.loadavg || [], f = st.facts || {};
+  var sys = '<div class="sys">';
+  if (la.length) sys += '<div class="row"><span>Load average, 1 / 5 / 15 min' + (f.cpus_logical ? ' on ' + f.cpus_logical + ' CPUs' : '') + '</span><b>' + la.map(function (v) { return v.toFixed(1); }).join(' · ') + '</b></div>';
+  if (ld.mem_available_bytes != null) {
+    var tot = ld.mem_total_bytes || f.memory_bytes;
+    sys += '<div class="row"><span>Memory available' + (tot ? ' of ' + gib(tot) : '') + '</span><b>' + gib(ld.mem_available_bytes) + '</b></div>';
+    if (tot) sys += '<div class="membar" role="img" aria-label="' + Math.round(ld.mem_available_bytes / tot * 100) + ' percent of memory available"><i style="width:' + (ld.mem_available_bytes / tot * 100).toFixed(1) + '%"></i></div>';
+  }
+  sys += '</div>';
+  return head + rows + sys + (noPsi ? '' : '<p class="foot">Share of the last 10 s in which at least one task stalled waiting for the resource.</p>');
+}
+
+function renderLending(st) {
+  var lend = st.lend || {};
+  var head = '<div class="ph"><h2 id="h-lending">Lending</h2><span class="aside">' + (lend.pools && lend.pools.length ? 'to pool ' + esc(lend.pools.join(', ')) : '') + '</span></div>';
+  if (!st.lend) return head + '<p class="empty">This daemon reports no lending state.</p>';
+  var line, prog = '';
+  var openMark = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.25" fill="currentColor" stroke="currentColor" stroke-width="2.5"/></svg>';
+  var shutMark = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.25" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 9 9 3" stroke="currentColor" stroke-width="2"/></svg>';
+  if (lend.switch === false) {
+    line = '<p class="lend-line">' + shutMark + '<span>Lending is switched off <span class="rsn">in this daemon’s settings.</span></span></p>';
+  } else if (lend.eligible) {
+    line = '<p class="lend-line lend-open">' + openMark + '<span>Lending open<span class="rsn">' + (lend.reason ? ': ' + esc(lend.reason) : '') + '. Lent leases are revoked the moment other work needs the slots.</span></span></p>';
+  } else {
+    line = '<p class="lend-line">' + shutMark + '<span>Lending closed<span class="rsn">: ' + esc(lend.reason || 'not idle') + '</span></span></p>';
+  }
+  if (lend.switch !== false && lend.quiet_s) {
+    var el = lend.quiet_since != null ? Math.max(0, now() - lend.quiet_since) : 0;
+    if (lend.eligible) el = lend.quiet_s;
+    var frac = Math.min(1, el / lend.quiet_s);
+    var cap = lend.eligible ? 'Quiet period met' : (lend.quiet_since == null ? 'Quiet period not started: pressure is too high' : 'Quiet period, ' + dur(el) + ' of ' + dur(lend.quiet_s));
+    var left = lend.eligible ? '' : (lend.quiet_since == null ? 'needs ' + dur(lend.quiet_s) : dur(lend.quiet_s - el) + ' to go');
+    prog = '<div class="qp"><div class="cap"><span>' + esc(cap) + '</span><span>' + esc(left) + '</span></div>' +
+      '<div class="bar" role="progressbar" aria-label="Quiet period" aria-valuemin="0" aria-valuemax="' + lend.quiet_s + '" aria-valuenow="' + Math.round(el) + '"><i style="width:' + (frac * 100).toFixed(1) + '%"></i></div></div>';
+  }
+  var win = lend.window ? '<p class="foot">Lending window: ' + esc(typeof lend.window === 'string' ? lend.window : JSON.stringify(lend.window)) + '</p>' : '';
+  return head + line + prog + win;
+}
+
+function renderPools(st) {
+  var list = poolsSorted(st), n = Math.max(slotsOf(st), 1);
+  var head = '<div class="ph"><h2 id="h-pools">Pools</h2><span class="aside">in priority order, scale ' + n + ' slots</span></div>';
+  if (!list.length) return head + '<p class="empty">No pools are configured.</p>';
+  return head + '<div class="pools">' + list.map(function (e) {
+    var name = e[0], p = e[1], k = pk(name);
+    var cells = '';
+    for (var i = 0; i < n; i++) cells += '<i' + (i >= p.max ? ' class="cap"' : '') + '></i>';
+    var flags = '';
+    if (p.closed) flags += '<span class="flag closed">closed</span>';
+    if (p.preemptible) flags += '<span class="flag" title="leases here are revoked when other work needs the slots">preemptible</span>';
+    if (p.overcommitted) flags += '<span class="flag over">over by ' + esc(p.overcommitted) + '</span>';
+    var h = Math.min(p.held_weight || 0, n);
+    return '<div class="pool">' +
+      '<div class="pool-h"><span class="nm">' + kindMark(KNOWN.indexOf(name) >= 0 ? name : '?') + esc(name) + '</span>' + flags +
+        '<span class="nums"><b>' + (p.held_weight || 0) + '</b> of max ' + p.max + '</span></div>' +
+      '<div class="pbar" style="--n:' + n + ';--h:' + h + ';--m:' + Math.min(p.max, n) + ';--r:' + Math.min(p.reserved || 0, n) + '" role="img" aria-label="' + esc(name + ': ' + (p.held_weight || 0) + ' held of max ' + p.max + (p.reserved ? ', ' + p.reserved + ' reserved' : '')) + '">' +
+        '<div class="trk">' + cells + '</div>' +
+        (h ? '<div class="fill p-' + k + '"></div>' : '') +
+        (p.max < n ? '<div class="maxm"></div>' : '') +
+        (p.reserved ? '<div class="resm"></div><div class="lab" style="left:calc(' + p.reserved + ' / ' + n + ' * 100% + 4px)">reserves ' + p.reserved + '</div>' : '') +
+      '</div>' +
+      '<div class="pool-f"><span>' + plural(p.running || 0, 'running', 'running') + '</span><span>' + (p.queued || 0) + ' waiting</span>' +
+        (p.revoked ? '<span style="color:var(--bad)">' + p.revoked + ' revoked</span>' : '') + '<span>priority ' + esc(p.priority) + '</span></div>' +
+    '</div>';
+  }).join('') + '</div>';
+}
+
+function renderLeases(st) {
+  var ls = (st.leases || []).slice(), t = now();
+  var prio = {};
+  poolsSorted(st).forEach(function (e, i) { prio[e[0]] = i; });
+  ls.sort(function (a, b) { return (prio[a.pool] || 0) - (prio[b.pool] || 0) || (a.acquired_at || 0) - (b.acquired_at || 0); });
+  var head = '<div class="ph"><h2 id="h-leases">Holding</h2><span class="aside">' + (ls.length ? plural(ls.length, 'lease') + ', ' + plural(heldOf(st), 'slot') : 'no leases') + '</span></div>';
+  if (!ls.length) return head + '<p class="empty">Nothing holds a lease. <code>leasehold hold -- &lt;cmd&gt;</code> takes one.</p>';
+  return head + '<div class="tbl-wrap"><table class="leases"><thead><tr>' +
+    '<th scope="col">Kind</th><th scope="col">Holder</th><th scope="col">Running</th><th scope="col">Pool</th><th scope="col">Slots</th><th scope="col" class="num">Held for</th><th scope="col" class="num">Expires</th>' +
+    '</tr></thead><tbody>' + ls.map(function (l) {
+      var s = labelSummary(l);
+      var exp = l.expires_at == null ? '<span>while running</span>' : '<span data-until="' + esc(l.expires_at) + '">' + until(l.expires_at, t) + '</span>';
+      var rv = '';
+      if (l.revoked) {
+        rv = '<span class="rvnote">Revoked' + (l.revoke_reason ? ': ' + esc(l.revoke_reason) : '') +
+          (l.revoke_deadline ? '; must release in <span data-until="' + esc(l.revoke_deadline) + '">' + until(l.revoke_deadline, t) + '</span>' : '') + '</span>';
+      }
+      var extra = Object.keys(l.labels || {}).map(function (k) { return k + '=' + l.labels[k]; }).join(' ');
+      return '<tr' + (l.revoked ? ' class="rv"' : '') + '>' +
+        '<td class="kindc">' + kindCell(l.kind) + '</td>' +
+        '<td class="who"><b>' + esc(l.user) + '</b><span class="sess">' + esc(l.session || 'no session') + '</span></td>' +
+        '<td class="what" title="' + esc(extra + ' · ' + l.lease_id) + '"><span class="cmd">' + esc(s.main || '–') + '</span><span class="by">' + esc(s.by) + (s.by ? ' · ' : '') + '<span class="mono">' + esc(l.lease_id) + '</span></span>' + rv + '</td>' +
+        '<td class="poolc">' + esc(l.pool) + '</td>' +
+        '<td class="slotc">' + pips(l.weight, l.pool) + '</td>' +
+        '<td class="num" data-l="held"><span data-since="' + esc(l.acquired_at) + '">' + dur(t - l.acquired_at) + '</span></td>' +
+        '<td class="num" data-l="expires">' + exp + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+function until(at, t) {
+  var d = at - t;
+  if (d < 0) return 'overdue ' + dur(-d);
+  return 'in ' + dur(d);
+}
+
+function eventText(e) {
+  var who = esc(e.user || 'someone'), w = e.weight != null ? plural(e.weight, 'slot') : '', pool = e.pool ? ' in ' + esc(e.pool) : '';
+  var id = e.lease_id ? ' <span class="id">' + esc(e.lease_id) + '</span>' : '';
+  switch (e.type) {
+    case 'granted': return who + ' took ' + w + pool + id;
+    case 'queued': return who + ' queued for ' + w + pool + (e.position != null ? ', #' + esc(e.position) : '') + id;
+    case 'released': return who + ' released ' + w + pool + id;
+    case 'expired': return who + '’s lease' + pool + ' expired without a heartbeat' + id;
+    case 'revoked': return 'revoked ' + who + '’s ' + w + pool + (e.reason ? ': ' + esc(e.reason) : '') + id;
+    case 'lend_opened': return 'lending opened' + (e.reason ? ': ' + esc(e.reason) : '');
+    case 'lend_closed': return 'lending closed' + (e.reason ? ': ' + esc(e.reason) : '');
+    case 'observed_started': return who + ' started ' + esc((e.labels && e.labels.rule) || e.rule || 'an observed app') + (w ? ', counted as ' + w : '') + id;
+    case 'observed_ended': return who + '’s observed app ended' + (w ? ', ' + w + ' back' : '') + id;
+    default: return esc(e.type) + id;
+  }
+}
+var TYPE_WORD = { granted: 'grant', queued: 'queue', released: 'release', expired: 'expire', revoked: 'revoke', lend_opened: 'lend on', lend_closed: 'lend off', observed_started: 'seen', observed_ended: 'gone' };
+function renderEvents() {
+  var el = $('p-events');
+  if (!el) return;
+  var ev = S.events.slice().sort(function (a, b) { return (b.seq || 0) - (a.seq || 0) || (b.time || 0) - (a.time || 0); }).slice(0, 80);
+  var head = '<div class="ph"><h2 id="h-events">Activity</h2><span class="aside">' + (ev.length ? 'newest first' : '') + '</span></div>';
+  if (!ev.length) { patch(el, head + '<p class="empty">No events yet. Grants, releases and revocations appear here as they happen.</p>'); return; }
+  patch(el, head + '<ol class="events">' + ev.map(function (e) {
+    return '<li class="e-' + esc(e.type) + '"><span class="t">' + (e.time ? clock(e.time) : '') + '</span><span class="ty">' + esc(TYPE_WORD[e.type] || e.type) + '</span><span class="tx">' + eventText(e) + '</span></li>';
+  }).join('') + '</ol>');
+}
+
+/* ---------- 1 s ticker ---------- */
+function tick() {
+  var t = now();
+  var nodes = document.querySelectorAll('[data-since]');
+  for (var i = 0; i < nodes.length; i++) nodes[i].textContent = dur(t - parseFloat(nodes[i].getAttribute('data-since')));
+  nodes = document.querySelectorAll('[data-until]');
+  for (i = 0; i < nodes.length; i++) nodes[i].textContent = until(parseFloat(nodes[i].getAttribute('data-until')), t);
+  var u = $('conn-u');
+  if (!S.status) u.textContent = '';
+  else if (S.source === 'fixture') u.textContent = 'as of ' + clock(S.status.time);
+  else {
+    var ago = Math.max(0, Math.round((Date.now() - S.receivedAt) / 1000));
+    u.textContent = 'updated ' + clock(S.status.time) + (ago > 2 ? ' (' + dur(ago) + ' ago)' : '');
+  }
+}
+setInterval(tick, 1000);
+
+/* ---------- theme ---------- */
+(function () {
+  var cur = document.documentElement.getAttribute('data-theme') || 'auto';
+  var radios = document.querySelectorAll('#theme input');
+  for (var i = 0; i < radios.length; i++) {
+    radios[i].checked = radios[i].value === cur;
+    radios[i].addEventListener('change', function (ev) {
+      var v = ev.target.value;
+      if (v === 'auto') document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme', v);
+      try { if (v === 'auto') localStorage.removeItem('leasehold-theme'); else localStorage.setItem('leasehold-theme', v); } catch (e) {}
+    });
+  }
+})();
+
+/* ---------- start ---------- */
+render();
+if (FIXTURE) loadFixture(FIXTURE === 'idle' ? 'idle' : 'busy', 'param');
+else pollStatus();
+})();
+</script>
+</body>
+</html>

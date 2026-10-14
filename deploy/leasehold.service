@@ -1,0 +1,35 @@
+# The machine's leasehold daemon. Install as /etc/systemd/system/leasehold.service (see the README,
+# "Installing the machine agent"). It runs as the `leasehold` system user; members of the
+# `leasehold` group may use its socket.
+[Unit]
+Description=leasehold daemon (leases on this machine's capacity)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=leasehold
+Group=leasehold
+ExecStart=/opt/leasehold/bin/leasehold --config /etc/leasehold/machine.toml serve --system
+Restart=on-failure
+RestartSec=2
+# SIGTERM stops it cleanly; leases outlive a restart until their TTLs.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+# /run/leasehold (the socket, mode 0660) and /var/lib/leasehold (the ledger).
+RuntimeDirectory=leasehold
+RuntimeDirectoryMode=0750
+StateDirectory=leasehold
+StateDirectoryMode=0700
+# It only reads /proc and /sys and answers on its socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
