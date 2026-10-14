@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import signal
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -17,6 +18,8 @@ import pytest
 from support import CHILD_ENV, FACTS, FakeLoad, machine_config
 
 import leasehold
+from leasehold import ledger as ledger_module
+from leasehold import server
 from leasehold.agent import MachineAgent
 from leasehold.cli import main
 from leasehold.client import ApiError, Client, Unavailable
@@ -262,3 +265,85 @@ def test_a_pool_name_is_sent_escaped(daemon):
             client.set_pool_max(name, 1)
         assert caught.value.status in (400, 404)
     assert client.status()["pools"]["work"]["max"] == 2
+
+
+def test_an_unknown_pool_is_refused_not_a_dropped_connection(daemon):
+    client = Client(daemon.path)
+    answer = client.acquire(kind="work", pool="nope", lease_id="u1")
+    assert answer == {"status": "refused", "reason": "there is no pool 'nope'"}
+    assert client.leases() == {"leases": [], "queue": []}
+
+
+def test_a_fault_in_the_daemon_is_a_500_and_it_keeps_serving(daemon, monkeypatch, capsys):
+    def broken(*_a, **_k):
+        raise KeyError("lost")
+
+    monkeypatch.setattr(daemon.agent, "acquire_wait", broken)
+    client = Client(daemon.path)
+    with pytest.raises(ApiError) as failed:
+        client.acquire(kind="work")
+    assert (failed.value.status, failed.value.payload["error"]) == (500, "internal")
+    assert failed.value.payload["detail"] == "KeyError: 'lost'"
+    assert "Traceback" in capsys.readouterr().err
+    assert client.status()["schema"] == 2
+
+
+def test_a_ledger_that_fails_after_startup_is_503(daemon, monkeypatch):
+    monkeypatch.setattr(ledger_module, "_BUSY_TIMEOUT_S", 0.1)
+    other = sqlite3.connect(daemon.agent.ledger.path, isolation_level=None)
+    try:
+        other.execute("BEGIN EXCLUSIVE")  # holds the write lock past the busy timeout
+        with pytest.raises(ApiError) as failed:
+            Client(daemon.path).acquire(kind="work")
+        other.execute("ROLLBACK")
+    finally:
+        other.close()
+    assert (failed.value.status, failed.value.payload["error"]) == (503, "ledger_unavailable")
+    assert "locked" in failed.value.payload["detail"]
+
+
+def raw_request(path, request: bytes) -> tuple[int, dict]:
+    """Send `request` as is over the unix socket at `path`, never closing the sending side; the
+    answer's status and JSON body."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(10)
+        conn.connect(str(path))
+        conn.sendall(request)
+        answer = b""
+        while chunk := conn.recv(65536):
+            answer += chunk
+    head, _, body = answer.partition(b"\r\n\r\n")
+    return int(head.split()[1]), json.loads(body)
+
+
+@pytest.mark.parametrize("length", ["-1", "abc", "1_0", "+5", ""])
+def test_a_malformed_content_length_is_400_and_no_body_is_read(daemon, length):
+    """Were `-1` read as a length, the read would wait for the end of a stream the client never
+    ends, and this would time out."""
+    request = f"POST /v1/acquire HTTP/1.0\r\nContent-Length: {length}\r\n\r\n".encode()
+    status, answer = raw_request(daemon.path, request + b'{"kind": "work"}')
+    assert (status, answer["error"]) == (400, "bad_request")
+    assert Client(daemon.path).leases()["leases"] == []
+
+
+def test_a_body_over_the_limit_is_413_unread(daemon):
+    request = b"POST /v1/acquire HTTP/1.0\r\nContent-Length: 999999999\r\n\r\n{}"
+    status, answer = raw_request(daemon.path, request)
+    assert (status, answer["error"]) == (413, "too_large")
+
+
+def test_a_stalled_client_is_cut_off_but_a_long_poll_is_not(daemon, monkeypatch):
+    assert 0 < server._Handler.timeout <= 60
+    monkeypatch.setattr(server._Handler, "timeout", 0.3)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stalled:
+        stalled.settimeout(10)
+        stalled.connect(str(daemon.path))
+        stalled.sendall(b"POST /v1/acquire HTTP/1.0\r\nContent-Length: 50\r\n\r\n{")
+        started = time.monotonic()
+        assert stalled.recv(65536) == b""  # closed, unanswered
+        assert time.monotonic() - started < 5
+    client = Client(daemon.path)
+    client.acquire(kind="work", weight=2)
+    started = time.monotonic()
+    assert client.acquire(kind="work", wait_s=1.0)["status"] == "queued"
+    assert time.monotonic() - started >= 1.0  # waited the whole second, past the read timeout

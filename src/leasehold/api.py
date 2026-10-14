@@ -13,14 +13,19 @@ so any listener answers the same way.
 * `POST /v1/pools/<name>` {`max`: int, or null to reset}, administrators only: the pool's `max`.
 
 A well-formed request is answered 200 with a `status` field (the lend and pool routes answer
-their state); a malformed one 400, one the peer may not make 403, an unknown path 404, and one
-the ledger cannot answer now 503, each with an `error` field (`bad_request`, `forbidden`,
-`not_found`, `ledger_unavailable`) and a `detail`.
+their state); a malformed one 400, one the peer may not make 403, an unknown path 404, one the
+ledger cannot answer now 503, and one the daemon fails on 500, each with an `error` field
+(`bad_request`, `forbidden`, `not_found`, `ledger_unavailable`, `internal`) and a `detail`. The
+transport adds 400 `bad_request` for a malformed `Content-Length` and 413 `too_large` for a
+body over its limit. Every request is answered: no exception escapes `handle`, so a fault in the
+daemon never reads to a client as no daemon at all.
 """
 
 from __future__ import annotations
 
 import json
+import sys
+import traceback
 from dataclasses import dataclass
 from urllib.parse import parse_qsl
 
@@ -126,4 +131,7 @@ def handle(
         return 403, {"error": "forbidden", "detail": str(exc)}
     except LedgerUnavailable as exc:
         return 503, {"error": exc.code, "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001 -- answered as a 500, its traceback on stderr
+        sys.stderr.write(f"leasehold: {method} {path} failed:\n{traceback.format_exc()}")
+        return 500, {"error": "internal", "detail": f"{type(exc).__name__}: {exc}"}
     return 404, {"error": "not_found", "detail": f"{method} {path}"}

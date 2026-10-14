@@ -5,6 +5,12 @@ may ask for leases, and the peer's uid (`SO_PEERCRED`) names the user a lease is
 A tick thread runs `MachineAgent.tick` every `tick_s`. SIGTERM or SIGINT stops it cleanly: the
 listener closes, the socket file goes, and the leases stay in the ledger until their TTLs, so a
 restarted daemon picks them up again.
+
+A request body is read only as far as a well-formed `Content-Length` of at most `_MAX_BODY`
+says: a missing one is no body, a malformed or negative one 400 `bad_request`, a larger one 413
+`too_large`. Each read from a client's socket gives up after `_READ_TIMEOUT_S`, closing that
+connection, so a stalled client cannot keep a thread; the wait inside a long-polling `acquire`
+reads nothing and is not cut short by it.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from leasehold.machine import MachineConfig
 from leasehold.paths import SOCKET_MODES
 
 _MAX_BODY = 64 * 1024
+_READ_TIMEOUT_S = 30.0
 
 
 def peer_of(sock: socket.socket) -> Peer:
@@ -45,19 +52,37 @@ def peer_of(sock: socket.socket) -> Peer:
     return Peer(uid=uid, user=name)
 
 
+def _length(value: str | None) -> int | None:
+    """A `Content-Length` header's byte count (0 when absent), or None when it is not one."""
+    if value is None:
+        return 0
+    value = value.strip()
+    return int(value) if value.isascii() and value.isdigit() else None
+
+
 class _Handler(BaseHTTPRequestHandler):
     server: _Server
     server_version = "leasehold"
+    timeout = _READ_TIMEOUT_S
 
     def _answer(self, method: str) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > _MAX_BODY:
-            status, payload = 413, {"error": "too_large"}
+        length = _length(self.headers.get("Content-Length"))
+        if length is None:
+            status, payload = 400, {"error": "bad_request", "detail": "malformed Content-Length"}
+        elif length > _MAX_BODY:
+            status, payload = 413, {"error": "too_large", "detail": f"over {_MAX_BODY} bytes"}
         else:
-            raw = self.rfile.read(length) if length else None
-            status, payload = handle(
-                self.server.agent, method, self.path, raw, peer_of(self.connection)
-            )
+            try:
+                raw = self.rfile.read(length) if length else None
+            except TimeoutError:
+                self.close_connection = True
+                return
+            if raw is not None and len(raw) < length:
+                status, payload = 400, {"error": "bad_request", "detail": "the body is cut short"}
+            else:
+                status, payload = handle(
+                    self.server.agent, method, self.path, raw, peer_of(self.connection)
+                )
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
