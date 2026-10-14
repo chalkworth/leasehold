@@ -137,9 +137,14 @@ class EventLog:
         self._lock = threading.Lock()
 
     def emit(self, events: Iterable[dict], *, now: float) -> None:
+        """Keep `events`, numbered, at `now`. An `EventType` is kept as its plain `str` value,
+        so a reader gets exactly what it would get over the socket."""
         with self._lock:
             for event in events:
-                self._events.append({"seq": self._next, "time": now, **event})
+                entry = {"seq": self._next, "time": now, **event}
+                if isinstance(entry.get("type"), EventType):
+                    entry["type"] = entry["type"].value
+                self._events.append(entry)
                 self._next += 1
 
     def since(self, seq: int = 0, limit: int = CAPACITY) -> dict:

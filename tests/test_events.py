@@ -37,6 +37,14 @@ def test_event_types_are_the_names_clients_see():
     assert json.dumps({"type": EventType.LEND_SWITCH}) == '{"type": "lend_switch"}'
 
 
+def test_the_ring_hands_out_event_types_as_plain_strings():
+    log = EventLog()
+    log.emit([{"type": EventType.GRANTED, "lease_id": "w"}], now=1.0)
+    (event,) = log.since(0)["events"]
+    assert type(event["type"]) is str and event["type"] == "granted"
+    assert list(event) == ["seq", "time", "type", "lease_id"]
+
+
 def test_changes_name_every_way_a_lease_starts_and_ends():
     before = Snapshot.of(
         [row("kept"), row("given-back"), row("timed-out", expires_at=10.0), row("orphan")],
