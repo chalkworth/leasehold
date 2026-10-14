@@ -41,8 +41,17 @@ pools = []               # no lending on a personal machine; see docs/reference.
 mode = "auto"            # "off": never
 hard_cpu = false         # true: also cap a command at its weight in CPUs
 
-# While memory is short, every pool admits only its reserved slots: what runs keeps running,
-# the rest waits in line and says why.
+# Memory admission: a command starts only while the memory it counts fits the budget. It
+# counts what its rule or `hold --memory` declares, or, declaring none, its weight times
+# assumed_per_slot ("auto": the budget over the slots, so full slots are a full budget).
+[memory]
+budget = "auto"          # the machine's memory less `kept`; or a size such as "12g"
+kept = "25%"             # kept back for you: a share of the memory, or a size such as "4g"
+assumed_per_slot = "auto"
+
+# While memory is short, what runs keeps running and new work starts only within the memory
+# measured free: none while pressure is high, then a little at a time as it eases. What waits
+# says why.
 [guard]
 memory_pressure_on = 20.0     # PSI some avg10, percent
 memory_pressure_off = 5.0
@@ -54,7 +63,14 @@ settle_s = 30
 [commands]
 wait_s = 300             # how long a command waits in line for its lease...
 when_busy = "deny"       # ...then: "deny" it with the reason, or "run" it without a lease
+
+# The built-in rules' weights, in slots and jobs: builds and test runs (pytest, cargo, make,
+# ...) and JavaScript tooling (npm test, jest, tsc, ...).
+# $heavy_note
+heavy_weight = $heavy_weight
+light_weight = $light_weight
+
 # [[commands.rule]]
 # programs = ["pytest"]
-# weight = 8
-# memory = "8g"          # held to this when contained (MemoryHigh)
+# weight = 3
+# memory = "8g"          # counted against [memory]; held to this when contained (MemoryHigh)

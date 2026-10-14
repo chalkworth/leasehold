@@ -280,7 +280,8 @@ def hold(
 ) -> int:
     """Run `argv` under a lease, sized to it (`leasehold.jobs`): the job-count variables unless
     `job_env` is false, a make jobserver when `jobserver` is true, and when contained a scope
-    weighted to the lease and held to `memory` (a size such as `4g`) when given. With no
+    weighted to the lease and held to `memory` (a size such as `4g`) when given. `memory` is
+    also declared with the request, so a daemon with a memory budget counts it. With no
     `weight`, the command is weighed as the daemon's `[commands]` rules weigh it (`auto_size`).
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`."""
@@ -294,7 +295,13 @@ def hold(
                 weight, sized = auto_size(client, argv) if client is not None else (1, None)
                 memory = memory or sized
             request = lease_request(
-                kind=kind, pool=pool, weight=weight, labels=labels, session=session, ttl_s=ttl_s
+                kind=kind,
+                pool=pool,
+                weight=weight,
+                labels=labels,
+                session=session,
+                ttl_s=ttl_s,
+                memory=memory,
             )
             if client is None:
                 code, answer = EXIT_UNAVAILABLE, {}
@@ -346,8 +353,10 @@ def lease_request(
     labels: dict[str, str] | None = None,
     session: str | None = None,
     ttl_s: float | None = None,
+    memory: str | None = None,
 ) -> dict:
-    """An acquire request for a new lease of its own id, as `hold` sends it."""
+    """An acquire request for a new lease of its own id, as `hold` sends it. `memory` (a size
+    such as `4g`) is the memory the work declares; None declares none."""
     return {
         "kind": kind,
         "pool": pool,
@@ -356,6 +365,7 @@ def lease_request(
         "lease_id": uuid.uuid4().hex,
         "session": session,
         "ttl_s": ttl_s,
+        "memory": memory,
     }
 
 

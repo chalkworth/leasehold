@@ -10,6 +10,10 @@ The pools are a `leasehold.model.PoolSet`. A machine that names no pools gets `d
 
 `[[standing]]` names capacity that long-lived work outside leasehold already occupies (a VM, a
 service). Its weight is counted as held (`AdmissionPolicy.standing`) without being a lease.
+
+`[memory]` gives admission a memory budget (`MemorySettings`). A config without the table
+counts no memory, and its memory guard holds pools to their reservations; one with it counts
+memory, and its guard limits new work to the memory measured free instead.
 """
 
 from __future__ import annotations
@@ -145,6 +149,73 @@ class GuardSettings(_Strict):
         return max(512 * 2**20, memory_bytes // 20)
 
 
+def _share(value: str) -> str:
+    """A size (`4g`) or a percentage of the machine's memory (`25%`)."""
+    if value.endswith("%"):
+        try:
+            share = float(value[:-1])
+        except ValueError:
+            raise ValueError(f"{value!r} is not a percentage such as '25%'") from None
+        if not 0 <= share < 100:
+            raise ValueError(f"{value!r} is not between 0% and 100%")
+        return value
+    memory_to_bytes(value)
+    return value
+
+
+@dataclass(frozen=True)
+class MemoryBudget:
+    """`[memory]` worked out for a machine: every value in bytes."""
+
+    #: What admitted work may count together.
+    budget: int
+    #: What is kept back from the machine's memory (0 for a budget given as a size).
+    kept: int
+    #: What one slot of weight counts as for a request that declares no memory.
+    assumed_per_slot: int
+
+
+class MemorySettings(_Strict):
+    """The `[memory]` table: the memory admitted work may count together (see
+    `leasehold.admission`). A request counts the memory it declares (`hold --memory`, a
+    `[[commands.rule]]` `memory`), or, declaring none, its weight times `assumed_per_slot`."""
+
+    #: `auto`: the machine's memory less `kept`; or a size such as `48g`.
+    budget: str = "auto"
+    #: With `budget = "auto"`, the memory kept back for you: a size, or a percentage of the
+    #: machine's memory.
+    kept: str = "25%"
+    #: What one slot of weight counts as for a request that declares no memory: `auto` is the
+    #: budget divided by the slots, so a machine full of slots is the budget full; or a size
+    #: (`0g` counts such requests as nothing).
+    assumed_per_slot: str = "auto"
+
+    @field_validator("budget", "assumed_per_slot")
+    @classmethod
+    def _auto_or_size(cls, value: str) -> str:
+        if value != "auto":
+            memory_to_bytes(value)
+        return value
+
+    _kept = field_validator("kept")(_share)
+
+    def resolve(self, *, memory_bytes: int, slots: int) -> MemoryBudget:
+        """The budget for a machine of `memory_bytes` and `slots` slots."""
+        if self.budget == "auto":
+            if self.kept.endswith("%"):
+                kept = int(memory_bytes * float(self.kept[:-1]) / 100)
+            else:
+                kept = memory_to_bytes(self.kept)
+            budget = max(0, memory_bytes - kept)
+        else:
+            kept, budget = 0, memory_to_bytes(self.budget)
+        if self.assumed_per_slot == "auto":
+            assumed = budget // max(1, slots)
+        else:
+            assumed = memory_to_bytes(self.assumed_per_slot)
+        return MemoryBudget(budget=budget, kept=kept, assumed_per_slot=assumed)
+
+
 class ContainSettings(_Strict):
     """Whether `hold`, the shims and `run` put their commands in systemd user scopes sized to
     the lease (`leasehold.contain`)."""
@@ -230,6 +301,9 @@ class MachineConfig(_Strict):
     contain: ContainSettings = Field(default_factory=ContainSettings)
     #: When new work is held back for memory (`leasehold.guard`).
     guard: GuardSettings = Field(default_factory=GuardSettings)
+    #: The memory admitted work may count together. None (no `[memory]` table): no memory is
+    #: counted.
+    memory: MemorySettings | None = None
 
     @field_validator("socket_mode")
     @classmethod
@@ -386,6 +460,20 @@ class MachineConfig(_Strict):
             totals[item.pool] = totals.get(item.pool, 0) + item.weight
         return totals
 
+    def standing_memory(self) -> dict[str, int]:
+        """Pool name to the total memory, in bytes, `[[standing]]` names there."""
+        totals: dict[str, int] = {}
+        for item in self.standing:
+            if item.memory is not None:
+                totals[item.pool] = totals.get(item.pool, 0) + memory_to_bytes(item.memory)
+        return totals
+
+    def memory_budget(self, memory_bytes: int) -> MemoryBudget | None:
+        """`[memory]` for a machine of `memory_bytes`, or None when memory is not counted."""
+        if self.memory is None:
+            return None
+        return self.memory.resolve(memory_bytes=memory_bytes, slots=self.ceiling.slots)
+
     @property
     def guarded(self) -> bool:
         """Whether the memory guard runs: as configured, else for a user's own daemon."""
@@ -398,10 +486,15 @@ class MachineConfig(_Strict):
         closed: frozenset[str] = frozenset(),
         max_overrides: dict[str, int] | None = None,
         capped: bool = False,
+        memory_bytes: int | None = None,
+        memory_free: int | None = None,
+        memory_short: str | None = None,
     ) -> AdmissionPolicy:
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
-        `capped` every pool held to its reservation."""
+        `capped` every pool held to its reservation. With a `[memory]` table and the machine's
+        `memory_bytes`, the memory budget too (with `[[standing]]` memory held), and
+        `memory_free` (why: `memory_short`) as the most one decision may admit."""
         pool_set = self.pool_set()
         if max_overrides:
             pools = {
@@ -409,11 +502,24 @@ class MachineConfig(_Strict):
                 for name, pool in pool_set.pools.items()
             }
             pool_set = PoolSet.model_construct(slots=pool_set.slots, pools=pools)
+        budget = None if memory_bytes is None else self.memory_budget(memory_bytes)
+        if budget is None:
+            return AdmissionPolicy.from_pools(
+                pool_set,
+                closed=closed,
+                standing=self.standing_held(),
+                capped=frozenset(pool_set.pools) if capped else frozenset(),
+            )
         return AdmissionPolicy.from_pools(
             pool_set,
             closed=closed,
             standing=self.standing_held(),
             capped=frozenset(pool_set.pools) if capped else frozenset(),
+            memory=budget.budget,
+            assumed_memory=budget.assumed_per_slot,
+            standing_memory=self.standing_memory(),
+            memory_free=memory_free,
+            memory_short=memory_short,
         )
 
     @property

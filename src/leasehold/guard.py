@@ -2,9 +2,17 @@
 
 Running out of memory is what freezes or OOM-kills a machine that runs too much at once, and it
 is measured, not declared: the guard watches memory PSI (`some avg10`, the share of the last
-ten seconds in which some task stalled on memory) and `MemAvailable`. While it is **on**, every
-pool admits only up to its reservation (`AdmissionPolicy.capped`): what is already running
-keeps running, reserved work still starts, and the rest waits in line with the reason given.
+ten seconds in which some task stalled on memory) and `MemAvailable`. While it is **on**, what
+is already running keeps running, and new work is held back, in one of two ways (the machine
+agent chooses by the config):
+
+* with a memory budget (`[memory]`), new work may count at most the memory measured free
+  (`AdmissionPolicy.memory_free`): none while pressure is over the threshold or memory is under
+  the floor (`pressing`), and while the guard settles, what `MemAvailable` has above the floor
+  less what was granted in the last `settle_s` (work that has not grown to its size yet). A
+  request heavier than its pool's reservation starts as soon as its memory fits;
+* without one, every pool admits only up to its reservation (`AdmissionPolicy.capped`): reserved
+  work still starts, and the rest waits in line with the reason given.
 
 It goes on when pressure passes `memory_pressure_on` or available memory drops below
 `min_available`, and off only once pressure has stayed at most `memory_pressure_off` with
@@ -39,6 +47,8 @@ class Guard:
         self.on = False
         self.reason: str | None = None
         self.since: float | None = None
+        #: Whether the last reading was itself over a threshold (not only settling).
+        self.pressing = False
         self._clear_since: float | None = None
 
     def _over(self, r: Reading) -> str | None:
@@ -59,6 +69,7 @@ class Guard:
     def observe(self, r: Reading) -> bool:
         """Take one reading; whether new work is held back now."""
         why = self._over(r)
+        self.pressing = why is not None
         if why is not None:
             if not self.on:
                 self.since = r.now
@@ -79,6 +90,7 @@ class Guard:
         s = self.settings
         return {
             "on": self.on,
+            "pressing": self.pressing,
             "reason": self.reason,
             "since": self.since,
             "memory_pressure_on": s.memory_pressure_on,

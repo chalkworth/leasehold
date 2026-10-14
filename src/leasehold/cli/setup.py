@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 def register(sub) -> None:
     s = sub.add_parser(
@@ -16,6 +18,18 @@ def register(sub) -> None:
         action="store_true",
         help="stop and delete the unit and the shims (the config and ledger stay)",
     )
+    s.add_argument(
+        "--upgrade-config",
+        action="store_true",
+        help="only bring the config (--config, else yours) from leasehold 0.2's defaults to "
+        "today's: memory counted, two builds or test runs at once. Shows the change and keeps "
+        "the old file beside it",
+    )
+    s.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --upgrade-config: show the change, write nothing",
+    )
     s.set_defaults(run=_setup)
 
 
@@ -25,6 +39,11 @@ def _setup(args, ctx) -> int:
     def say(line: str) -> None:
         print(f"  {line}")
 
+    if args.dry_run and not args.upgrade_config:
+        raise SystemExit("leasehold setup: --dry-run goes with --upgrade-config")
     if args.remove:
         return setup.remove(ctx.env, say)
+    if args.upgrade_config:
+        path = Path(ctx.config).expanduser() if ctx.config else None
+        return setup.upgrade_config(path, ctx.env, say, dry_run=args.dry_run)
     return setup.setup(ctx.env, say)

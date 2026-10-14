@@ -2,9 +2,10 @@
 coding-agent hooks and the PATH shims (`leasehold.shell` matches commands against these rules).
 
 A rule names programs (by basename) and, optionally, a regular expression their arguments must
-contain. Rules from the config are tried before the built-in ones (`DEFAULT_RULES`), so a
+contain. Rules from the config are tried before the built-in ones (`default_rules`), so a
 config can re-weigh a program the defaults name; among the rules of one source the heaviest
-match wins.
+match wins. The built-in rules come in two weights, `heavy_weight` for builds and test runs
+and `light_weight` for JavaScript tooling, both set in `[commands]`.
 """
 
 from __future__ import annotations
@@ -55,18 +56,33 @@ def _rule(programs: str, weight: int, args: str | None = None) -> CommandRule:
     return CommandRule(programs=programs.split(), weight=weight, args=args)
 
 
-#: The built-in rules: builds and test runs that use every core they are given.
-DEFAULT_RULES: tuple[CommandRule, ...] = (
-    _rule("pytest py.test tox nox", 4),
-    _rule("cargo", 4, r"^(build|b|test|t|check|c|clippy|bench|run|r|nextest|doc|install)\b"),
-    _rule("make gmake ninja bazel bazelisk", 4),
-    _rule("cmake", 4, r"--build"),
-    _rule("go", 4, r"^(build|test|vet|install|generate)\b"),
-    _rule("mvn mvnw gradle gradlew", 4),
-    _rule("docker podman", 4, r"^(build|buildx\s+build|compose\s+(build|up))\b"),
-    _rule("npm pnpm yarn bun", 2, r"^(test|t|ci|install|i|add|build|run\s+(build|test)\S*)\b"),
-    _rule("jest vitest playwright tsc webpack vite", 2),
-)
+#: The weights of the built-in rules when `[commands]` sets none.
+HEAVY_WEIGHT = 4
+LIGHT_WEIGHT = 2
+
+
+def default_rules(heavy: int = HEAVY_WEIGHT, light: int = LIGHT_WEIGHT) -> tuple[CommandRule, ...]:
+    """The built-in rules: builds and test runs that use every core they are given, at weight
+    `heavy`, and JavaScript tooling at weight `light`."""
+    return (
+        _rule("pytest py.test tox nox", heavy),
+        _rule(
+            "cargo", heavy, r"^(build|b|test|t|check|c|clippy|bench|run|r|nextest|doc|install)\b"
+        ),
+        _rule("make gmake ninja bazel bazelisk", heavy),
+        _rule("cmake", heavy, r"--build"),
+        _rule("go", heavy, r"^(build|test|vet|install|generate)\b"),
+        _rule("mvn mvnw gradle gradlew", heavy),
+        _rule("docker podman", heavy, r"^(build|buildx\s+build|compose\s+(build|up))\b"),
+        _rule(
+            "npm pnpm yarn bun", light, r"^(test|t|ci|install|i|add|build|run\s+(build|test)\S*)\b"
+        ),
+        _rule("jest vitest playwright tsc webpack vite", light),
+    )
+
+
+#: The built-in rules at their default weights.
+DEFAULT_RULES: tuple[CommandRule, ...] = default_rules()
 
 
 class CommandSettings(BaseModel):
@@ -78,6 +94,10 @@ class CommandSettings(BaseModel):
     #: them).
     defaults: bool = True
     rule: list[CommandRule] = Field(default_factory=list)
+    #: The weight of the built-in rules for builds and test runs (pytest, cargo, make, ...).
+    heavy_weight: int = Field(HEAVY_WEIGHT, ge=1)
+    #: The weight of the built-in rules for JavaScript tooling (npm test, jest, tsc, ...).
+    light_weight: int = Field(LIGHT_WEIGHT, ge=1)
     #: How long an agent's hook, or a shim, waits in line for a lease before `when_busy`
     #: applies. Long enough for a busy machine's line to move (docs/bench.md: at 8 agents
     #: the mean wait was 50 s, the slowest about 100 s).
@@ -89,7 +109,8 @@ class CommandSettings(BaseModel):
     def rules(self) -> list[tuple[str, CommandRule]]:
         """Every rule in the order they are tried, each with its source."""
         mine = [("config", r) for r in self.rule]
-        return mine + ([("default", r) for r in DEFAULT_RULES] if self.defaults else [])
+        built_in = default_rules(self.heavy_weight, self.light_weight) if self.defaults else ()
+        return mine + [("default", r) for r in built_in]
 
     def shell_rules(self) -> list[shell.Rule]:
         return [shell.Rule.of(rule.model_dump() | {"source": src}) for src, rule in self.rules()]

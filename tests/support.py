@@ -68,6 +68,8 @@ class FakeLoad:
         self.values = dict(IDLE) | pressure
         self.loadavg = loadavg
         self.by_cgroup: dict[str, dict] = {}
+        #: `MemAvailable` in bytes, as a test sets it.
+        self.available: int | None = 8 << 30
 
     def set(self, **pressure: float | None) -> None:
         self.values |= pressure
@@ -80,7 +82,7 @@ class FakeLoad:
         return {
             "pressure": self.pressure(),
             "loadavg": None if self.loadavg is None else [self.loadavg] * 3,
-            "mem_available_bytes": 8 << 30,
+            "mem_available_bytes": self.available,
             "mem_total_bytes": 16 << 30,
             "cgroup_v2": True,
             "slices": {},

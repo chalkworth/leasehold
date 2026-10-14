@@ -165,6 +165,7 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         weight=rule.weight,
         labels={"shim": program, "cmd": " ".join([program, *args])[:120]},
         session=env.get("LEASEHOLD_SESSION") or None,
+        memory=rule.memory,
     )
     code, answer = wait_for_grant(client, request, settings.wait_s, _say)
     if code is None:

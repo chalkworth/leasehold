@@ -17,7 +17,9 @@ layers =
     cli
     demo | mcp_server
     setup
-    server | doctor | template | top | claude_code | shims
+    server | doctor | top | claude_code | shims
+    upgrade
+    template
     api
     agent
     status | lend | guard | events

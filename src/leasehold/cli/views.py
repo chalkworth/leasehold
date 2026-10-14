@@ -191,6 +191,17 @@ def _print_status(st: dict) -> None:
         f"slots {st['held']}/{c['slots']} held{over}; at most {c['cpus']:g} cpus and "
         f"{c['memory_bytes'] / 2**30:.1f} GiB per lease"
     )
+    memory = st.get("memory") or {}
+    if memory.get("counted"):
+        gib = 2**30
+        free = memory.get("free_now_bytes")
+        short = f"; memory short, {free / gib:.1f} GiB may start now" if free is not None else ""
+        print(
+            f"memory {memory['held_bytes'] / gib:.1f}/{memory['budget_bytes'] / gib:.1f} GiB "
+            f"counted ({memory['kept_bytes'] / gib:.1f} GiB kept for you; "
+            f"{memory['assumed_per_slot_bytes'] / gib:.1f} GiB a slot when none is declared)"
+            f"{short}"
+        )
     load = st["load"] or {}
     pressure = load.get("pressure") or {}
     psi = "  ".join(

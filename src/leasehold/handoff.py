@@ -54,8 +54,10 @@ def acquire(
     session: str | None = None,
     timeout_s: float | None = None,
     ttl_s: float | None = None,
+    memory: str | None = None,
 ) -> tuple[int, dict | None]:
-    """Wait for the lease `lease_id`: `(0, lease)` once granted, else `(exit code, None)`."""
+    """Wait for the lease `lease_id`: `(0, lease)` once granted, else `(exit code, None)`.
+    `memory` (a size such as `4g`) is the memory the work declares."""
     request = {
         "kind": kind,
         "pool": pool,
@@ -64,6 +66,7 @@ def acquire(
         "lease_id": lease_id,
         "session": session,
         "ttl_s": ttl_s,
+        "memory": memory,
     }
     code, answer = wait_for_grant(client, request, timeout_s, _say)
     if code is not None:
@@ -158,6 +161,7 @@ def acquire_main(client: Client, socket: str, args) -> int:
         session=args.session,
         timeout_s=args.timeout,
         ttl_s=args.ttl,
+        memory=getattr(args, "memory", None),
     )
     if lease is None:
         return code

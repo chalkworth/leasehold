@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS leases (
     revoked_at REAL,
     revoke_reason TEXT,
     revoke_deadline REAL,
+    -- The memory the item declared, in bytes; NULL: none.
+    memory INTEGER,
     PRIMARY KEY (scope, item_id)
 );
 -- A waiting item, in its user's FIFO by (queued_at, seq).
@@ -112,6 +114,7 @@ CREATE TABLE IF NOT EXISTS queue (
     labels TEXT,
     ttl_s REAL,
     expires_at REAL,
+    memory INTEGER,
     UNIQUE (scope, item_id)
 );
 -- Whose turn was last in each pool: the round-robin's memory ('' is the item with no user).
@@ -196,7 +199,8 @@ class LedgerItem:
     `external`, `lend` and `observed`); both are stored as given. `session` is the user's
     session the item belongs to, for taking turns between one user's sessions (None: the
     user's shared session). `labels` are free-form (key, value) pairs, stored and listed but
-    never read by admission."""
+    never read by admission. `memory` is the memory, in bytes, the item declares (None: none);
+    admission counts it only where the policy sets a memory budget."""
 
     scope: str
     item_id: str
@@ -206,6 +210,7 @@ class LedgerItem:
     weight: int
     labels: tuple[tuple[str, str], ...] = ()
     session: str | None = None
+    memory: int | None = None
 
     @property
     def key(self) -> ItemKey:
@@ -349,8 +354,9 @@ class Ledger:
                 user=r["user"],
                 weight=r["weight"],
                 session=r["session"],
+                memory=r["memory"],
             )
-            for r in conn.execute("SELECT pool, host, user, session, weight FROM leases")
+            for r in conn.execute("SELECT pool, host, user, session, weight, memory FROM leases")
         )
         waiting = tuple(
             Waiting(
@@ -360,6 +366,7 @@ class Ledger:
                 weight=r["weight"],
                 order=(r["queued_at"], r["seq"]),
                 session=r["session"],
+                memory=r["memory"],
             )
             for r in conn.execute("SELECT * FROM queue")
         )
@@ -392,8 +399,8 @@ class Ledger:
             )
         conn.execute(
             "INSERT INTO queue (scope, item_id, kind, user, session, pool, weight, holder_pid, "
-            "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at, memory) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (scope, item_id) DO NOTHING",
             (
                 item.scope,
@@ -411,6 +418,7 @@ class Ledger:
                 json.dumps(dict(item.labels)) if item.labels else None,
                 ttl_s,
                 expires_at,
+                item.memory,
             ),
         )
 
@@ -426,8 +434,8 @@ class Ledger:
             conn.execute(
                 "INSERT INTO leases (scope, item_id, kind, user, session, host, pool, weight, "
                 "holder_pid, holder_birth, holder_ns, beat_at, acquired_at, labels, ttl_s, "
-                "expires_at, grant_no) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "expires_at, grant_no, memory) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scope,
                     item_id,
@@ -446,6 +454,7 @@ class Ledger:
                     ttl_s,
                     None if ttl_s is None else now + ttl_s,
                     grant,
+                    row["memory"],
                 ),
             )
             conn.execute("DELETE FROM queue WHERE seq = ?", (row["seq"],))
@@ -536,7 +545,7 @@ class Ledger:
                 return Refused(f"{item.key[1]} is another user's lease")
             if self._leased(conn, item.key):
                 return Admitted()
-            reason = policy.refusal(item.pool, item.weight)
+            reason = policy.refusal(item.pool, item.weight, item.memory)
             if reason is not None:
                 conn.execute("DELETE FROM queue WHERE scope = ? AND item_id = ?", item.key)
                 return Refused(reason)
@@ -572,8 +581,8 @@ class Ledger:
             conn.execute(
                 "INSERT INTO leases (scope, item_id, kind, user, session, host, pool, weight, "
                 "holder_pid, holder_birth, holder_ns, beat_at, acquired_at, labels, ttl_s, "
-                "expires_at, grant_no) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
+                "expires_at, grant_no, memory) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
                 (
                     item.scope,
                     item.item_id,
@@ -590,6 +599,7 @@ class Ledger:
                     now,
                     json.dumps(dict(item.labels)) if item.labels else None,
                     grant,
+                    item.memory,
                 ),
             )
             return True
@@ -831,12 +841,18 @@ def _holder_args(holder: Holder | None) -> tuple:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """A ledger from an older schema is dropped and rebuilt: it is transient, its live holders
-    re-acquire on their next call."""
+    re-acquire on their next call. One of this schema without the `memory` columns (made by
+    leasehold 0.2) gains them, NULL for every row: a process of either version can share it."""
     try:
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     except sqlite3.OperationalError:
         return  # a new file
     if row is not None and row[0] == str(SCHEMA_VERSION):
+        for table in ("leases", "queue"):
+            columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if columns and "memory" not in columns:
+                with contextlib.suppress(sqlite3.OperationalError):  # another process added it
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN memory INTEGER")
         return
     conn.executescript(
         "DROP TABLE IF EXISTS leases; DROP TABLE IF EXISTS queue; "

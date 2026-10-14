@@ -7,12 +7,65 @@ here.
 
 ## [Unreleased]
 
+Memory-aware admission, a default budget that runs two builds or test runs at once, and an
+upgrade path for configs leasehold 0.2 wrote. A config without the new `[memory]` table admits
+exactly as it did before memory was counted.
+
 ### Added
+
+- **Memory admission.** A `[memory]` table (`budget`, default `"auto"`: the machine's memory
+  less `kept`, default `"25%"`; `assumed_per_slot`, default `"auto"`: the budget over the
+  slots) makes admission count memory as well as slots. A request counts the memory it
+  declares, or its weight times `assumed_per_slot`. One that counts more than the budget, or
+  declares more than `[ceiling] memory`, is refused. `[[standing]]` memory counts as held.
+- `hold --memory` and a `[[commands.rule]]`'s `memory` are now declared with the request and
+  counted; `acquire --memory` declares memory for a lease held across processes.
+  `POST /v1/acquire` takes `memory` (a size such as `"6g"`).
+- `[commands] heavy_weight` (default 4) and `light_weight` (default 2): the weights of the
+  built-in build and test rules and of the JavaScript tooling rules.
+- `leasehold setup --upgrade-config` (with `--dry-run`, and `--config PATH` for another file):
+  brings a user config from 0.2's defaults to today's, showing the diff and keeping the old
+  file as `<name>.0.2.bak`. An unedited 0.2 config is written afresh for the same machine; an
+  edited one gains only `heavy_weight`, `light_weight` and a `[memory]` table.
+- `leasehold doctor` warns (check `defaults`) when a user config has 0.2's defaults, and (check
+  `guard`) when no built-in build or test rule could start while the memory guard is on.
+  `leasehold setup` says when the config it leaves in place has 0.2's defaults.
+- Status (schema 2, additive): a `memory` object (`counted`, `machine_bytes`, `budget_bytes`,
+  `kept_bytes`, `assumed_per_slot_bytes`, `held_bytes`, `free_now_bytes`); per pool
+  `memory_bytes`; per lease and queued item `memory_bytes` (declared) and
+  `memory_counted_bytes`; `guard.pressing`. `leasehold status` prints the budget, and
+  `leasehold top` shows it in the header and what each waiting item counts.
+- Blockers say which limit holds an item back: "the memory budget is used: ...", "memory is
+  short (...): ... may start now; this counts ...", beside the slot reasons.
+- Library: `AdmissionPolicy` gains `memory`, `assumed_memory`, `standing_memory`, `memory_free`
+  and `memory_short` (all empty or None by default) and `counted()`; `from_pools` takes them as
+  keywords; `Held`, `Waiting` and `LedgerItem` gain `memory` (bytes, default None); `fits` and
+  `AdmissionPolicy.refusal` take an optional `memory`. `leasehold.admission.gib`.
+  `leasehold.machine.MemorySettings`, `MemoryBudget`, `MachineConfig.memory`,
+  `MachineConfig.memory_budget()`, `MachineConfig.standing_memory()`, and `MachineConfig.policy`
+  keywords `memory_bytes`, `memory_free`, `memory_short`. `leasehold.commands.default_rules`,
+  `HEAVY_WEIGHT`, `LIGHT_WEIGHT`. `leasehold.guard.Guard.pressing`. `leasehold.upgrade`.
+  `leasehold.template.weights` and `render_user_0_2_0`.
+- The benchmark (`bench/run.py`): conditions `lh-enforced-declared` (memory jobs declare their
+  size) and `lh-enforced-v020` (0.2.0's generated config and weights), `--memory-budget`, and
+  `--weights` defaulting to the generated config's `heavy_weight`.
 
 - `AdmissionPolicy.heaviest(pool)`: the most weight one item could ever be admitted with in a
   pool, with nothing held but the standing work.
 
 ### Changed
+
+- The config `init --user` and `setup` write: a `[memory]` table, and `heavy_weight` at half the
+  slots (all of them below 4 slots) with `light_weight` half of that, rounded up, so two builds
+  or test runs run at once: on 8 CPUs, 6 slots and weight 3 instead of 4. Each weight is still
+  both the slots a command holds and the job count it is given.
+- With `[memory]`, the memory guard no longer holds pools to their reservations: while it is on,
+  new work may count at most the memory measured free (none while pressure is over the
+  threshold or memory under the floor; while it settles, what is available above the floor less
+  what was granted in the last `settle_s`). A request heavier than its pool's reservation is no
+  longer held back until the guard goes off. Without `[memory]`, the guard is unchanged.
+- The ledger keeps each item's declared memory; a 0.2 ledger gains the column in place, so 0.2
+  and 0.3 processes can share one file.
 
 - **May reject a config that 0.2.1 accepted.** `[[standing]]` weight must leave every pool's
   reservation whole: each pool's standing weight or its `reserved`, whichever is more, must
@@ -38,8 +91,6 @@ here.
 - `Ledger.try_admit` refuses a weight below 1 (`AdmissionPolicy.refusal`), and
   `Ledger.enqueue` raises `ValueError` for one: a negative weight was admitted and let its
   pool over-commit.
-### Fixed
-
 - An `acquire` naming a pool that does not exist is `refused` (`there is no pool 'NAME'`;
   `hold` and `acquire` exit 77). It used to drop the connection, which `hold` took for no
   daemon and ran its command without a lease.
@@ -74,6 +125,20 @@ here.
 - A `work` or `external` lease the daemon lost and then refuses when asked for again is said
   once, and the command runs on without a lease and without asking again; asked for again and
   put in line, it says its place once.
+
+### Compatibility
+
+- Nothing is removed or renamed. Without a memory budget, `decide`, `positions`, `blocker`,
+  `fits` and `refusal` answer exactly as they did before memory was counted (a test compares
+  them against that module on random states), and a config without `[memory]` admits as
+  before. `AdmissionPolicy`
+  with several hosts in `slots`, and `PoolPolicy.host`, are unchanged; a memory budget is per
+  host.
+- A 0.2 config keeps 0.2's defaults until it is upgraded (`setup --upgrade-config`); nothing
+  rewrites it on its own.
+- A 0.3 client asking a 0.2 daemon for a lease with `memory` is refused for the unknown field;
+  `leasehold.client.Client.acquire` then asks again without it, so `hold --memory` and the
+  shims keep working while an old daemon runs.
 
 ## [0.2.1]
 

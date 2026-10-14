@@ -168,7 +168,11 @@ def pre(
         return reply
     rule = found.rule
     request = lease_request(
-        pool=rule.pool, weight=rule.weight, labels=_labels(event, command), session=session(event)
+        pool=rule.pool,
+        weight=rule.weight,
+        labels=_labels(event, command),
+        session=session(event),
+        memory=rule.memory,
     ) | {"lease_id": lid}
     asked = time.monotonic()
     code, answer = wait_for_grant(client, request, settings.wait_s, reply.log.append)

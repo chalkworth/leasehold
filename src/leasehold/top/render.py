@@ -258,11 +258,17 @@ def _header(v: _View) -> _Section:
         right.put("  FULL", "warn")
     else:
         right.put(f"  {slots - held} free", "ok")
+    memory = st.get("memory") or {}
+    counting = bool(memory.get("counted"))
+    if counting and memory.get("budget_bytes"):
+        used, budget = int(memory.get("held_bytes") or 0), int(memory["budget_bytes"])
+        style = "bad" if used > budget else "warn" if used >= budget * 0.9 else "dim"
+        right.put(f"  mem {used / 2**30:.1f}/{_gib(budget)}", style)
     queued = len(st.get("queue") or [])
     if queued:
         right.put(f"  {queued} waiting", "warn")
     if (st.get("guard") or {}).get("on"):
-        right.put("  guard: reserved slots only", "bad")
+        right.put("  guard: memory short" if counting else "  guard: reserved slots only", "bad")
     if (st.get("contain") or {}).get("mode") == "off":
         parts.append((7, [("  contain off", "dim")]))
     room = max(12, v.width - right.cells - 2)
@@ -676,6 +682,8 @@ def _queue(v: _View) -> _Section:
             parts.append((3, [(f"  {_clean(what)}", "")]))
         parts.append((5, [(f"  {_clean(x.get('lease_id'))}", "dim")]))
         right = _Out().put(f"needs {_slots(int(x.get('weight') or 0))}", "")
+        if x.get("memory_counted_bytes"):
+            right.put(f", {_gib(x['memory_counted_bytes'])}", "")
         if x.get("queued_at") is not None:
             right.put(f"  waiting {_duration(v.now - x['queued_at'])}", "bold")
         gutter = _pad("QUEUE", GUTTER) if i == 0 else " " * GUTTER

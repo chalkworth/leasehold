@@ -35,6 +35,7 @@ from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, some_avg10
 from leasehold.machine import MachineConfig
 from leasehold.proctable import Proc
+from leasehold.units import memory_to_bytes
 
 #: The ledger scope observed processes' leases are filed under; no client may name it.
 OBSERVED_SCOPE = "leasehold.observed"
@@ -65,6 +66,16 @@ class AcquireRequest(BaseModel):
     wait_s: float = Field(0.0, ge=0, le=300)
     #: The lease's TTL; the machine's `lease_ttl_s` by default.
     ttl_s: float | None = Field(None, gt=0, le=3600)
+    #: The memory the work will use, a size such as `4g`: counted against the machine's memory
+    #: budget when it has one. None: the machine assumes some per slot of weight.
+    memory: str | None = None
+
+    @field_validator("memory")
+    @classmethod
+    def _memory(cls, value: str | None) -> str | None:
+        if value is not None:
+            memory_to_bytes(value)
+        return value
 
     @field_validator("lease_id", "session")
     @classmethod
@@ -126,6 +137,9 @@ class MachineAgent:
         self._minute = minute
         self.gate = LendGate(config.lend)
         memory = self.facts.get("memory_bytes") or self.limits.memory_bytes
+        #: The machine's memory, which `[memory]` budgets.
+        self.memory_bytes = memory
+        self.budget = config.memory_budget(memory)
         self.guard = Guard(config.guard, min_available=config.guard.floor(memory))
         self.verdict = Verdict(False, None, "not measured yet", None)
         self.last_load: dict | None = None
@@ -149,11 +163,39 @@ class MachineAgent:
 
     def policy(self) -> AdmissionPolicy:
         closed = frozenset() if self.verdict.eligible and not self._lend_off else self.lend_pools
+        guarding = self.config.guarded and self.guard.on
+        counting = self.budget is not None
+        free = self.memory_free() if guarding and counting else None
         return self.config.policy(
             closed=closed,
             max_overrides=self._max_overrides,
-            capped=self.config.guarded and self.guard.on,
+            capped=guarding and not counting,
+            memory_bytes=self.memory_bytes,
+            memory_free=free,
+            memory_short=self._memory_short() if free is not None else None,
         )
+
+    def memory_free(self) -> int:
+        """While the guard is on, the most memory new work may count: none while a reading is
+        over a threshold, else what is available above the floor less what leases granted
+        within `settle_s` count (they may not have grown to it yet)."""
+        available = (self.last_load or {}).get("mem_available_bytes")
+        if self.guard.pressing or available is None or self.budget is None:
+            return 0
+        since = self._clock() - self.config.guard.settle_s
+        recent = sum(
+            row["memory"]
+            if row["memory"] is not None
+            else row["weight"] * self.budget.assumed_per_slot
+            for row in self.ledger.leases()
+            if row["acquired_at"] >= since
+        )
+        return max(0, available - self.guard.min_available - recent)
+
+    def _memory_short(self) -> str:
+        if self.guard.pressing:
+            return f"memory guard on: {self.guard.reason}"
+        return f"memory guard settling after {self.guard.reason}"
 
     def set_lend(self, enabled: bool) -> dict:
         """Whether lend leases may be granted. Off closes the lend pools now and revokes
@@ -391,6 +433,14 @@ class MachineAgent:
         if refused is not None:
             return {"status": "refused", "reason": refused}
         lease_id = req.lease_id or uuid.uuid4().hex
+        memory = None if req.memory is None else memory_to_bytes(req.memory)
+        if self.budget is not None and memory is not None and memory > self.limits.memory_bytes:
+            return {
+                "status": "refused",
+                "lease_id": lease_id,
+                "reason": f"memory {req.memory} is more than the {self.limits.memory} one lease "
+                "may be given ([ceiling] memory)",
+            }
         item = LedgerItem(
             scope=SCOPE,
             item_id=lease_id,
@@ -400,6 +450,7 @@ class MachineAgent:
             weight=req.weight,
             labels=tuple(sorted(req.labels.items())),
             session=req.session_name(),
+            memory=memory,
         )
         ttl = req.ttl_s or self.config.lease_ttl_s
         with self._lock:
@@ -589,6 +640,7 @@ class MachineAgent:
             load=self.last_load,
             lend=self._lend_status(),
             guard=self.guard.status() | {"enabled": self.config.guarded},
+            budget=self.budget,
             leases=listing["leases"],
             queue=listing["queue"],
             now=self._clock(),

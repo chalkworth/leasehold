@@ -409,3 +409,14 @@ def test_the_header_says_when_the_guard_holds_pools_to_reserved_and_containment_
     busy["contain"] = {"mode": "off", "hard_cpu": False}
     header = _text(top.render(busy, [], width=160, height=40)).splitlines()[0]
     assert "guard: reserved slots only" in header and "contain off" in header
+
+
+def test_the_header_shows_the_memory_budget_and_a_waiting_item_what_it_counts(busy):
+    G = 2**30
+    busy["memory"] = {"counted": True, "budget_bytes": 12 * G, "held_bytes": 6 * G}
+    busy["guard"] = {"on": True, "reason": "memory pressure 31% > 20%"}
+    busy["queue"][0]["memory_counted_bytes"] = 6 * G
+    plain = _text(top.render(busy, [], width=160, height=40))
+    header = plain.splitlines()[0]
+    assert "mem 6.0/12 GiB" in header and "guard: memory short" in header
+    assert "needs" in plain and ", 6 GiB" in plain

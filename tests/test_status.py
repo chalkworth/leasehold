@@ -26,6 +26,7 @@ TOP_LEVEL = {
     "load",
     "lend",
     "guard",
+    "memory",
     "contain",
     "standing",
     "leases",
@@ -43,6 +44,7 @@ POOL_FIELDS = {
     "running",
     "revoked",
     "queued",
+    "memory_bytes",
 }
 
 

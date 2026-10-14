@@ -92,3 +92,18 @@ def test_the_unit_runs_this_installations_daemon():
     assert "ExecStart=/home/u/.local/bin/leasehold serve --user\n" in text
     assert "WantedBy=default.target" in text
     assert os.path.isabs(setup.executable())
+
+
+def test_setup_says_when_the_config_has_0_2s_defaults_and_leaves_it(tmp_path):
+    from leasehold import template
+
+    env = home(tmp_path)
+    (tmp_path / "run").mkdir()
+    path = paths.user_config(env)
+    path.parent.mkdir(parents=True)
+    old = template.render_user_0_2(name="box", slots=6, cpus=6, memory="11g", about="x")
+    path.write_text(old)
+    out = setup_cli(env).stdout
+    assert "config: it has leasehold 0.2's defaults: memory is not counted" in out
+    assert "`leasehold setup --upgrade-config --dry-run` shows the change" in out
+    assert path.read_text() == old

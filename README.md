@@ -84,8 +84,10 @@ runs. It never decides what runs, and it only touches the processes it started i
   and, when a rule says so, a `MemoryHigh`. `leasehold doctor` says whether this machine is
   `enforced (systemd)` or `advisory`, and why. Advisory means the lease and sizing still apply,
   but a command that ignores its job count is not held back.
-- **Memory guard.** When memory pressure rises, new work is admitted only up to each pool's
-  reserved slots until it eases, so a burst of builds does not push the machine into swap.
+- **Memory.** A command also counts memory against a budget (the machine's less a share kept
+  for you): what its rule or `hold --memory` declares, or a share in proportion to its weight.
+  When memory pressure rises anyway, new work starts only within the memory measured free until
+  it eases, so a burst of builds does not push the machine into swap.
 - **Clean ends.** `leasehold run` puts the agent's session in a slice of its own and stops what
   it leaves behind (a stray test server, a hung build) when the agent exits.
 

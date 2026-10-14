@@ -29,6 +29,19 @@ The rules, per host of `C` slots (a machine's pools all share one), with `U_q` t
 (a machine's `[[standing]]` entries). `decide` counts it as used before the held leases, and
 never as running, so per-user limits and whose turn it is stay a matter of real leases only.
 
+**Memory**, on a host that `AdmissionPolicy.memory` gives a budget (and only there):
+
+* every item counts memory: what it declares (`memory`, in bytes), or, when it declares none,
+  its weight times the host's `assumed_memory` per slot (0 when that is not given);
+* an item enters only if the memory counted on its host (standing memory, held leases and what
+  this decision admitted) plus its own stays within the budget. Like weight, it is never
+  preempted to make room, and the item whose turn it is still blocks its pool;
+* while `memory_free` names the host (memory is short there), the items one decision admits
+  may together count at most that much more.
+
+A host with no budget counts no memory at all: with none given anywhere, every rule above is
+the slots' alone, exactly as before memory was counted.
+
 Weight held beyond a pool's `max` or a host's slots is allowed (`leasehold.ledger.Ledger.impose`
 records work that was never asked for, such as an observed process): `fits` then fails for that
 pool and host until enough of it ends.
@@ -57,7 +70,8 @@ class PoolPolicy:
 
 @dataclass(frozen=True)
 class AdmissionPolicy:
-    """What `decide` reads: each host's slots and each pool's shape."""
+    """What `decide` reads: each host's slots and each pool's shape, and, optionally, each
+    host's memory budget. Every memory field is empty by default: no memory is counted."""
 
     slots: Mapping[str, int]
     pools: Mapping[str, PoolPolicy]
@@ -71,6 +85,21 @@ class AdmissionPolicy:
     #: keep their place in line): how a machine agent holds back new work while the machine is
     #: under memory pressure. Empty for a plain client.
     capped: frozenset[str] = frozenset()
+    #: Host to the memory, in bytes, that items admitted there may count together. A host not
+    #: named here has no memory budget, and no memory is counted on it.
+    memory: Mapping[str, int] = field(default_factory=dict, hash=False)
+    #: Host to the memory, in bytes, one slot of weight counts as when an item declares none.
+    #: A host not named here counts such items as 0.
+    assumed_memory: Mapping[str, int] = field(default_factory=dict, hash=False)
+    #: Pool name to memory, in bytes, that work outside the ledger already holds there; counted
+    #: on a host with a budget, before any lease.
+    standing_memory: Mapping[str, int] = field(default_factory=dict, hash=False)
+    #: Host to the most memory, in bytes, the items one decision admits there may count
+    #: together, on top of the budget: set while memory is short (a machine agent's guard).
+    #: A host not named here has no such limit.
+    memory_free: Mapping[str, int] = field(default_factory=dict, hash=False)
+    #: Why `memory_free` is set, in words, for `blocker` to give.
+    memory_short: str | None = None
 
     @classmethod
     def from_pools(
@@ -80,8 +109,16 @@ class AdmissionPolicy:
         closed: frozenset[str] = frozenset(),
         standing: Mapping[str, int] | None = None,
         capped: frozenset[str] = frozenset(),
+        memory: int | None = None,
+        assumed_memory: int | None = None,
+        standing_memory: Mapping[str, int] | None = None,
+        memory_free: int | None = None,
+        memory_short: str | None = None,
     ) -> AdmissionPolicy:
-        """The policy for one machine's `PoolSet`, every pool on host `MACHINE`."""
+        """The policy for one machine's `PoolSet`, every pool on host `MACHINE`. `memory` is
+        the machine's memory budget in bytes (None: no memory is counted), `assumed_memory`
+        what one slot of weight counts as when an item declares none, and `memory_free` the
+        most one decision may admit while memory is short (None: no such limit)."""
         return cls(
             slots={MACHINE: pool_set.slots},
             pools={
@@ -97,12 +134,28 @@ class AdmissionPolicy:
             closed=closed,
             standing=dict(standing or {}),
             capped=capped,
+            memory={} if memory is None else {MACHINE: memory},
+            assumed_memory={} if assumed_memory is None else {MACHINE: assumed_memory},
+            standing_memory=dict(standing_memory or {}),
+            memory_free={} if memory_free is None else {MACHINE: memory_free},
+            memory_short=memory_short,
         )
 
-    def refusal(self, pool: str, weight: int) -> str | None:
-        """Why an item of `weight` could never be admitted to `pool`, or None if it could: it
-        is below 1, or it would not fit `pool` even with nothing held but the standing work
-        (whatever is capped now). Such an item would block its pool's line forever."""
+    def counted(self, host: str, weight: int, memory: int | None) -> int:
+        """The memory, in bytes, an item of `weight` declaring `memory` (None: none) counts on
+        `host`: 0 where the host has no budget."""
+        if host not in self.memory:
+            return 0
+        if memory is not None:
+            return memory
+        return weight * self.assumed_memory.get(host, 0)
+
+    def refusal(self, pool: str, weight: int, memory: int | None = None) -> str | None:
+        """Why an item of `weight` (declaring `memory` bytes, or None) could never be admitted
+        to `pool`, or None if it could: it is below 1, it would not fit `pool` even with
+        nothing held but the standing work (whatever is capped now), or the memory it counts
+        would not fit its host's budget even then. Such an item would block its pool's line
+        forever."""
         policy = self.pools.get(pool)
         if policy is None:
             return f"there is no pool {pool!r}"
@@ -114,9 +167,9 @@ class AdmissionPolicy:
         if weight > slots:
             return f"weight {weight} is more than the {slots} slots there are"
         most = self.heaviest(pool)
-        if weight <= most:
-            return None
         idle = _Tally.of(State(), self)
+        if weight <= most:
+            return self._memory_refusal(idle, policy.host, weight, memory)
         held = idle.host_used.get(policy.host, 0)
         owed = _owed(idle, self, pool)
         why = [
@@ -144,6 +197,25 @@ class AdmissionPolicy:
         )
         return max(0, min(by_pool, by_host))
 
+    def _memory_refusal(
+        self, idle: _Tally, host: str, weight: int, memory: int | None
+    ) -> str | None:
+        """Why what an item counts could never fit `host`'s memory budget, or None."""
+        budget = self.memory.get(host)
+        if budget is None:
+            return None
+        need = self.counted(host, weight, memory)
+        if need > budget:
+            need_text = _memory_need(self, host, weight, memory)
+            return f"{need_text} is more than the {gib(budget)} memory budget"
+        held = idle.memory.get(host, 0)
+        if held + need > budget:
+            return (
+                f"{_memory_need(self, host, weight, memory)} cannot fit the {gib(budget)} "
+                f"memory budget even on an idle machine: {gib(held)} is held by standing work"
+            )
+        return None
+
 
 @dataclass(frozen=True)
 class Held:
@@ -152,6 +224,8 @@ class Held:
     user: str | None
     weight: int
     session: str | None = None
+    #: The memory, in bytes, the item declared; None: it declared none.
+    memory: int | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +237,8 @@ class Waiting:
     #: The item's place in its session's FIFO: when it was queued, then the ledger's sequence.
     order: tuple[float, int]
     session: str | None = None
+    #: The memory, in bytes, the item declares; None: it declares none.
+    memory: int | None = None
 
 
 #: (pool, user): who has had a turn in which pool.
@@ -191,6 +267,8 @@ class _Tally:
     served: dict[Turn, int] = field(default_factory=dict)
     session_served: dict[SessionTurn, int] = field(default_factory=dict)
     last_turn: int = 0
+    memory: dict[str, int] = field(default_factory=dict)  # host -> memory counted
+    fresh_memory: dict[str, int] = field(default_factory=dict)  # host -> counted by this decision
 
     @classmethod
     def of(cls, state: State, policy: AdmissionPolicy | None = None) -> _Tally:
@@ -207,13 +285,29 @@ class _Tally:
                     continue
                 tally.used[pool] = tally.used.get(pool, 0) + weight
                 tally.host_used[shaped.host] = tally.host_used.get(shaped.host, 0) + weight
+            for pool, memory in policy.standing_memory.items():
+                shaped = policy.pools.get(pool)
+                if shaped is None or shaped.host not in policy.memory or memory < 1:
+                    continue
+                tally.memory[shaped.host] = tally.memory.get(shaped.host, 0) + memory
         for h in state.held:
-            tally.add(h.pool, h.host, h.user, h.session, h.weight)
+            counted = 0 if policy is None else policy.counted(h.host, h.weight, h.memory)
+            tally.add(h.pool, h.host, h.user, h.session, h.weight, counted)
         return tally
 
-    def add(self, pool: str, host: str, user: str | None, session: str | None, weight: int):
+    def add(
+        self,
+        pool: str,
+        host: str,
+        user: str | None,
+        session: str | None,
+        weight: int,
+        memory: int = 0,
+    ):
         self.used[pool] = self.used.get(pool, 0) + weight
         self.host_used[host] = self.host_used.get(host, 0) + weight
+        if memory:
+            self.memory[host] = self.memory.get(host, 0) + memory
         self.running[(pool, user)] = self.running.get((pool, user), 0) + 1
         key = (pool, user, session)
         self.session_running[key] = self.session_running.get(key, 0) + 1
@@ -230,8 +324,19 @@ def top(policy: AdmissionPolicy, pool: str) -> int:
     return p.reserved if pool in policy.capped else p.max
 
 
-def fits(tally: _Tally, policy: AdmissionPolicy, pool: str, weight: int) -> bool:
-    """The two capacity rules, for `weight` more in `pool`."""
+def fits(
+    tally: _Tally, policy: AdmissionPolicy, pool: str, weight: int, memory: int | None = None
+) -> bool:
+    """The capacity rules, for `weight` more in `pool` from an item declaring `memory` bytes
+    (None: none): the two slot rules, and the memory rules where its host has a budget."""
+    host = policy.pools[pool].host
+    return _slots_fit(tally, policy, pool, weight) and _memory_fits(
+        tally, policy, host, policy.counted(host, weight, memory)
+    )
+
+
+def _slots_fit(tally: _Tally, policy: AdmissionPolicy, pool: str, weight: int) -> bool:
+    """The two slot rules alone, for `weight` more in `pool`."""
     p = policy.pools[pool]
     if tally.used.get(pool, 0) + weight > top(policy, pool):
         return False
@@ -248,6 +353,30 @@ def _owed(tally: _Tally, policy: AdmissionPolicy, pool: str) -> int:
         for name, q in policy.pools.items()
         if name != pool and q.host == host
     )
+
+
+def _memory_fits(tally: _Tally, policy: AdmissionPolicy, host: str, need: int) -> bool:
+    budget = policy.memory.get(host)
+    if budget is None:
+        return True
+    if tally.memory.get(host, 0) + need > budget:
+        return False
+    free = policy.memory_free.get(host)
+    return free is None or tally.fresh_memory.get(host, 0) + need <= free
+
+
+def gib(n: int) -> str:
+    """`n` bytes in GiB, as status and blockers give memory."""
+    return f"{n / 2**30:.1f} GiB"
+
+
+def _memory_need(policy: AdmissionPolicy, host: str, weight: int, memory: int | None) -> str:
+    """What an item counts, and where that comes from, in words."""
+    need = policy.counted(host, weight, memory)
+    if memory is not None:
+        return f"its declared {gib(need)}"
+    per_slot = policy.assumed_memory.get(host, 0)
+    return f"{gib(need)} (weight {weight} at {gib(per_slot)} a slot, none declared)"
 
 
 #: A pool's line: user -> session -> that session's items, oldest first.
@@ -325,10 +454,14 @@ def decide(state: State, policy: AdmissionPolicy) -> list[ItemKey]:
                 continue
             session = _next_session(line[user], tally, pool, user)
             head = line[user][session][0]
-            if not fits(tally, policy, pool, head.weight):
+            if not fits(tally, policy, pool, head.weight, head.memory):
                 break  # no backfill around the item whose turn it is
             line[user][session].pop(0)
-            tally.add(pool, policy.pools[pool].host, user, session, head.weight)
+            host = policy.pools[pool].host
+            counted = policy.counted(host, head.weight, head.memory)
+            tally.add(pool, host, user, session, head.weight, counted)
+            if counted:
+                tally.fresh_memory[host] = tally.fresh_memory.get(host, 0) + counted
             tally.serve(pool, user, session)
             admits.append(head.key)
     return admits
@@ -363,8 +496,8 @@ def blocker(
     """Why the waiting item `key` is not admitted now, in words, or None when it is not waiting
     (or would be admitted). The first reason that applies, in this order: its pool is closed;
     another item is ahead of it; its user is at the pool's per-user limit; its pool is capped
-    to its reservation; its pool is full;
-    the machine's free slots are owed to other pools' reservations or are all in use.
+    to its reservation; memory is short (`memory_free`); its pool is full; the machine's free
+    slots are owed to other pools' reservations or are all in use; the memory budget is used.
     `places` is `positions(state, policy)`, for a caller asking about many items."""
     item = next((w for w in state.waiting if w.key == key), None)
     if item is None or item.pool not in policy.pools:
@@ -390,10 +523,25 @@ def blocker(
             f"the machine is under pressure: pool {item.pool} admits only its "
             f"{pool.reserved} reserved slots and holds {used}; this needs {item.weight}"
         )
+    need = policy.counted(pool.host, item.weight, item.memory)
+    free_now = policy.memory_free.get(pool.host)
+    if pool.host in policy.memory and free_now is not None and need > free_now:
+        why = f" ({policy.memory_short})" if policy.memory_short else ""
+        return (
+            f"memory is short{why}: {gib(free_now)} may start now; this counts "
+            f"{_memory_need(policy, pool.host, item.weight, item.memory)}"
+        )
     if used + item.weight > pool.max:
         return f"pool {item.pool} holds {used} of {pool.max}; this needs {item.weight}"
-    if fits(tally, policy, item.pool, item.weight):
+    if fits(tally, policy, item.pool, item.weight, item.memory):
         return None
+    if _slots_fit(tally, policy, item.pool, item.weight):
+        budget = policy.memory[pool.host]
+        counted = tally.memory.get(pool.host, 0)
+        return (
+            f"the memory budget is used: {gib(counted)} of {gib(budget)} counted; this counts "
+            f"{_memory_need(policy, pool.host, item.weight, item.memory)}"
+        )
     slots = policy.slots.get(pool.host, 0)
     free = slots - tally.host_used.get(pool.host, 0)
     owed = _owed(tally, policy, item.pool)

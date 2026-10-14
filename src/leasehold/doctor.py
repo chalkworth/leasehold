@@ -16,8 +16,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-from leasehold import contain, discovery, machine, paths
+from leasehold import contain, discovery, machine, paths, upgrade
+from leasehold.admission import gib
 from leasehold.client import ApiError, Client, Unavailable
+from leasehold.facts import meminfo
 
 Level = Literal["ok", "warn", "fail"]
 
@@ -70,6 +72,69 @@ def check_config(explicit: str | None, env: Mapping[str, str]) -> tuple[Check, o
         return Check("config", "fail", f"{path}: {exc}", "correct it; see docs/reference.md"), None
     detail = f"{path} ({config.mode} daemon, {config.ceiling.slots} slots)"
     return Check("config", "ok", detail), config
+
+
+def check_upgrade(explicit: str | None, env: Mapping[str, str], config) -> Check | None:
+    """A warning when a user's config lacks today's defaults (`leasehold.upgrade`), with the
+    command that adds them."""
+    if config is None:
+        return None
+    lacks = upgrade.outdated(config)
+    if not lacks:
+        return None
+    try:
+        path = paths.find_config(explicit, env)
+    except FileNotFoundError:
+        path = None
+    flag = "" if path is None or path == paths.user_config(env) else f" --config {path}"
+    return Check(
+        "defaults",
+        "warn",
+        f"{path or 'the config'} has leasehold 0.2's defaults: " + "; ".join(lacks),
+        f"`leasehold setup --upgrade-config{flag} --dry-run` shows the change, and without "
+        f"--dry-run makes it (keeping the old file beside it); or by hand: "
+        f"{upgrade.manual_steps(config)}",
+    )
+
+
+def check_guard_weights(config, memory_bytes: int | None) -> Check | None:
+    """A warning when no built-in build or test rule could start while the memory guard is on:
+    without `[memory]`, one heavier than its pool's reservation; with it, one that counts more
+    memory than the guard could ever find free, or than the budget."""
+    if config is None or not config.guarded or not config.commands.defaults:
+        return None
+    pool = config.kinds.get("work", "work")
+    pools = config.pool_set().pools
+    if pool not in pools:
+        return None
+    heavy = min(config.commands.heavy_weight, pools[pool].max)
+    budget = config.memory_budget(memory_bytes) if memory_bytes else None
+    if config.memory is None:
+        reserved = pools[pool].reserved
+        if heavy <= reserved:
+            return None
+        return Check(
+            "guard",
+            "warn",
+            f"while the memory guard is on, pool {pool} admits only its {reserved} reserved "
+            f"slots, and every built-in build and test rule weighs {heavy}: none of them can "
+            "start until the guard goes off",
+            "count memory instead ([memory]: `leasehold setup --upgrade-config`), or set "
+            f"[commands] heavy_weight to at most {reserved}",
+        )
+    if budget is None or memory_bytes is None:
+        return None
+    counted = heavy * budget.assumed_per_slot
+    most = min(budget.budget, max(0, memory_bytes - config.guard.floor(memory_bytes)))
+    if counted <= most:
+        return None
+    return Check(
+        "guard",
+        "warn",
+        f"a built-in build or test rule (weight {heavy}) counts {gib(counted)}, more than the "
+        f"{gib(most)} the memory budget and the guard's floor ever let start",
+        "lower [memory] assumed_per_slot or [commands] heavy_weight, or raise the budget",
+    )
 
 
 def check_socket(
@@ -314,9 +379,14 @@ def run(
     roots = roots or Roots()
     config_check, resolved = check_config(config, env)
     checks = [config_check]
-    ledger = check_ledger(resolved)
-    if ledger is not None:
-        checks.append(ledger)
+    memory_bytes = meminfo(roots.proc).get("MemTotal") if resolved is not None else None
+    for extra in (
+        check_upgrade(config, env, resolved),
+        check_guard_weights(resolved, memory_bytes),
+        check_ledger(resolved),
+    ):
+        if extra is not None:
+            checks.append(extra)
     socket_check, chosen = check_socket(socket, config, env)
     checks.append(socket_check)
     named = [Path(resolved.socket)] if resolved is not None else []

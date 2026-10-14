@@ -164,3 +164,17 @@ def test_the_experimental_commands_say_so(capsys):
         with pytest.raises(SystemExit):
             _parser().parse_args([name, "--help"])
         assert "Experimental: may change before 1.0." in " ".join(capsys.readouterr().out.split())
+
+
+def test_the_built_in_weights_come_from_the_config():
+    from leasehold import template
+
+    weights = {r.programs[0]: r.weight for _src, r in CommandSettings().rules()}
+    assert weights["pytest"] == 4 and weights["npm"] == 2  # 0.2's, without the keys
+    set_ = CommandSettings(heavy_weight=3, light_weight=1)
+    weights = {r.programs[0]: r.weight for _src, r in set_.rules()}
+    assert weights["pytest"] == weights["cargo"] == weights["make"] == 3
+    assert weights["npm"] == weights["jest"] == 1
+    assert [template.weights(n) for n in (1, 3, 4, 6, 14)] == [
+        (1, 1), (3, 2), (2, 1), (3, 2), (7, 4),
+    ]  # fmt: skip

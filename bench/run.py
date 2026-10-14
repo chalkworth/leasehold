@@ -23,11 +23,16 @@ so every condition does the same work; only how the jobs are started changes:
 * `lh-hardcpu-greedy`: as `lh-enforced-greedy`, with `[contain] hard_cpu = true`, which caps
   each scope at its weight in CPUs;
 * `static-jobs`: unmanaged, but every job is told the job count a lease of its weight would
-  give (`LEASEHOLD_JOBS`), as when one sets `-j4` everywhere and coordinates nothing.
+  give (`LEASEHOLD_JOBS`), as when one sets `-j4` everywhere and coordinates nothing;
+* `lh-enforced-declared`: as `lh-enforced`, with each `mem` job declaring its size plus 512
+  MiB (`hold --memory`), which a config with a memory budget counts;
+* `lh-enforced-v020`: as `lh-enforced`, on the config leasehold 0.2.0's `init --user` wrote
+  for this machine (no memory counted) with every job at 0.2.0's built-in weight, 4.
 
 leasehold's conditions run a private user-mode daemon on a socket of their own, with the
-config `leasehold init --user` writes for this machine, and `hold --weight` as the built-in
-`[commands]` rules weigh a test run (`--weights`).
+config `leasehold init --user` writes for this machine (its `[memory] budget` replaced by
+`--memory-budget` when given), and `hold --weight` as the built-in `[commands]` rules weigh a
+test run in it (`--weights`, by default the config's `heavy_weight`).
 
 Safety: everything the benchmark starts is held to one memory limit (`MemoryMax`, with a
 bounded `MemorySwapMax`): the harness's own scope for the conditions whose jobs run in it, and
@@ -79,7 +84,13 @@ CONDITIONS = {
     "lh-enforced-greedy": "as lh-enforced, jobs ignore the job count and use every CPU",
     "lh-hardcpu-greedy": "as lh-enforced-greedy, with [contain] hard_cpu = true",
     "static-jobs": "unmanaged, each job told the job count its lease would give",
+    "lh-enforced-declared": "as lh-enforced, mem jobs declare their memory (hold --memory)",
+    "lh-enforced-v020": "as lh-enforced, on leasehold 0.2.0's generated config and weights",
 }
+#: The built-in weight of a test run or build in leasehold 0.2.0.
+WEIGHT_V020 = 4
+#: What `lh-enforced-declared` declares for a mem job beyond the block it touches.
+DECLARED_EXTRA = 512 * (1 << 20)
 DEFAULT_CONDITIONS = list(CONDITIONS)
 
 
@@ -263,6 +274,8 @@ class Setup:
         self.leasehold = condition.startswith("lh-")
         self.greedy = condition.endswith("-greedy")
         self.hard_cpu = condition == "lh-hardcpu-greedy"
+        self.v020 = condition == "lh-enforced-v020"
+        self.declared = condition == "lh-enforced-declared"
 
     def start(self) -> None:
         caps = [f"MemoryMax={self.spec['cap_bytes']}", f"MemorySwapMax={self.spec['swap_bytes']}"]
@@ -300,6 +313,13 @@ class Setup:
         marker = 'mode = "user"'
         if marker not in text:
             raise SystemExit("leasehold init --print gave a config the benchmark cannot place")
+        if self.v020:
+            text = config_v020(text)
+        elif self.spec.get("memory_budget"):
+            line = 'budget = "auto"'
+            if line not in text:
+                raise SystemExit("leasehold init --print has no [memory] budget to replace")
+            text = text.replace(line, f'budget = "{self.spec["memory_budget"]}"', 1)
         ledger = self.workdir / "ledger"
         text = text.replace(marker, f'{marker}\nledger_dir = "{ledger}"', 1)
         if self.hard_cpu:
@@ -360,7 +380,11 @@ class Setup:
                 *job,
             ]
         if self.leasehold:
-            weight = self.spec["weights"][kind]
+            weight = WEIGHT_V020 if self.v020 else self.spec["weights"][kind]
+            # A size rounded up past the job's touched block, as a person declares one: the job's
+            # interpreter and workers need a little more, and MemoryHigh is set to it.
+            size = self.spec["mem_bytes"] + DECLARED_EXTRA
+            declared = ["--memory", f"{size}b"] if self.declared else []
             return [
                 *leasehold_cli(),
                 "hold",
@@ -368,6 +392,7 @@ class Setup:
                 self.sock,
                 "--weight",
                 str(weight),
+                *(declared if kind == "mem" else []),
                 "--session",
                 f"agent{agent}",
                 "--if-unavailable",
@@ -401,6 +426,40 @@ class Setup:
 
 def leasehold_cli() -> list[str]:
     return [sys.executable, "-m", "leasehold"]
+
+
+def init_config() -> str:
+    """The config `leasehold init --user` writes for this machine."""
+    return subprocess.run(
+        [*leasehold_cli(), "init", "--user", "--print"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=clean_env(),
+    ).stdout
+
+
+def config_v020(text: str) -> str:
+    """What leasehold 0.2.0's `init --user` wrote for the machine `text` (today's config for it)
+    describes: the same name, slots, CPUs, per-lease memory and description."""
+    import tomllib
+
+    from leasehold.template import render_user_0_2
+
+    raw = tomllib.loads(text)
+    about = text.splitlines()[1].removeprefix("# ")
+    c = raw["ceiling"]
+    return render_user_0_2(
+        name=raw["name"], slots=c["slots"], cpus=c["cpus"], memory=c["memory"], about=about,
+        release="0.2.0",
+    )  # fmt: skip
+
+
+def heavy_weight(text: str) -> int:
+    """The built-in weight of a build or test run in the config `text`."""
+    import tomllib
+
+    return int(tomllib.loads(text).get("commands", {}).get("heavy_weight", WEIGHT_V020))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -833,8 +892,15 @@ def write_summary(outdir: Path, spec: dict, rows: list[dict]) -> str:
             "of hashing alone on every CPU.",
             f"- Memory limit on everything the benchmark runs: {spec['cap_bytes'] / GIB:.1f} GiB"
             f" (swap {spec['swap_bytes'] / GIB:.1f} GiB).",
-            f"- leasehold: `leasehold init --user` config, `hold --weight` cpu {w['cpu']}, "
-            f"mem {w['mem']}; slice condition CPUWeight {spec['slice_weight']}.",
+            "- leasehold: `leasehold init --user` config"
+            + (
+                f" with `[memory] budget = {spec['memory_budget']!r}`"
+                if spec.get("memory_budget")
+                else ""
+            )
+            + f", `hold --weight` cpu {w['cpu']}, mem {w['mem']} "
+            f"(`lh-enforced-v020`: 0.2.0's config, weight {WEIGHT_V020}); slice condition "
+            f"CPUWeight {spec['slice_weight']}.",
             "",
             markdown_table(rows),
             "",
@@ -852,7 +918,10 @@ def write_summary(outdir: Path, spec: dict, rows: list[dict]) -> str:
 
 
 def parse_weights(text: str) -> dict[str, int]:
-    out = {"cpu": 4, "mem": 4}
+    """`cpu=N,mem=M`; a kind left out keeps the built-in weight of a test run (`heavy_weight`
+    in the config `init` writes)."""
+    heavy = heavy_weight(init_config())
+    out = {"cpu": heavy, "mem": heavy}
     for part in filter(None, text.split(",")):
         key, _, value = part.partition("=")
         if key not in out:
@@ -899,9 +968,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--swap-gib", type=float, default=2.0)
     parser.add_argument(
         "--weights",
-        type=parse_weights,
-        default=parse_weights(""),
-        help="hold --weight per job kind (default cpu=4,mem=4: the built-in rule for test runs)",
+        default="",
+        help="hold --weight per job kind, as cpu=N,mem=M (default: the built-in weight of a "
+        "test run in the config init writes, its heavy_weight)",
+    )
+    parser.add_argument(
+        "--memory-budget",
+        help="the [memory] budget of the leasehold conditions' config, a size such as 7g "
+        "(default: the config's own, auto)",
     )
     parser.add_argument("--slice-weight", type=int, default=20)
     parser.add_argument("--git-repo", help="time `git status` in this repository every 5 s")
@@ -922,6 +996,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settle", type=float, default=20)
     args = parser.parse_args(argv)
 
+    try:
+        args.weights = parse_weights(args.weights)
+    except (ValueError, argparse.ArgumentTypeError) as exc:
+        parser.error(f"--weights: {exc}")
     conditions = [c for c in args.conditions.split(",") if c]
     unknown = [c for c in conditions if c not in CONDITIONS]
     if unknown:
@@ -985,6 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
         "cap_bytes": cap,
         "swap_bytes": swap,
         "weights": args.weights,
+        "memory_budget": args.memory_budget,
         "slice_weight": args.slice_weight,
         "git_repo": args.git_repo,
         "abort_available_bytes": 512 * MIB,

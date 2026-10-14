@@ -3,7 +3,7 @@
 The detail behind the [README](../README.md): how leases are admitted, every config key, the
 command line, the HTTP API, and the integrations.
 
-- [Leases](#leases): kinds, pools, turns, lending, observed programs
+- [Leases](#leases): kinds, pools, turns, memory, lending, observed programs
 - [Installing](#installing): your own daemon, the machine's daemon
 - [The config file](#the-config-file)
 - [Running work under a lease](#running-work-under-a-lease): `hold`, sizing, exit codes, `acquire`
@@ -46,7 +46,7 @@ gets this split:
 - `observed` reserves nothing and is never asked for.
 
 A request fits when its pool has room under its max, and the slots not reserved for other
-pools have room for it. When it does not fit, it waits in its pool's queue. Within a pool,
+pools have room for it (and, where [memory is counted](#memory), the memory budget too). When it does not fit, it waits in its pool's queue. Within a pool,
 **turns go round by Unix user**: the user with the fewest leases running goes next, then the one
 served longest ago. Within a user's turn, the user's **sessions** take turns the same way
 (`hold --session`, `LEASEHOLD_SESSION`, or the label `session`), so splitting work into
@@ -54,18 +54,63 @@ sessions only divides that user's own share. There is no backfill: a small reque
 jump a large one at the head of the queue, so a large one is never starved.
 
 Each waiting item says why it waits (`blocked`), for example "pool work holds 6 of 6; this
-needs 1" or "2 of 12 slots are free; this needs 4". `hold` and `acquire` print it once while
-they wait.
+needs 1" or "2 of 12 slots are free; this needs 4", and, with memory counted, "the memory
+budget is used: 9.0 of 11.7 GiB counted; this counts 5.9 GiB" or "memory is short (...): 0.4
+GiB may start now; this counts 5.9 GiB". `hold` and `acquire` print it once while they wait.
+
+### Memory
+
+A config with a `[memory]` table (the one `init` and `setup` write for your own daemon) counts
+memory as well as slots. A request starts only when its slots fit and the memory it counts fits
+the **budget**: the machine's memory less a share kept back for you.
+
+```toml
+[memory]
+budget = "auto"            # the machine's memory less `kept`; or a size such as "12g"
+kept = "25%"               # with "auto": a share of the memory, or a size such as "4g"
+assumed_per_slot = "auto"  # what a request that declares no memory counts, per slot of weight
+```
+
+A request counts the memory it **declares**: `hold --memory 6g` (or `acquire --memory`), or the
+`memory` of the [`[commands]` rule](#which-commands-take-a-lease-commands) it matches. One that
+declares none counts its weight times `assumed_per_slot`; `"auto"` is the budget divided by the
+slots, so a machine whose slots are all held has its budget all counted, and a request is
+assumed to need memory in proportion to the CPU share it asked for. That is the most cautious
+estimate that never refuses what the slots would admit: with nothing declared, memory and slots
+run out together, and a declared size, larger or smaller, replaces the estimate. Set it to a
+size to assume a fixed amount a slot, or `"0g"` to count only what is declared.
+
+A declared size is also what a contained command is held to (`MemoryHigh`, see
+[Containment](#containment)), which throttles it past that size but never kills it: the budget
+decides what starts, it does not bound what runs. A request that counts more than the whole
+budget, or declares more than `[ceiling] memory`, is refused. The budget counts only what
+leasehold admits (and `[[standing]]` memory); memory other programs use is the
+[guard](#memory-guard)'s to notice.
+
+Without a `[memory]` table no memory is counted, as in leasehold 0.2, and a declared size only
+sets `MemoryHigh`. A 0.2 config gains the table with `leasehold setup --upgrade-config` (see
+[Upgrading a 0.2 config](#upgrading-a-02-config)).
 
 ### Memory guard
 
 Running out of memory is what freezes a machine that runs too much at once. Your own daemon
-watches memory pressure (PSI `some avg10`) and available memory. When pressure passes
-`[guard] memory_pressure_on` (20%) or available memory drops under `min_available`, every pool
-admits only its reserved slots: what runs keeps running, reserved work still starts, and the
-rest waits in line, saying "the machine is under pressure". The guard goes off once pressure
-has stayed at most `memory_pressure_off` (5%), with memory above the floor, for `settle_s` (30
-s). The machine's daemon (`serve --system`) runs without it unless `[guard] enabled = true`.
+watches memory pressure (PSI `some avg10`) and available memory. The guard goes on when
+pressure passes `[guard] memory_pressure_on` (20%) or available memory drops under
+`min_available`, and off once pressure has stayed at most `memory_pressure_off` (5%), with
+memory above the floor, for `settle_s` (30 s). While it is on, what runs keeps running, and
+what new work may start depends on whether memory is counted:
+
+- **With `[memory]`**, new work may count at most the memory measured free: none while a reading
+  is over a threshold, and while the guard settles, what is available above `min_available`
+  less what leases granted in the last `settle_s` count (they may not have grown to it yet).
+  A request heavier than its pool's reservation starts as soon as its memory fits; a large one
+  does not start while pressure is high. What waits says "memory is short".
+- **Without it** (a 0.2 config), every pool admits only its reserved slots, and the rest waits,
+  saying "the machine is under pressure". A request heavier than its pool's reservation then
+  waits until the guard goes off; `leasehold doctor` warns when that is every built-in build
+  and test rule.
+
+The machine's daemon (`serve --system`) runs without the guard unless `[guard] enabled = true`.
 
 ### Lending
 
@@ -159,7 +204,29 @@ It runs as you, with its socket in `$XDG_RUNTIME_DIR/leasehold/` (0600) and its 
 and says so; `leasehold init` writes a commented config sized for the machine to
 `~/.config/leasehold/machine.toml`: one slot per CPU less two kept for you (one on a machine of
 3 to 7 CPUs), two pools (`work` for your agents and commands, `background` for `--kind
-external`, which never takes work's reserved half), no lending, and the memory guard on.
+external`, which never takes work's reserved half), no lending, memory counted against
+three quarters of the machine's (`[memory]`), the memory guard on, and the built-in build and
+test rules at half the slots (`[commands] heavy_weight`; all of them below 4 slots), so two
+builds or test runs run at once: on 8 CPUs, 6 slots and weight 3.
+
+#### Upgrading a 0.2 config
+
+`setup` never changes a config that is there, so one that leasehold 0.2 wrote keeps 0.2's
+defaults after an upgrade: no memory counted, and the built-in rules at weight 4, which on 6 or
+7 slots lets one build or test run at a time. `leasehold doctor` and `leasehold setup` say so.
+
+```sh
+leasehold setup --upgrade-config --dry-run   # what would change, as a diff
+leasehold setup --upgrade-config             # change it; the old file is kept as machine.toml.0.2.bak
+systemctl --user restart leasehold
+```
+
+A config exactly as 0.2's `init` wrote it is written afresh from today's template for the same
+machine (name, slots, CPUs, per-lease memory). One you have edited keeps every line, and gains
+only `heavy_weight` and `light_weight` under `[commands]` and a `[memory]` table at the end
+(and today's comment above `[guard]`, if 0.2's is there unchanged). A `[commands]` written as
+an inline table or dotted keys is not edited: the command says what to add by hand. `--config
+PATH` upgrades another file.
 
 ### The machine's daemon
 
@@ -225,7 +292,8 @@ an example machine. An unknown key is an error.
 | `[jobs] per_slot` | `1` | jobs per slot, for [sizing](#sizing-the-command-to-its-lease) |
 | `[[standing]]` | none | long-lived work outside leasehold that permanently holds capacity: `name`, `pool`, `weight` (required), `kind` (`"workload"`), `cpus`, `memory`, `note` |
 | `[[observe]]` | none | see [Observed programs](#observed-programs): `name`, `match` (`comm`, `exe`, `cmdline`, `user`), `weight`, `pool` (`observed`), `max_count` |
-| `[commands]` | the built-in rules | see [`[commands]`](#which-commands-take-a-lease-commands): `defaults`, `[[commands.rule]]`, `wait_s`, `when_busy` |
+| `[commands]` | the built-in rules | see [`[commands]`](#which-commands-take-a-lease-commands): `defaults`, `[[commands.rule]]`, `heavy_weight` (4), `light_weight` (2), `wait_s`, `when_busy` |
+| `[memory]` | none: no memory counted | see [Memory](#memory): `budget` (`"auto"`), `kept` (`"25%"`), `assumed_per_slot` (`"auto"`) |
 | `[guard]` | on for your own daemon | see [Memory guard](#memory-guard): `enabled`, `memory_pressure_on` (20), `memory_pressure_off` (5), `min_available` (5% of memory, at least 512 MiB), `settle_s` (30) |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
 
@@ -246,8 +314,9 @@ leasehold hold -- cargo test --workspace
 ```
 
 Without `--weight`, `hold` weighs the command as the [`[commands]` rules](#which-commands-take-a-lease-commands)
-weigh it (cargo test: 4 slots, cut to what its pool may hold), and anything they do not name
-as 1 slot.
+weigh it (cargo test: `heavy_weight` slots, cut to what its pool may hold), and anything they
+do not name as 1 slot. `--memory 6g` declares the memory it will use (default: its rule's
+`memory`), counted against the [memory budget](#memory) and held to when contained.
 
 `hold` waits for a lease, runs the command in its own process group, renews while it runs
 (every TTL/3, each renewal waiting at most TTL/3 for an answer), forwards SIGTERM, SIGINT and
@@ -281,7 +350,8 @@ the lease, so the lease holds the command back instead of only counting it:
   (`CPUQuota`).
 - `hold --memory 4g`, or a rule's `memory`, sets `MemoryHigh`: past it the kernel throttles the
   command and reclaims its memory. It is soft. It never kills, and it does not bound the
-  command outright: nothing sets `MemoryMax`, and the machine can still run out of memory. The
+  command outright: nothing sets `MemoryMax`, and the machine can still run out of memory.
+  The same size is what [memory admission](#memory) counts before the command starts, and the
   [memory guard](#memory-guard) is what stops new work starting while memory is short.
 
 The scope is `lease-<id>.scope` in `leasehold.slice`, or in the slice of the `leasehold run`
@@ -437,12 +507,14 @@ their arguments must contain:
 [commands]
 wait_s = 300           # how long an agent's hook or a shim waits in line (at most 540)
 when_busy = "deny"     # then: "deny" the command, or "run" it without a lease and say so
+heavy_weight = 3       # the built-in build and test rules' weight
+light_weight = 2       # the built-in JavaScript tooling rules' weight
 
 [[commands.rule]]
 programs = ["pytest"]
 args = "--benchmark"   # only benchmark runs
-weight = 8
-memory = "8g"          # held to this when contained (MemoryHigh)
+weight = 6
+memory = "8g"          # counted against [memory]; held to this when contained (MemoryHigh)
 
 [[commands.rule]]
 programs = ["make"]
@@ -453,7 +525,10 @@ pool = "external"
 The config's rules are tried first, then the built-in ones (`defaults = false` drops those):
 pytest, tox and nox; cargo build, test, check, clippy, bench, run and doc; make, ninja and
 bazel; `cmake --build`; go build and test; mvn and gradle; docker and podman build; npm, pnpm,
-yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. Among
+yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. The
+builds and test runs weigh `heavy_weight` (4 without the key; the config `init` writes sets
+half the slots), the JavaScript tooling `light_weight` (2; `init`: half of heavy, rounded up).
+A weight is both what a command costs in slots and the job count it is given. Among
 one source's rules the heaviest match wins. The daemon clamps each weight to the most its pool
 could ever grant one lease, beside the other pools' reservations and standing work. `leasehold commands` lists the rules; `leasehold commands --test "CMD"` says which
 one a command matches.
@@ -560,7 +635,9 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
   `--json` prints the [status object](#the-status-object).
 - **`leasehold top`** is the machine live in the terminal: the slots as numbered bays, each
   lease spanning as many as it weighs and each waiting one in a second lane; PSI pressure with a
-  sparkline; the pools; the leases; the queue with why each waits; lending; recent events.
+  sparkline; the pools; the leases; the queue with why each waits and, with memory counted,
+  what each counts; the memory budget in the header (`mem 5.9/11.7 GiB`); lending; recent
+  events.
   Keys: `q` quits, `p` pauses, `s` changes the order of the leases, `?` shows help. It follows
   `NO_COLOR` and draws in ASCII outside a UTF-8 locale. Off a terminal, on one smaller than
   80x20, or with `--once`, it prints one plain view and exits.
@@ -577,7 +654,9 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
 - **`leasehold doctor`** checks the config, the socket (its path within the 107 bytes a unix
   socket allows, a `socket_mode` that lets every user in) and its permissions, the daemon and
   its clock, PSI, cgroup v2 and the slices the config names, `/proc` visibility, the ledger,
-  and whether commands are contained (`enforced (systemd)`, or `advisory:` and why). It exits 1
+  and whether commands are contained (`enforced (systemd)`, or `advisory:` and why). It warns
+  when your config has leasehold 0.2's defaults ([upgrading](#upgrading-a-02-config)), and when
+  no built-in build or test rule could start while the memory guard is on. It exits 1
   on any failure and prints a fix for each problem. `--json` for scripts.
 - **`leasehold demo`** runs a made-up busy machine, a daemon with a scripted crowd, in a
   temporary directory, and shows it in `top` (`--ui` for the browser). It touches nothing real.
@@ -594,7 +673,7 @@ client for it.
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
 | `GET /v1/commands` | | the `[commands]` rules, each weight clamped as the daemon would grant it |
-| `POST /v1/acquire` | `kind`, `pool`, `weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s` | `status`: `granted` (with `lease`), `queued` (with `position` and `blocked`) or `refused` (with `reason`) |
+| `POST /v1/acquire` | `kind`, `pool`, `weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` (a size such as `"6g"`) | `status`: `granted` (with `lease`), `queued` (with `position` and `blocked`) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown` |
 | `POST /v1/release` | `lease_id` | `released` |
 | `POST /v1/lend` | `open`: true or false | the lend state; administrators only |
@@ -604,7 +683,8 @@ client for it.
 with the same `lease_id` keeps the place in line, and is not a new request. A place given back
 (`/v1/release`) while its `acquire` waits ends that wait, `refused`. A new request over
 its pool's per-user limits (`per_user_max_queued`, `create_rate_per_min`) is `refused` with
-`code: "quota_exceeded"`; one that fits now is granted whatever the waiting limit.
+`code: "quota_exceeded"`; one that fits now is granted whatever the waiting limit. A 0.2
+daemon does not take `memory`; `leasehold.client.Client` then asks again without it.
 
 An acquire naming a pool that does not exist is `refused` with `reason` `there is no pool
 'NAME'`.
@@ -632,17 +712,24 @@ when a field is removed or changes meaning:
 - `ceiling` (`slots`, `cpus`, `memory`, `memory_bytes`), and the machine's `slots`, `held` and
   `overcommitted`;
 - `pools`, per pool: `reserved`, `max`, `priority`, `preemptible`, `observed`, `closed`,
-  `held_weight`, `overcommitted`, `running`, `revoked`, `queued`. A pool's `held_weight`
-  includes its standing weight; `running` counts leases only;
+  `held_weight`, `overcommitted`, `running`, `revoked`, `queued`, `memory_bytes`. A pool's
+  `held_weight` includes its standing weight; `running` counts leases only; `memory_bytes` is
+  the memory admission counts there (0 without `[memory]`);
 - `load`: `pressure`, `loadavg`, `mem_available_bytes`, `mem_total_bytes`, `cgroup_v2`,
   `slices`;
 - `lend`: `eligible`, `reason`, `quiet_since`, `quiet_s`, `window`, `pools`, `switch`;
-- `guard`: `enabled`, `on`, `reason`, `since`, `memory_pressure_on`, `memory_pressure_off`,
+- `guard`: `enabled`, `on`, `pressing` (whether the last reading was itself over a threshold,
+  not only settling), `reason`, `since`, `memory_pressure_on`, `memory_pressure_off`,
   `min_available_bytes`, `settle_s`;
+- `memory`: `counted` (whether the config has `[memory]`), `machine_bytes`, and with it
+  `budget_bytes`, `kept_bytes`, `assumed_per_slot_bytes`, `held_bytes` (counted now, standing
+  memory included) and `free_now_bytes` (what may start now while the guard is on, else null);
+  without it these are null;
 - `contain`: the daemon's `[contain]` settings, `mode` and `hard_cpu` (whether a given caller
   is contained is that caller's own `leasehold doctor`);
 - `standing`, `leases`, and `queue`, each queued item with its `position` and why it waits
-  (`blocked`).
+  (`blocked`). Each lease and queued item has `memory_bytes` (what it declared, or null) and
+  `memory_counted_bytes` (what admission counts for it).
 
 ## The command line
 
@@ -657,7 +744,7 @@ are named at its end. `leasehold COMMAND --help` says more; `mcp`, `ui`, `metric
 set up your own leasehold: config, daemon, shims; --remove undoes it:
 
 ```
-leasehold setup [--remove]
+leasehold setup [--remove] [--upgrade-config] [--dry-run]
 ```
 
 run an agent as one session: its heavy commands leased and contained:
@@ -669,7 +756,7 @@ leasehold run [--session SESSION] [--leave-running] [--quiet] [--no-contain] ...
 run a command under a lease:
 
 ```
-leasehold hold [--kind {work,external,lend}] [--pool POOL] [--weight WEIGHT] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--grace GRACE] [--jobserver] [--no-job-env] [--memory MEMORY] [--if-unavailable run|fail] ...
+leasehold hold [--kind {work,external,lend}] [--pool POOL] [--weight WEIGHT] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--grace GRACE] [--jobserver] [--no-job-env] [--if-unavailable run|fail] ...
 ```
 
 the machine live: slots, pressure, pools, leases, the queue and events:
@@ -729,7 +816,7 @@ leasehold observe [--json]
 wait for a lease another process will release:
 
 ```
-leasehold acquire --lease-id LEASE_ID [--kind {work,external,lend}] [--pool POOL] [--weight WEIGHT] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--keep] [--max-hold MAX_HOLD] [--watch-pid WATCH_PID]
+leasehold acquire --lease-id LEASE_ID [--kind {work,external,lend}] [--pool POOL] [--weight WEIGHT] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--keep] [--max-hold MAX_HOLD] [--watch-pid WATCH_PID]
 ```
 
 renew a lease until it is released or a limit is hit:
