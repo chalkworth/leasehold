@@ -9,12 +9,14 @@ from collections.abc import Sequence
 
 from leasehold import handoff
 from leasehold.hold import hold
+from leasehold.kinds import GRANTED, KINDS
 from leasehold.units import memory_to_bytes
 
 ENV_SESSION = "LEASEHOLD_SESSION"
 ENV_IF_UNAVAILABLE = "LEASEHOLD_IF_UNAVAILABLE"
 IF_UNAVAILABLE = ("run", "fail")
-KIND_CHOICES = ("work", "external", "lend")
+#: The kinds a client may ask for, in `KINDS` order.
+KIND_CHOICES = tuple(k for k in KINDS if k in GRANTED)
 
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")  # the daemon's id pattern
