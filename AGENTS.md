@@ -14,6 +14,16 @@ uv run lint-imports       # the layer contracts in .importlinter
 
 `pre-commit install` runs ruff and the import contracts on every commit.
 
+## Changes reach `main` by pull request
+
+- `main` takes no direct pushes. Work on a branch, open a pull request, and let CI (`lint`,
+  `test (3.12)`, `test (3.13)`, `test (3.14)`, `build`) pass on it, up to date with `main`.
+- Merges are squash merges, made by the maintainer. A coding agent opens the pull request and
+  stops there: it never merges, approves or enables auto-merge, even when its credentials would
+  let it.
+- Review threads are resolved before merging. The branch is deleted on merge.
+- A release is a `v*` tag on `main` and a published GitHub release, which publishes to PyPI.
+
 ## Shape of the code
 
 - The library is pure: `model` (pools), `admission` (the decision), `ledger` (SQLite),
