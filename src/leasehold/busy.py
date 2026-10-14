@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from leasehold.client import ApiError, Client, Unavailable
 
 #: What a refusal adds to the reason: what to do about it.
-ADVICE = "Try lighter work and retry later."
+ADVICE = "The command did not run. Do lighter work first, then run it again."
 
 
 def holder(lease: Mapping) -> str:

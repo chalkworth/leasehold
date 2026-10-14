@@ -423,7 +423,7 @@ their arguments must contain:
 
 ```toml
 [commands]
-wait_s = 20            # how long an agent's hook waits for a lease (at most 540)
+wait_s = 300           # how long an agent's hook or a shim waits in line (at most 540)
 when_busy = "deny"     # then: "deny" the command, or "run" it without a lease and say so
 
 [[commands.rule]]
@@ -470,12 +470,15 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
 - **The lease outlives nothing.** A renewer keeps it while the command runs, watches the Claude
   Code process, and stops at the Bash call's own timeout plus a minute, so an interrupted call
   cannot hold slots.
-- **A busy machine.** After `wait_s` (20 s by default) the command is refused with a message
-  that tells the agent to do lighter work first (`when_busy = "deny"`, the default), or it runs
-  without a lease and the agent is told so (`"run"`). Either message names the heaviest lease
-  in the pool, by its command and session, and the command's place in line: `machine busy for
-  20s: cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds 14
-  of 14; this needs 4; queued #1`.
+- **A busy machine.** The command waits in line, keeping its place, for up to `wait_s` (300 s
+  by default). One that waited at least 5 s says so as it starts (`leasehold: pytest waited
+  42s in line for its lease`), so a slow start is not taken for a slow command. Still waiting
+  after `wait_s`, it is refused with a message that says the command did not run and tells
+  the agent to do lighter work first (`when_busy = "deny"`, the default), or it runs without
+  a lease and the agent is told so (`"run"`). Either message names the heaviest lease in the
+  pool, by its command and session, and the command's place in line: `machine busy for 300s:
+  cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds 14 of 14;
+  this needs 4; queued #1`. `leasehold doctor` warns when `wait_s` is under 120 s.
 - **Passes through** for a command run in the background, when no daemon answers, and inside a
   lease already held (`LEASEHOLD_LEASE_ID` set).
 
@@ -503,8 +506,9 @@ writes a small `sh` script. It runs the real program, the next one on PATH that 
 under a lease when its arguments match a rule, sized as `hold` sizes it, for the life of the
 process. It passes straight through, as if no shim were there, inside a lease already held
 (including the lease the Claude Code plugin took for this very command, so `leasehold run --
-claude` with the plugin takes one lease per command, not two), with `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. Busy past
-`wait_s`, it exits 75 and says why on stderr (`when_busy = "run"`: runs the program without a
+claude` with the plugin takes one lease per command, not two), with `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. While it
+waits it says its place on stderr, again whenever that changes and at least every 20 s. Busy
+past `wait_s`, it exits 75 and says why on stderr (`when_busy = "run"`: runs the program without a
 lease and says so).
 
 Shims see only what is run through PATH: `.venv/bin/pytest`, `python -m pytest` and absolute

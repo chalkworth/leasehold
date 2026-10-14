@@ -55,6 +55,8 @@ __all__ = [
 ]
 #: The most one acquire request waits before asking again (each ask keeps the place in line).
 _POLL_S = 20.0
+#: While nothing changes in line, how often a wait says it is still waiting.
+PROGRESS_S = 20.0
 
 
 def _say(message: str) -> None:
@@ -88,10 +90,13 @@ def wait_for_grant(
     """Ask for `request`'s lease, waiting in line (each ask keeps the place) until it is granted
     or `timeout_s` is up. `(None, answer)` on a grant, else `(exit code, answer)`: `EXIT_BUSY`
     with the place in line given back, `EXIT_REFUSED` or `EXIT_UNAVAILABLE` (said, unless
-    `quiet_unavailable`)."""
-    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    `quiet_unavailable`). While it waits it says its place and why whenever they change, and
+    at least every `PROGRESS_S` with the time waited so far."""
+    start = time.monotonic()
+    deadline = None if timeout_s is None else start + timeout_s
     waited = False
     last_line = None
+    last_said = start
     answer: dict = {}
     try:
         while True:
@@ -106,9 +111,13 @@ def wait_for_grant(
                 say(f"refused: {answer.get('reason')}")
                 return EXIT_REFUSED, answer
             line = waiting_line(request, answer)
+            now = time.monotonic()
             if line != last_line:
                 say(line)
-                last_line = line
+                last_line, last_said = line, now
+            elif now - last_said >= PROGRESS_S:
+                say(f"{line}; {now - start:.0f}s so far")
+                last_said = now
             waited = True
             if deadline is not None and time.monotonic() >= deadline:
                 with contextlib.suppress(Unavailable, ApiError):

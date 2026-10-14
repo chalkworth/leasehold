@@ -143,3 +143,14 @@ def test_containment_is_reported_with_a_hint_when_advisory(tmp_path):
     assert odd.fix == "see Containment in docs/reference.md"
     off = machine_config(tmp_path, contain={"mode": "off"})
     assert doctor.check_contain(off, {}, probe(None)).detail.startswith("off")
+
+
+def test_a_short_wait_before_refusing_is_flagged(tmp_path):
+    def config(**commands):
+        return machine_config(tmp_path, commands=commands)
+
+    short = doctor.check_commands(config(wait_s=20, when_busy="deny"))
+    assert short.level == "warn" and "wait_s = 20" in short.detail and "300" in short.fix
+    assert doctor.check_commands(config()).level == "ok"  # the default waits long enough
+    assert doctor.check_commands(config(wait_s=5, when_busy="run")) is None
+    assert doctor.check_commands(None) is None

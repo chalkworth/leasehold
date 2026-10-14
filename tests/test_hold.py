@@ -17,6 +17,7 @@ from pathlib import Path
 
 from support import CHILD_ENV, until
 
+from leasehold import hold as hold_module
 from leasehold.client import Client
 from leasehold.exits import EXIT_BUSY, EXIT_REFUSED, EXIT_REVOKED, EXIT_UNAVAILABLE
 from leasehold.hold import waiting_line
@@ -113,6 +114,21 @@ def test_waiting_past_the_timeout_exits_75_and_leaves_no_place_in_line(daemon):
     assert proc.returncode == EXIT_BUSY
     assert "waiting for 1 slot (work): place 1; pool work holds 2 of 2" in proc.stderr.read()
     assert client.leases()["queue"] == []
+
+
+def test_a_long_wait_says_it_is_still_waiting_and_for_how_long(daemon, monkeypatch):
+    monkeypatch.setattr(hold_module, "_POLL_S", 0.1)
+    monkeypatch.setattr(hold_module, "PROGRESS_S", 0.2)
+    client = Client(daemon.path)
+    client.acquire(kind="work", weight=2, ttl_s=30)
+    said: list[str] = []
+    request = {"kind": "work", "pool": None, "weight": 1, "lease_id": "waiter"}
+    code, _ = hold_module.wait_for_grant(client, request, 1.0, said.append)
+    assert code == EXIT_BUSY
+    assert said[0].startswith("waiting for 1 slot (work): place 1; pool work holds 2 of 2")
+    progress = [line for line in said if line.endswith("s so far")]
+    assert progress and all(line.startswith(said[0] + "; ") for line in progress)
+    assert len(progress) <= 5  # every PROGRESS_S, not every ask
 
 
 def test_a_request_that_can_never_be_granted_and_a_missing_daemon(daemon, sock_dir):

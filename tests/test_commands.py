@@ -110,7 +110,7 @@ def test_rules_are_checked_in_the_config(tmp_path):
 def test_the_daemon_serves_rules_its_pools_can_grant(daemon):
     """The test machine's work pool may hold 2, so every rule asks for at most 2."""
     answer = Client(daemon.path).commands()
-    assert answer["wait_s"] == 20 and answer["when_busy"] == "deny"
+    assert answer["wait_s"] == 300 and answer["when_busy"] == "deny"
     assert {r["source"] for r in answer["rules"]} == {"default"}
     assert all(r["pool"] == "work" and 1 <= r["weight"] <= 2 for r in answer["rules"])
     served = shell.served(answer)

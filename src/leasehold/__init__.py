@@ -15,4 +15,4 @@ Only the standard library and pydantic.
 """
 
 #: The one place the version is written; the build reads it from here (`[tool.hatch.version]`).
-__version__ = "0.2.0"
+__version__ = "0.2.1"

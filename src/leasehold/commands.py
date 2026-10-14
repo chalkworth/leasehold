@@ -78,8 +78,10 @@ class CommandSettings(BaseModel):
     #: them).
     defaults: bool = True
     rule: list[CommandRule] = Field(default_factory=list)
-    #: How long an agent's hook waits for a lease before `when_busy` applies.
-    wait_s: float = Field(20.0, ge=0, le=540)  # inside the plugin's 600 s hook timeout
+    #: How long an agent's hook, or a shim, waits in line for a lease before `when_busy`
+    #: applies. Long enough for a busy machine's line to move (docs/bench.md: at 8 agents
+    #: the mean wait was 50 s, the slowest about 100 s).
+    wait_s: float = Field(300.0, ge=0, le=540)  # inside the plugin's 600 s hook timeout
     #: After `wait_s`: run the command without a lease (and say so), or refuse it with a
     #: message that tells the agent the machine is busy.
     when_busy: Literal["run", "deny"] = "deny"
