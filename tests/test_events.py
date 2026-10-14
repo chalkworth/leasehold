@@ -10,7 +10,7 @@ from support import make_agent
 from leasehold.agent import AcquireRequest
 from leasehold.api import Peer, handle
 from leasehold.client import Client
-from leasehold.events import EventLog, Snapshot, changes
+from leasehold.events import EventLog, EventType, Snapshot, changes
 
 
 def row(lease_id, **kw):
@@ -19,6 +19,22 @@ def row(lease_id, **kw):
 
 def types(events) -> list[tuple[str, str | None]]:
     return [(e["type"], e.get("lease_id")) for e in events]
+
+
+def test_event_types_are_the_names_clients_see():
+    assert [str(t) for t in EventType] == [
+        "queued",
+        "granted",
+        "left",
+        "released",
+        "ended",
+        "revoked",
+        "lend_opened",
+        "lend_closed",
+        "pool_max",
+        "lend_switch",
+    ]
+    assert json.dumps({"type": EventType.LEND_SWITCH}) == '{"type": "lend_switch"}'
 
 
 def test_changes_name_every_way_a_lease_starts_and_ends():

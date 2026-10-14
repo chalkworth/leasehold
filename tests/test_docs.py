@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from leasehold.api import ROUTES
+
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [
     ROOT / "README.md",
@@ -27,6 +29,14 @@ def _generator():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_the_reference_describes_every_api_route_and_no_other():
+    text = (ROOT / "docs" / "reference.md").read_text()
+    for method, path in ROUTES:
+        assert f"`{method} {path}" in text, f"docs/reference.md does not describe {method} {path}"
+    named = set(re.findall(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[^`?\s]*)", text))
+    assert named <= set(ROUTES), f"docs/reference.md names routes there are not: {named}"
 
 
 def test_the_command_line_reference_is_the_parsers():
