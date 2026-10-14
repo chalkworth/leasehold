@@ -7,8 +7,8 @@ writing the same ledger, is reported the same way. Each event is a flat dict:
 
 * `seq` (increasing, never reused while the daemon runs), `time`, `type`;
 * for a lease or a place in line: `lease_id`, `kind`, `pool`, `user`, `session`, `weight`;
-* `type` is one of `queued` (with `position`), `granted` (`waited`: it had been in line),
-  `left` (gave up its place in line), `released`, `ended` (`reason`: `expired`,
+* `type` is an `EventType`: `queued` (with `position`), `granted` (`waited`: it had been in
+  line), `left` (gave up its place in line), `released`, `ended` (`reason`: `expired`,
   `holder gone`, or `no longer matched` for an observed process that runs on as something its
   rule does not name), `revoked` (`reason`), `lend_opened` and `lend_closed` (`reason`),
   `pool_max` (`pool`, `max`, `overridden`) and `lend_switch` (`open`).
@@ -24,6 +24,23 @@ import threading
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
+
+
+class EventType(StrEnum):
+    """Every event `type`. Each is a `str` equal to its value, the name clients see."""
+
+    QUEUED = "queued"
+    GRANTED = "granted"
+    LEFT = "left"
+    RELEASED = "released"
+    ENDED = "ended"
+    REVOKED = "revoked"
+    LEND_OPENED = "lend_opened"
+    LEND_CLOSED = "lend_closed"
+    POOL_MAX = "pool_max"
+    LEND_SWITCH = "lend_switch"
+
 
 #: How many events the ring keeps.
 CAPACITY = 500
@@ -80,32 +97,34 @@ def changes(
     because their process stopped matching."""
     out: list[dict] = []
     if before.lend_open != after.lend_open:
-        kind = "lend_opened" if after.lend_open else "lend_closed"
+        kind = EventType.LEND_OPENED if after.lend_open else EventType.LEND_CLOSED
         out.append({"type": kind, "reason": after.lend_reason})
     for k, row in after.leases.items():
         old = before.leases.get(k)
         if old is not None and row.get("revoked") and not old.get("revoked"):
-            out.append({"type": "revoked", **_about(row), "reason": row.get("revoke_reason")})
+            out.append(
+                {"type": EventType.REVOKED, **_about(row), "reason": row.get("revoke_reason")}
+            )
     for k, row in before.leases.items():
         if k in after.leases:
             continue
         if k in released:
-            out.append({"type": "released", **_about(row)})
+            out.append({"type": EventType.RELEASED, **_about(row)})
         elif k in unmatched:
-            out.append({"type": "ended", **_about(row), "reason": "no longer matched"})
+            out.append({"type": EventType.ENDED, **_about(row), "reason": "no longer matched"})
         else:
             expires = row.get("expires_at")
             reason = "expired" if expires is not None and expires <= now else "holder gone"
-            out.append({"type": "ended", **_about(row), "reason": reason})
+            out.append({"type": EventType.ENDED, **_about(row), "reason": reason})
     for k, row in before.queue.items():
         if k not in after.queue and k not in after.leases:
-            out.append({"type": "left", **_about(row)})
+            out.append({"type": EventType.LEFT, **_about(row)})
     for k, row in after.leases.items():
         if k not in before.leases:
-            out.append({"type": "granted", **_about(row), "waited": k in before.queue})
+            out.append({"type": EventType.GRANTED, **_about(row), "waited": k in before.queue})
     for k, row in after.queue.items():
         if k not in before.queue:
-            out.append({"type": "queued", **_about(row), "position": row.get("position")})
+            out.append({"type": EventType.QUEUED, **_about(row), "position": row.get("position")})
     return out
 
 

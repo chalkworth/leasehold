@@ -17,7 +17,10 @@ from support import cli
 from leasehold import top
 from leasehold.cli import Context, watch
 from leasehold.client import Client, Unavailable
+from leasehold.events import EventType
 from leasehold.exits import EXIT_UNAVAILABLE
+from leasehold.kinds import KINDS
+from leasehold.top.render import _EVENTS, _event_text
 
 HERE = Path(__file__).parent
 FIXTURES = HERE / "fixtures" / "top"
@@ -166,8 +169,38 @@ def test_narrow_tables_drop_columns_rather_than_overflow(busy):
 
 def test_each_kind_has_its_own_mark_with_and_without_unicode():
     for glyphs in (top.UNICODE, top.ASCII):
-        marks = [glyphs.marks[k] for k in ("work", "external", "lend", "observed")]
-        assert len({*marks, glyphs.other}) == 5
+        marks = [glyphs.marks[k] for k in KINDS]
+        assert len({*marks, glyphs.other}) == len(KINDS) + 1
+
+
+def test_every_event_type_has_a_word_a_style_and_a_sentence():
+    assert set(_EVENTS) == set(EventType)
+
+
+@pytest.mark.parametrize(
+    ("event", "sentence"),
+    [
+        ({"type": "queued", "position": 2}, "ann queued for 2 slots in work, #2"),
+        ({"type": "granted", "waited": True}, "ann took 2 slots in work after waiting"),
+        ({"type": "left"}, "ann gave up a place in work"),
+        ({"type": "released"}, "ann released 2 slots in work"),
+        ({"type": "ended", "reason": "expired"}, "ann's 2 slots in work ended: expired"),
+        ({"type": "revoked", "reason": "busy"}, "revoked ann's 2 slots in work: busy"),
+        ({"type": "lend_opened", "reason": "quiet"}, "lending opened: quiet"),
+        ({"type": "lend_closed", "reason": "busy"}, "lending closed: busy"),
+        ({"type": "pool_max", "max": 3, "overridden": True}, "pool work max set to 3"),
+        ({"type": "lend_switch", "open": False}, "an administrator turned lending off"),
+        ({"type": "new_kind", "reason": "why"}, "why"),
+    ],
+)
+def test_each_event_reads_as_a_sentence(event, sentence):
+    assert _event_text({"user": "ann", "pool": "work", "weight": 2, **event}) == sentence
+
+
+def test_the_help_names_every_kind_with_its_mark():
+    text = top.plain(top.help_lines())
+    for kind in KINDS:
+        assert f"{top.UNICODE.marks[kind]} {kind}" in text
 
 
 def test_why_a_lease_waits_is_shown_under_it_in_the_wait_style(busy):

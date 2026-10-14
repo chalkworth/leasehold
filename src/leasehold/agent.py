@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from leasehold import __version__, observe, proctable, status
 from leasehold.access import Forbidden
 from leasehold.admission import AdmissionPolicy
-from leasehold.events import EventLog, Snapshot, changes
+from leasehold.events import EventLog, EventType, Snapshot, changes
 from leasehold.facts import probe
 from leasehold.guard import Guard, Reading
 from leasehold.kinds import GRANTED, PREEMPTIBLE, LeaseKind
@@ -167,7 +167,7 @@ class MachineAgent:
             reason = _LENDING_OFF if self._lend_off else self.verdict.revoke
             revoked = self._revoke(reason) if reason else []
             self.ledger.settle(self.policy())
-            self._record({"type": "lend_switch", "open": enabled})
+            self._record({"type": EventType.LEND_SWITCH, "open": enabled})
         if revoked:
             self._notify()
         return self._lend_status()
@@ -208,7 +208,7 @@ class MachineAgent:
             current = maximum if maximum is not None else pools[pool].max
             self._record(
                 {
-                    "type": "pool_max",
+                    "type": EventType.POOL_MAX,
                     "pool": pool,
                     "max": current,
                     "overridden": maximum is not None,
@@ -312,9 +312,14 @@ class MachineAgent:
                     self.ledger.release((OBSERVED_SCOPE, lease["item_id"]))
 
     def _revoke(self, reason: str) -> list:
-        return self.ledger.revoke(
-            kind="lend", reason=reason, grace_s=self.config.lend.revoke_grace_s
-        )
+        """Revoke every lease of a `PREEMPTIBLE` kind; the keys newly revoked."""
+        return [
+            key
+            for kind in sorted(PREEMPTIBLE)
+            for key in self.ledger.revoke(
+                kind=kind, reason=reason, grace_s=self.config.lend.revoke_grace_s
+            )
+        ]
 
     def _snapshot(self) -> Snapshot:
         lines = self.ledger.lines(self.policy())

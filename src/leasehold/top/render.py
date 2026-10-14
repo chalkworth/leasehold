@@ -16,7 +16,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
+from leasehold.events import EventType
+from leasehold.kinds import KINDS
 from leasehold.top.cells import (
     Line,
     _ascii,
@@ -719,61 +722,89 @@ def _lending(v: _View) -> _Section:
     return _Section(5, [_labelled("LENDING", [_row(parts, v.inner)])], cap=1)
 
 
-#: Each event type's word and style.
-_VERBS = {
-    "queued": ("queued", "warn"),
-    "granted": ("granted", "ok"),
-    "left": ("left", "dim"),
-    "released": ("released", ""),
-    "ended": ("ended", ""),
-    "revoked": ("revoked", "bad"),
-    "lend_opened": ("lend on", "ok"),
-    "lend_closed": ("lend off", "warn"),
-    "pool_max": ("pool max", "bold"),
-    "lend_switch": ("switch", "bold"),
+def _who(e: Mapping) -> str:
+    return e.get("user") or "-"
+
+
+def _size(e: Mapping) -> str:
+    return _slots(int(e.get("weight") or 0))
+
+
+def _queued(e: Mapping) -> str:
+    place = f", #{e['position']}" if e.get("position") else ""
+    return f"{_who(e)} queued for {_size(e)} in {e.get('pool')}{place}"
+
+
+def _granted(e: Mapping) -> str:
+    after = " after waiting" if e.get("waited") else ""
+    return f"{_who(e)} took {_size(e)} in {e.get('pool')}{after}"
+
+
+def _pool_max(e: Mapping) -> str:
+    how = "set to" if e.get("overridden") else "reset to"
+    return f"pool {e.get('pool')} max {how} {e.get('max')}"
+
+
+class _Shown(NamedTuple):
+    """How one event type is shown: a word, in a style, then a sentence."""
+
+    word: str
+    style: str
+    text: Callable[[Mapping], str]
+
+
+#: How each event type is shown.
+_EVENTS: dict[EventType, _Shown] = {
+    EventType.QUEUED: _Shown("queued", "warn", _queued),
+    EventType.GRANTED: _Shown("granted", "ok", _granted),
+    EventType.LEFT: _Shown(
+        "left", "dim", lambda e: f"{_who(e)} gave up a place in {e.get('pool')}"
+    ),
+    EventType.RELEASED: _Shown(
+        "released",
+        "",
+        lambda e: f"{_who(e)} released {_size(e)} in {e.get('pool')}",
+    ),
+    EventType.ENDED: _Shown(
+        "ended",
+        "",
+        lambda e: f"{_who(e)}'s {_size(e)} in {e.get('pool')} ended: {e.get('reason')}",
+    ),
+    EventType.REVOKED: _Shown(
+        "revoked",
+        "bad",
+        lambda e: f"revoked {_who(e)}'s {_size(e)} in {e.get('pool')}: {e.get('reason')}",
+    ),
+    EventType.LEND_OPENED: _Shown("lend on", "ok", lambda e: f"lending opened: {e.get('reason')}"),
+    EventType.LEND_CLOSED: _Shown(
+        "lend off", "warn", lambda e: f"lending closed: {e.get('reason')}"
+    ),
+    EventType.POOL_MAX: _Shown("pool max", "bold", _pool_max),
+    EventType.LEND_SWITCH: _Shown(
+        "switch",
+        "bold",
+        lambda e: "an administrator turned lending " + ("on" if e.get("open") else "off"),
+    ),
 }
 
 
 def _event_text(e: Mapping) -> str:
-    kind = e.get("type")
-    who = e.get("user") or "-"
-    pool = e.get("pool")
-    size = _slots(int(e.get("weight") or 0))
-    if kind == "queued":
-        place = f", #{e['position']}" if e.get("position") else ""
-        return f"{who} queued for {size} in {pool}{place}"
-    if kind == "granted":
-        return f"{who} took {size} in {pool}" + (" after waiting" if e.get("waited") else "")
-    if kind == "left":
-        return f"{who} gave up a place in {pool}"
-    if kind == "released":
-        return f"{who} released {size} in {pool}"
-    if kind == "ended":
-        return f"{who}'s {size} in {pool} ended: {e.get('reason')}"
-    if kind == "revoked":
-        return f"revoked {who}'s {size} in {pool}: {e.get('reason')}"
-    if kind == "lend_opened":
-        return f"lending opened: {e.get('reason')}"
-    if kind == "lend_closed":
-        return f"lending closed: {e.get('reason')}"
-    if kind == "pool_max":
-        how = "set to" if e.get("overridden") else "reset to"
-        return f"pool {pool} max {how} {e.get('max')}"
-    if kind == "lend_switch":
-        return "an administrator turned lending " + ("on" if e.get("open") else "off")
-    return str(e.get("reason") or "")
+    """The event as a sentence; for a type not in `_EVENTS`, its `reason`."""
+    shown = _EVENTS.get(str(e.get("type")))
+    return shown.text(e) if shown else str(e.get("reason") or "")
 
 
 def _events(v: _View) -> _Section:
     if not v.events:
         return _Section(7, [_labelled("EVENTS", [_Out().put("none yet", "dim")])], trim=True)
-    verb_w = max(len(word) for word, _ in _VERBS.values())
+    verb_w = max(len(shown.word) for shown in _EVENTS.values())
     rows = []
     for e in reversed(v.events):
         ago = v.now - (e.get("time") or v.now)
         when = "now" if ago < 1 else f"{_duration(ago)} ago"
-        word, style = _VERBS.get(str(e.get("type")), (str(e.get("type"))[:verb_w], "bold"))
-        if e.get("type") == "ended" and e.get("reason") == "expired":
+        shown = _EVENTS.get(str(e.get("type")))
+        word, style = (shown.word, shown.style) if shown else (str(e.get("type"))[:verb_w], "bold")
+        if e.get("type") == EventType.ENDED and e.get("reason") == "expired":
             style = "warn"
         main: Line = [(_rpad(when, 11), "dim"), ("  ", ""), (_pad(word, verb_w), style)]
         parts: list[tuple[int, Line]] = [(0, [*main, ("  ", ""), (_clean(_event_text(e)), "")])]
@@ -901,8 +932,7 @@ def help_lines(unicode: bool = True) -> list[Line]:
     rows += [[(f"  {key}  ", "key"), (text, "")] for key, text in HELP]
     rows += [
         [],
-        [("Marks: ", "dim")]
-        + [(f"{g.marks[k]} {k}  ", "") for k in ("work", "external", "lend", "observed")],
+        [("Marks: ", "dim")] + [(f"{g.marks[k]} {k}  ", "") for k in KINDS],
         [
             ("Slots: ", "dim"),
             (f"{g.free} free  {g.reserved} reserved, free  {g.waiting} waiting", ""),
