@@ -5,7 +5,7 @@
 | 69 | the daemon could not be reached (`EX_UNAVAILABLE`) |
 | 75 | still waiting at `--timeout`: busy, not failed (`EX_TEMPFAIL`) |
 | 76 | the lease was revoked (or, for `lend`, lost) |
-| 77 | refused: the request could never be granted |
+| 77 | refused: the request could never be granted, or the daemon answered it with an error |
 | 127 | the command could not be started |
 """
 

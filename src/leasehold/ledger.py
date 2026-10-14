@@ -24,7 +24,9 @@ says `revoked` and reaches at most `revoke_deadline`), then is released or expir
 times. Clients keep the durable truth (when each item was queued) and re-enqueue from it;
 deleting the file loses nothing but the current leases, which their live holders re-acquire.
 
-**Fails closed.** A missing or unwritable directory is `LedgerUnavailable`, never a silent pass.
+**Fails closed.** A missing or unwritable directory, a file that cannot be opened, and any SQLite
+error after that (locked past the busy timeout, a full disk, a read-only file system) are
+`LedgerUnavailable`, never a silent pass.
 """
 
 from __future__ import annotations
@@ -138,12 +140,13 @@ CREATE INDEX IF NOT EXISTS submits_by_user ON submits (pool, user, at);
 """
 
 
-Problem = Literal["missing", "unwritable", "unopenable"]
+Problem = Literal["missing", "unwritable", "unopenable", "failing"]
 
 
 class LedgerUnavailable(RuntimeError):
-    """The ledger cannot be used: its directory is `missing` or `unwritable`, or the file is
-    `unopenable` (the `sqlite3.Error` is the `__cause__`). Admission fails closed on it."""
+    """The ledger cannot be used: its directory is `missing` or `unwritable`, the file is
+    `unopenable`, or a statement on an opened ledger is `failing` (for the last two the
+    `sqlite3.Error` is the `__cause__`). Admission fails closed on it."""
 
     code = "ledger_unavailable"
 
@@ -267,10 +270,11 @@ class Ledger:
             with self._db() as conn:
                 _migrate(conn)
                 conn.executescript(_SCHEMA)
-        except sqlite3.Error as exc:
+        except LedgerUnavailable as exc:
+            cause = exc.__cause__
             raise LedgerUnavailable(
-                f"cannot open the ledger {self.path}: {exc}", problem="unopenable", path=self.path
-            ) from exc
+                f"cannot open the ledger {self.path}: {cause}", problem="unopenable", path=self.path
+            ) from cause
 
     # --- connections ---------------------------------------------------------------------------
 
@@ -284,11 +288,20 @@ class Ledger:
 
     @contextlib.contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
-        conn = self._connect()
+        """A connection, closed afterwards; any `sqlite3.Error` in opening or using it is
+        `LedgerUnavailable` (`failing`)."""
         try:
-            yield conn
-        finally:
-            conn.close()
+            conn = self._connect()
+            try:
+                yield conn
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            raise LedgerUnavailable(
+                f"the ledger {self.path} cannot be used now: {exc}",
+                problem="failing",
+                path=self.path,
+            ) from exc
 
     @contextlib.contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:

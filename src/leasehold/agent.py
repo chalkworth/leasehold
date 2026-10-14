@@ -357,6 +357,8 @@ class MachineAgent:
         pool = req.pool or self.config.kinds.get(req.kind)
         if pool is None:
             return None, f"no pool is set for {req.kind} leases"
+        if pool not in self.config.pool_set().pools:
+            return None, f"there is no pool {pool!r}"
         if pool == self.config.observed_pool:
             return None, f"pool {pool!r} holds only observed processes"
         if (req.kind in PREEMPTIBLE) != (pool in self.lend_pools):

@@ -9,7 +9,8 @@ runs (`leasehold.terminal`); otherwise it runs in a session of its own.
 * A revoked lease (only `lend` is ever revoked), or a `lend` lease lost to its TTL, stops the
   group -- SIGTERM, then SIGKILL after the grace -- and exits `EXIT_REVOKED`.
 * Waiting longer than `--timeout` exits `EXIT_BUSY` (75: busy, not failed), the place in line
-  given back. A request that could never be granted exits `EXIT_REFUSED`.
+  given back. A request that could never be granted, or that the daemon answers with an error
+  (a 5xx included), exits `EXIT_REFUSED`: a daemon that answers is never taken for none.
 * With no daemon, the command runs without a lease, after a warning (`run_unleased`); with
   `if_unavailable="fail"`, `hold` exits `EXIT_UNAVAILABLE` instead.
 * A `work` or `external` lease the daemon no longer knows (it was down longer than the TTL) is
