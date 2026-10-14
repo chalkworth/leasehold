@@ -137,6 +137,30 @@ def test_a_request_that_can_never_be_granted_and_a_missing_daemon(daemon, sock_d
     assert hold(gone, "--if-unavailable", "fail", "--", "true").returncode == EXIT_UNAVAILABLE
 
 
+def test_an_unknown_pool_exits_77_without_running_the_command(daemon, tmp_path):
+    ran = tmp_path / "ran"
+    proc = hold(daemon.path, "--pool", "nope", "--", "touch", str(ran))
+    assert proc.returncode == EXIT_REFUSED
+    assert "refused: there is no pool 'nope'" in proc.stderr.read()
+    assert not ran.exists()
+
+
+def test_a_daemon_that_fails_on_the_request_exits_77_and_runs_nothing(
+    daemon, tmp_path, monkeypatch
+):
+    """A 500 is an answer from a daemon, not its absence: the command never runs unleased."""
+
+    def broken(*_a, **_k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(daemon.agent, "acquire_wait", broken)
+    ran = tmp_path / "ran"
+    proc = hold(daemon.path, "--", "touch", str(ran))
+    assert proc.returncode == EXIT_REFUSED
+    assert "500: internal: RuntimeError: bug" in proc.stderr.read()
+    assert not ran.exists()
+
+
 SHOW = "echo lease=${LEASEHOLD_LEASE_ID:-none} jobs=${CARGO_BUILD_JOBS:-none}; exit 3"
 
 

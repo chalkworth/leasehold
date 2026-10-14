@@ -38,6 +38,23 @@ here.
 - `Ledger.try_admit` refuses a weight below 1 (`AdmissionPolicy.refusal`), and
   `Ledger.enqueue` raises `ValueError` for one: a negative weight was admitted and let its
   pool over-commit.
+### Fixed
+
+- An `acquire` naming a pool that does not exist is `refused` (`there is no pool 'NAME'`;
+  `hold` and `acquire` exit 77). It used to drop the connection, which `hold` took for no
+  daemon and ran its command without a lease.
+- The API answers any fault in the daemon with 500 and `error: "internal"` (the traceback on the
+  daemon's stderr) instead of dropping the connection. `hold` exits 77 on it, as on every error
+  answer, and never runs the command unleased.
+- A SQLite error after the ledger is opened (locked past the busy timeout, a full disk, a
+  read-only file system) is `LedgerUnavailable` with the new `problem` `"failing"`, answered 503
+  `ledger_unavailable`, instead of a raw `sqlite3.Error` that dropped the connection.
+- A negative or non-numeric `Content-Length` is 400 `bad_request`; a negative one used to read
+  the socket to its end, with no bound. A body shorter than its `Content-Length` is 400 too.
+  413 `too_large` (a body over 64 KiB) now carries a `detail` and is documented.
+- The daemon gives up on a client that stops sending part way through a request after 30
+  seconds, closing the connection, so a stalled client no longer keeps a thread. A long-polling
+  `acquire` (`wait_s`) is not affected.
 
 ## [0.2.1]
 

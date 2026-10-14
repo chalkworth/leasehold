@@ -128,6 +128,24 @@ def test_an_unopenable_file_is_an_error_carrying_the_sqlite_cause(tmp_path):
     assert isinstance(info.value.__cause__, sqlite3.Error)
 
 
+def test_a_statement_failing_after_opening_is_unavailable_not_a_raw_sqlite_error(
+    tmp_path, monkeypatch
+):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    monkeypatch.setattr(ledger_module, "_BUSY_TIMEOUT_S", 0.1)
+    other = sqlite3.connect(ledger.path, isolation_level=None)
+    try:
+        other.execute("BEGIN EXCLUSIVE")  # holds the write lock past the busy timeout
+        with pytest.raises(LedgerUnavailable) as info:
+            ledger.try_admit(item("a"), ONE)
+        other.execute("ROLLBACK")
+    finally:
+        other.close()
+    assert info.value.problem == "failing" and info.value.path == ledger.path
+    assert isinstance(info.value.__cause__, sqlite3.OperationalError)
+    assert ledger.try_admit(item("a"), ONE) == Admitted()  # usable again once the lock is gone
+
+
 # --- admission through the ledger ---------------------------------------------------------------
 
 

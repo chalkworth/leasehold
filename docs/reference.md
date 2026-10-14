@@ -328,7 +328,7 @@ job-count variables. `--if-unavailable fail` (or `LEASEHOLD_IF_UNAVAILABLE=fail`
 |---|---|
 | 75 | still waiting at `--timeout`: busy, not failed. The place in line is given back |
 | 76 | the lease was revoked (or, for `lend`, lost): the group got SIGTERM, then SIGKILL after `--grace` (30 s) |
-| 77 | refused: the request could never be granted (heavier than its pool or the ceiling) |
+| 77 | refused: the request could never be granted (heavier than its pool or the ceiling, or a pool that does not exist), or the daemon answered it with an error (such as 500 `internal` or 503 `ledger_unavailable`). The command does not run |
 | 69 | no daemon answered (`hold` only with `--if-unavailable fail`) |
 | 127 | the command could not be started |
 
@@ -597,9 +597,17 @@ with the same `lease_id` keeps the place in line, and is not a new request. A ne
 its pool's per-user limits (`per_user_max_queued`, `create_rate_per_min`) is `refused` with
 `code: "quota_exceeded"`; one that fits now is granted whatever the waiting limit.
 
-An error is answered with an `error` and a `detail`: 400 `bad_request` (a malformed request),
-403 `forbidden` (another user's lease, or an administrator's route), 404 `not_found`, and 503
-`ledger_unavailable` (the ledger cannot be used now; admission fails closed).
+An acquire naming a pool that does not exist is `refused` with `reason` `there is no pool
+'NAME'`.
+
+An error is answered with an `error` and a `detail`: 400 `bad_request` (a malformed request,
+including a `Content-Length` that is not a non-negative integer), 403 `forbidden` (another
+user's lease, or an administrator's route), 404 `not_found`, 413 `too_large` (a body over
+64 KiB, which is not read), 500 `internal` (the daemon failed on the request; its traceback goes
+to the daemon's stderr), and 503 `ledger_unavailable` (the ledger cannot be used now, at start
+or later, such as locked past the busy timeout, a full disk or a read-only file system;
+admission fails closed). A client that stops sending part way through a request is cut off
+after 30 seconds without an answer.
 
 Events are kept in memory, the last 500, each with a `type`: `granted` (and whether it
 `waited`), `queued` (with its `position`), `left` (the line, without a grant), `released`,
