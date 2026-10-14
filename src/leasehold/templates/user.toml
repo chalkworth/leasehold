@@ -52,7 +52,7 @@ settle_s = 30
 # Which commands take a lease when an agent (or you, through the shims) runs them. The built-in
 # rules cover common builds and test runs; `leasehold commands` lists them.
 [commands]
-wait_s = 20              # how long a command waits for its lease...
+wait_s = 300             # how long a command waits in line for its lease...
 when_busy = "deny"       # ...then: "deny" it with the reason, or "run" it without a lease
 # [[commands.rule]]
 # programs = ["pytest"]

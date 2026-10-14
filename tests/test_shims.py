@@ -103,7 +103,7 @@ def test_a_busy_machine_can_refuse_it_saying_who_holds_the_machine(setup):
     done = run(env, "build")
     assert done.returncode == 75 and done.stdout == ""
     assert "not running fakebuild: machine busy for 1s: make all holds 2 slots;" in done.stderr
-    assert "queued #1. Try lighter work and retry later." in done.stderr
+    assert "queued #1. The command did not run. Do lighter work first" in done.stderr
 
 
 def test_the_exit_code_is_the_programs(setup):

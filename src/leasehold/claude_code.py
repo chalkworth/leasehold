@@ -25,7 +25,8 @@ the command runs through (under `leasehold run`) that this lease covers it.
 
 Nothing here may stop an agent working because leasehold is absent or broken: no daemon, an
 error, a command no rule names, all let the command run. Only a busy machine, with `[commands]
-when_busy = "deny"`, refuses one, with a reason the agent reads.
+when_busy = "deny"`, refuses one, after `wait_s` in line, with a reason the agent reads that
+says the command did not run.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import json
 import os
 import re
 import signal
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +55,9 @@ SESSION_PREFIX = "cc-"
 #: end is never reported loses its lease soon after it must have ended.
 BASH_MAX_S = 600.0
 MARGIN_S = 60.0
+#: A command that waited at least this long for its lease says so when it starts, so a slow
+#: start is not mistaken for a slow command.
+WAIT_NOTED_S = 5.0
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]")
 
 
@@ -165,8 +170,12 @@ def pre(
     request = lease_request(
         pool=rule.pool, weight=rule.weight, labels=_labels(event, command), session=session(event)
     ) | {"lease_id": lid}
+    asked = time.monotonic()
     code, answer = wait_for_grant(client, request, settings.wait_s, reply.log.append)
+    waited = time.monotonic() - asked
     if code is None:
+        if waited >= WAIT_NOTED_S:
+            reply.output = _message(f"{found.program} waited {waited:.0f}s in line for its lease")
         argv = handoff.keeper_argv(
             str(client.path), lid, ttl_s=float(answer["lease"]["ttl_s"]),
             max_hold_s=max_hold(event), watch_pid=watch_pid,

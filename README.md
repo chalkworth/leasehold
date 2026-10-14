@@ -50,12 +50,14 @@ made-up busy machine in `top`.
 
 Inside `leasehold run`, the agent's heavy commands (`pytest`, `cargo`, `make`, `npm test`, `go
 test` and the like; `leasehold commands` lists the rules) go through small PATH shims that take
-a lease first. Light commands run as they are. A command that waits too long is refused with
-the reason, which the agent reads:
+a lease first. Light commands run as they are. A heavy command waits in line, keeping its
+place, for up to five minutes; one still waiting then is refused with the reason, which the
+agent reads:
 
 ```
-leasehold: machine busy for 20s: cargo test (session claude_3f9a1c) holds 8 slots, 2 other
-leases hold 4; pool work holds 12 of 12; this needs 4; queued #1. Try lighter work and retry later.
+leasehold: machine busy for 300s: cargo test (session claude_3f9a1c) holds 8 slots, 2 other
+leases hold 4; pool work holds 12 of 12; this needs 4; queued #1. The command did not run. Do
+lighter work first, then run it again.
 ```
 
 In Claude Code, the plugin does the same through a hook, without the shims:

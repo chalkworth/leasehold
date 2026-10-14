@@ -66,6 +66,14 @@ def test_a_heavy_command_takes_a_lease_and_gives_it_back(daemon):
     assert leases(daemon.path) == []
 
 
+def test_a_command_that_waited_for_its_lease_says_how_long(daemon, monkeypatch):
+    monkeypatch.setattr(claude_code, "WAIT_NOTED_S", 0.0)
+    client = Client(daemon.path)
+    reply = claude_code.pre(event("pytest"), client, env={}, watch_pid=None, spawn=Spawned())
+    assert reply.output == {"systemMessage": "leasehold: pytest waited 0s in line for its lease"}
+    assert [lease["lease_id"] for lease in leases(daemon.path)] == ["cc.toolu_01ABC"]
+
+
 def test_a_subagents_lease_is_in_its_sessions_turn_and_names_it(daemon):
     client = Client(daemon.path)
     e = event("pytest", agent_id="ac9be8ee61ea46b24", agent_type="general-purpose")
@@ -130,7 +138,8 @@ def test_a_busy_machine_can_refuse_the_command_with_a_reason_for_the_agent(busy)
     assert out["hookEventName"] == "PreToolUse" and out["permissionDecision"] == "deny"
     assert out["permissionDecisionReason"] == (
         "leasehold: machine busy for 0.5s: work lease someone-else holds 2 slots; pool work "
-        "holds 2 of 2; this needs 2; queued #1. Try lighter work and retry later."
+        "holds 2 of 2; this needs 2; queued #1. The command did not run. Do lighter work first, "
+        "then run it again."
     )
 
 

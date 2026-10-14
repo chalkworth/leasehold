@@ -1,6 +1,6 @@
 {
   "name": "leasehold",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Heavy Bash commands (builds, test suites) wait for a lease on a shared machine instead of piling on. Needs the leasehold daemon.",
   "author": {
     "name": "Matthew Strudwick"

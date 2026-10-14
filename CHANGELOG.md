@@ -7,6 +7,23 @@ here.
 
 ## [Unreleased]
 
+## [0.2.1]
+
+An agent's heavy command waits its turn instead of being refused after 20 s. At 8 agents most
+heavy commands waited longer than that (docs/bench.md), so most were refused and retried.
+
+### Changed
+
+- `[commands] wait_s` defaults to 300 (was 20), and `leasehold init --user` writes 300. A config
+  written by 0.2.0's `init` says `wait_s = 20`: set it to 300 by hand; `leasehold doctor` warns
+  (check `commands`) while it is under 120.
+- A refusal says the command did not run (`busy.ADVICE`: "The command did not run. Do lighter
+  work first, then run it again.").
+- A wait (`hold`, `acquire`, the shims) says its place and why again at least every 20 s, with
+  the time waited so far (`hold.PROGRESS_S`).
+- The Claude Code hook tells the user when a command waited at least 5 s for its lease
+  (`claude_code.WAIT_NOTED_S`).
+
 ## [0.2.0] - first public release
 
 leasehold gives the heavy commands on one Linux machine (coding agents' builds and test runs, CI

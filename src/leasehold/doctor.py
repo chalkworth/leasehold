@@ -152,6 +152,26 @@ def check_contain(config, env: Mapping[str, str], probe=contain.probe) -> Check:
     return Check("contain", "warn", detail, fix or "see Containment in docs/reference.md")
 
 
+#: A `[commands] wait_s` below this refuses most heavy commands on a busy machine before their
+#: turn comes (docs/bench.md: at 8 agents the slowest waits were about 100 s).
+SHORT_WAIT_S = 120.0
+
+
+def check_commands(config) -> Check | None:
+    """Whether agents' heavy commands wait long enough for their turn before being refused."""
+    if config is None or config.commands.when_busy != "deny":
+        return None
+    wait = config.commands.wait_s
+    if wait >= SHORT_WAIT_S:
+        return Check("commands", "ok", f"a busy machine refuses a heavy command after {wait:g}s")
+    return Check(
+        "commands", "warn",
+        f"[commands] wait_s = {wait:g}: on a busy machine most heavy commands are refused "
+        "before their turn comes",
+        "set `wait_s = 300` under [commands] in the config (0.2.0's `leasehold init` wrote 20)",
+    )  # fmt: skip
+
+
 def check_daemon(path: Path, now: Callable[[], float] = time.time) -> list[Check]:
     """Whether the daemon at `path` answers its status, and whether its clock agrees."""
     try:
@@ -311,4 +331,7 @@ def run(
     checks.append(check_proc(roots, resolved))
     checks += check_cgroups(roots, resolved)
     checks.append(check_contain(resolved, env))
+    commands = check_commands(resolved)
+    if commands is not None:
+        checks.append(commands)
     return checks
