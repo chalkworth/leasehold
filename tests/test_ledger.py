@@ -571,3 +571,29 @@ def test_a_waiting_sessions_turn_is_never_forgotten(tmp_path, monkeypatch):
     with sqlite3.connect(tmp_path / "ledger.sqlite3") as conn:
         kept = sorted(r[0] for r in conn.execute("SELECT session FROM session_turns"))
     assert kept == ["a", "b"]  # a is past the cap, but still holds something
+
+
+def test_an_item_that_could_never_fit_is_refused_and_does_not_hold_up_its_pool(ledger):
+    """Eight slots, four reserved for `a`: weight 6 in `b` is refused, and `b`'s next item is
+    admitted instead of waiting behind it forever."""
+    policy = AdmissionPolicy(
+        slots={MACHINE: 8},
+        pools={
+            "a": PoolPolicy(MACHINE, reserved=4, max=8),
+            "b": PoolPolicy(MACHINE, reserved=0, max=8, priority=1),
+        },
+    )
+    big = ledger.try_admit(item("big", pool="b", weight=6), policy)
+    assert isinstance(big, Refused) and "4 are reserved for other pools" in big.reason
+    assert ledger.queued() == []
+    assert isinstance(ledger.try_admit(item("small", pool="b", weight=1), policy), Admitted)
+
+
+@pytest.mark.parametrize("weight", [0, -5])
+def test_a_weight_below_one_is_never_admitted_or_queued(ledger, weight):
+    """A negative weight would free capacity it never held and let its pool over-commit."""
+    outcome = ledger.try_admit(item("neg", weight=weight), POLICY)
+    assert isinstance(outcome, Refused) and "below 1" in outcome.reason
+    assert ledger.leases() == [] and ledger.queued() == []
+    with pytest.raises(ValueError, match="below 1"):
+        ledger.enqueue(item("neg", weight=weight))

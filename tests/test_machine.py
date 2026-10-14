@@ -367,6 +367,63 @@ def test_a_pool_max_above_the_slots_is_clamped_to_them(tmp_path):
     assert config.policy().pools["work"].max == 2
 
 
+def test_a_pool_max_is_clamped_to_what_the_other_pools_reservations_leave():
+    """`external` may name max 4, but `work` reserves 2 of the 4 slots: it can only ever hold
+    2, and a weight-3 request is refused, not queued at the head of its line for good. The
+    observed pool, never asked, may still hold the whole machine."""
+    config = MachineConfig.model_validate(
+        _machine(
+            pools={
+                "work": {"reserved": 2, "max": 4},
+                "external": {"max": 4, "priority": 1},
+                "observed": {"max": 4, "priority": 3},
+            },
+            kinds={"work": "work", "external": "external", "observed": "observed"},
+        )
+    )
+    pools = config.pool_set().pools
+    assert pools["external"].max == 2 and pools["work"].max == 4
+    assert pools["observed"].max == 4
+    assert "max 2" in config.policy().refusal("external", 3)
+    defaults = MachineConfig.model_validate({"ceiling": {"slots": 12}})
+    assert defaults.pool_set().pools == default_pools(12)  # the shipped split is untouched
+
+
+def test_standing_work_that_leaves_a_reservation_short_is_refused():
+    """`work` reserves 2 of 4 slots; 3 standing in two other pools would leave it only 1."""
+    with pytest.raises(ValueError, match="the 2 slots reserved for pools beyond it"):
+        MachineConfig.model_validate(
+            _machine(
+                pools={
+                    "work": {"reserved": 2, "max": 4},
+                    "external": {"max": 4, "priority": 1},
+                    "batch": {"max": 4, "priority": 2},
+                },
+                standing=[
+                    {"name": "vm", "pool": "external", "weight": 2},
+                    {"name": "db", "pool": "batch", "weight": 1},
+                ],
+            )
+        )
+    with pytest.raises(ValueError, match="more than pool 'external''s max 2"):
+        MachineConfig.model_validate(
+            _machine(
+                pools={"work": {"reserved": 2, "max": 4}, "external": {"max": 4, "priority": 1}},
+                standing=[{"name": "vm", "pool": "external", "weight": 3}],
+            )
+        )
+    fine = MachineConfig.model_validate(
+        _machine(
+            pools={"work": {"reserved": 2, "max": 4}, "external": {"max": 4, "priority": 1}},
+            standing=[
+                {"name": "vm", "pool": "external", "weight": 2},
+                {"name": "ci", "pool": "work", "weight": 2},  # inside work's own reservation
+            ],
+        )
+    )
+    assert fine.standing_held() == {"external": 2, "work": 2}
+
+
 def test_a_pool_max_below_a_waiting_weight_is_refused(tmp_path):
     """It could never be admitted, and with no backfill it would hold up the pool's line."""
     agent = MachineAgent(machine_config(tmp_path), facts=FACTS, load=FakeLoad(), clock=Clock())
