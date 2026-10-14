@@ -55,6 +55,25 @@ here.
 - The daemon gives up on a client that stops sending part way through a request after 30
   seconds, closing the connection, so a stalled client no longer keeps a thread. A long-polling
   `acquire` (`wait_s`) is not affected.
+- Ctrl-C (or SIGTERM, SIGHUP) while `hold` waits in line, or while its command is being started,
+  no longer prints a traceback, leaves the place in line on the daemon, or leaves the command
+  running without a lease: `hold` gives back the place or the lease, stops anything it started,
+  and exits 128 + the signal (SIGINT: it ends by SIGINT, which a shell reports as 130). Any
+  other command interrupted by Ctrl-C (`acquire` waiting in line, `serve`) ends by SIGINT too,
+  without a traceback, instead of exiting 1.
+- A place in line given back (`release`) while a blocking acquire for it is still being served
+  stays given back: the acquire ends `refused` instead of queueing it again.
+- Ctrl-C on a terminal stops a shell loop running `hold`: when the command dies of SIGINT or
+  SIGQUIT, `hold`, once it has released the lease, ends by the same signal instead of exiting
+  130 or 131 normally, which the shell took as the interrupt handled. Without a terminal, a
+  command killed by a signal still makes `hold` exit 128 + the signal.
+- One renewal the daemon does not answer no longer costs a `lend` lease (and its command):
+  each renewal waits at most TTL/3 for an answer, and renewals are due every TTL/3 counted from
+  the start of the last one, not from its end. While the group is stopped, the lease is renewed
+  every TTL/3 instead of every 0.1 s.
+- A `work` or `external` lease the daemon lost and then refuses when asked for again is said
+  once, and the command runs on without a lease and without asking again; asked for again and
+  put in line, it says its place once.
 
 ## [0.2.1]
 

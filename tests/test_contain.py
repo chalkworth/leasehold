@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -135,6 +137,37 @@ def test_a_scope_that_never_answers_is_given_up_on_before_the_command_runs(tmp_p
     assert child.wait(timeout=10) == 0
     assert why is not None and "running uncontained" in why
     assert marker.read_text() == "x\n"
+
+
+def test_a_cancelled_wait_for_a_scope_kills_what_it_started_and_never_runs_the_command(tmp_path):
+    marker, pidfile = tmp_path / "ran", tmp_path / "prefix.pid"
+    argv = ["sh", "-c", f"echo x >> {marker}"]
+    cancel, cancelled = os.pipe()
+
+    def cancel_once_started():
+        until(lambda: pidfile.exists() and pidfile.read_text().strip())
+        os.write(cancelled, b"x")
+
+    canceller = threading.Thread(target=cancel_once_started)
+    canceller.start()
+    prefix = [
+        "sh",
+        "-c",
+        f"echo $$ > {pidfile}.new; mv {pidfile}.new {pidfile}; exec sleep 30",
+        "--",
+    ]
+    started = time.monotonic()
+    try:
+        with pytest.raises(contain.Cancelled):
+            contain.spawn(argv, prefix, cancel_fd=cancel)
+    finally:
+        canceller.join()
+        os.close(cancel)
+        os.close(cancelled)
+    assert time.monotonic() - started < 10  # not SCOPE_TIMEOUT_S
+    with pytest.raises(ProcessLookupError):  # killed and reaped
+        os.kill(int(pidfile.read_text()), 0)
+    assert not marker.exists()
 
 
 live = pytest.mark.skipif(

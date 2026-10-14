@@ -378,8 +378,10 @@ class MachineAgent:
             )
         return pool, None
 
-    def acquire(self, req: AcquireRequest, *, user: str | None) -> dict:
-        """One admission attempt (no waiting): `granted`, `queued` or `refused`."""
+    def acquire(self, req: AcquireRequest, *, user: str | None, in_line: bool = False) -> dict:
+        """One admission attempt (no waiting): `granted`, `queued` or `refused`. With `in_line`
+        (asked again while waiting), a request no longer in line (its place was given back) is
+        refused rather than queued again."""
         pool, refused = self._refusal(req)
         if refused is not None:
             return {"status": "refused", "reason": refused}
@@ -398,6 +400,9 @@ class MachineAgent:
         with self._lock:
             # Under the lock, so two racing first asks with one id cannot both be new submits.
             known = self._check_owner(lease_id, user)  # the ledger checks again, in its tx
+            if in_line and not known:
+                reason = "its place in line was given back while it waited"
+                return {"status": "refused", "lease_id": lease_id, "reason": reason}
             limits = self.config.pool_set().pools[pool]
             rate = limits.create_rate_per_min
             if not known and rate is not None and self.ledger.recent_submits(user, pool) >= rate:
@@ -445,12 +450,15 @@ class MachineAgent:
         return {"status": "refused", "lease_id": lease_id, "reason": outcome.reason}
 
     def acquire_wait(self, req: AcquireRequest, *, user: str | None) -> dict:
-        """`acquire`, retried as capacity changes until granted, refused or `wait_s` is up."""
+        """`acquire`, retried as capacity changes until granted, refused or `wait_s` is up. A
+        place in line given back while it waits (`release`) ends the wait, refused."""
         deadline = time.monotonic() + req.wait_s
         if req.lease_id is None:
             req = req.model_copy(update={"lease_id": uuid.uuid4().hex})
+        in_line = False
         while True:
-            answer = self.acquire(req, user=user)
+            answer = self.acquire(req, user=user, in_line=in_line)
+            in_line = True
             left = deadline - time.monotonic()
             if answer["status"] != "queued" or left <= 0:
                 return answer

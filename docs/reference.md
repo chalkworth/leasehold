@@ -249,16 +249,23 @@ Without `--weight`, `hold` weighs the command as the [`[commands]` rules](#which
 weigh it (cargo test: 4 slots, cut to what its pool may hold), and anything they do not name
 as 1 slot.
 
-`hold` waits for a lease, runs the command in its own process group, renews while it runs,
-forwards SIGTERM, SIGINT and SIGHUP to the group, releases when the command ends, and exits
-with its code. The lease covers the group: anything left in it when the command ends is stopped
-too. The command sees `LEASEHOLD_LEASE_ID`, `LEASEHOLD_GRANT`, `LEASEHOLD_POOL` and
-`LEASEHOLD_WEIGHT`.
+`hold` waits for a lease, runs the command in its own process group, renews while it runs
+(every TTL/3, each renewal waiting at most TTL/3 for an answer), forwards SIGTERM, SIGINT and
+SIGHUP to the group, releases when the command ends, and exits with its code. The lease covers
+the group: anything left in it when the command ends is stopped too. The command sees
+`LEASEHOLD_LEASE_ID`, `LEASEHOLD_GRANT`, `LEASEHOLD_POOL` and `LEASEHOLD_WEIGHT`.
+
+SIGTERM, SIGINT or SIGHUP before the command runs (while `hold` waits in line, or while it
+starts the command) gives back the place in line or the lease, stops anything already started,
+and exits 128 + the signal; SIGINT ends `hold` by SIGINT, which the shell reports as 130.
 
 Run from a terminal, in the foreground, `hold` hands the command's group the terminal, so it can
 read it and Ctrl-C reaches it as if the shell had run it. Ctrl-Z stops the command and `hold`
-with it, and `fg` or `bg` continues both. Run any other way, the command gets a session of its
-own.
+with it, and `fg` or `bg` continues both. When Ctrl-C (or Ctrl-\) kills the command, `hold`
+releases the lease and then ends by the same signal, so the shell sees the interrupt and stops
+a loop or script that runs `hold` (the shell still reports 130, or 131). Run any other way, the
+command gets a session of its own, and a command killed by a signal makes `hold` exit 128 + the
+signal.
 
 ### Containment
 
@@ -317,7 +324,8 @@ guildmaster run one jobserver for a whole machine; here it is one per lease.
 ### Exit codes
 
 `hold`, `acquire`, and the commands that talk to a daemon exit with these codes of their own;
-otherwise `hold` exits with its command's code.
+otherwise `hold` exits with its command's code. Any `leasehold` command interrupted by Ctrl-C
+ends by SIGINT (130 to the shell); `acquire` gives back its place in line first.
 
 When no daemon answers, or none can be found, `hold` says `no daemon answers; running without a
 lease` on stderr and runs the command as it would under a lease, but with no lease, scope or
@@ -593,7 +601,8 @@ client for it.
 | `POST /v1/pools/<name>` | `max`: a number, or null to reset | the pool; administrators only |
 
 `acquire` waits up to `wait_s` (at most 300) for the lease, then answers `queued`; asking again
-with the same `lease_id` keeps the place in line, and is not a new request. A new request over
+with the same `lease_id` keeps the place in line, and is not a new request. A place given back
+(`/v1/release`) while its `acquire` waits ends that wait, `refused`. A new request over
 its pool's per-user limits (`per_user_max_queued`, `create_rate_per_min`) is `refused` with
 `code: "quota_exceeded"`; one that fits now is granted whatever the waiting limit.
 
