@@ -1,17 +1,10 @@
-"""`leasehold top`: the machine in a terminal, redrawn as it changes.
+"""The screen as lines, as pure functions of what the daemon said.
 
-`render` is pure: a status object (`GET /v1/status`), recent events (`GET /v1/events`, oldest
-first) and a size in; the screen out, as lines of `(text, style)` segments. It returns exactly
-`height` lines of exactly `width` cells each, and never wraps. When the height is short, whole
-sections are dropped, least important first, and long lists are cut with a count of what is not
-shown. `plain` turns the lines into text.
-
-`run` is the terminal loop around it: it polls the daemon through a `Client`, keeps the last
-`KEEP_EVENTS` events and `HISTORY` pressure samples, and redraws. Off a terminal, on one smaller
-than `MIN_SIZE`, or with `once`, it prints one plain render instead.
-
-Text that clients choose (users, sessions, labels, reasons) is shown with control characters
-replaced, so nothing a client sends can drive the terminal.
+`render` takes a status object (`GET /v1/status`), recent events (`GET /v1/events`, oldest
+first) and a size, and returns the screen as lines of `(text, style)` segments: exactly `height`
+lines of exactly `width` cells each, never wrapped. When the height is short, whole sections are
+dropped, least important first, and long lists are cut with a count of what is not shown.
+`footer`, `help_lines` and `waiting_screen` are the live view's other lines.
 
 Styles are strings: `""` (plain), `title`, `dim`, `bold`, `ok`, `warn`, `bad`, `wait` (why a
 lease waits), `key`, `pool:NAME` (a mark in a pool's colour), `bay:NAME` (a slot a lease of that
@@ -21,31 +14,24 @@ colour alone: each has its own mark.
 
 from __future__ import annotations
 
-import contextlib
-import os
-import sys
-import time
-import unicodedata
-from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TextIO
 
-from leasehold.client import ApiError, Client, Unavailable
+from leasehold.top.cells import (
+    Line,
+    _ascii,
+    _choose,
+    _clean,
+    _clip,
+    _line_cells,
+    _Out,
+    _pad,
+    _rpad,
+    _spread,
+    cells,
+    fit,
+)
 
-#: One run of text in one style.
-Segment = tuple[str, str]
-#: One screen line.
-Line = list[Segment]
-
-#: Events `run` keeps.
-KEEP_EVENTS = 200
-#: Pressure samples `run` keeps per resource, one per poll.
-HISTORY = 150
-#: The smallest terminal `run` draws its live view on.
-MIN_SIZE = (80, 20)
-#: The size of a plain render off a terminal.
-PLAIN_SIZE = (100, 40)
 #: The lease orders, in the order `s` cycles through them.
 SORTS = ("pool", "held", "weight", "user")
 #: The pressure resources, in the order shown.
@@ -100,142 +86,6 @@ ASCII = Glyphs(
     sep="|",
     cut="~",
 )
-
-
-# --- text ----------------------------------------------------------------------------------------
-
-
-def _clean(text: object) -> str:
-    """`text` with control and format characters as `?` and other separators as spaces."""
-    s = str(text)
-    if s.isprintable():
-        return s
-    return "".join(
-        ch if ch.isprintable() else ("?" if unicodedata.category(ch)[0] == "C" else " ") for ch in s
-    )
-
-
-def _char_cells(ch: str) -> int:
-    if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me"):
-        return 0
-    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-
-
-def cells(text: str) -> int:
-    """How many terminal cells `text` takes."""
-    return len(text) if text.isascii() else sum(_char_cells(ch) for ch in text)
-
-
-def _clip(text: str, n: int, cut: str = "") -> str:
-    """`text` cut to at most `n` cells, ending in `cut` when anything was cut off."""
-    if cells(text) <= n:
-        return text
-    room = n - cells(cut)
-    if room < 0:
-        return ""
-    out, used = [], 0
-    for ch in text:
-        w = _char_cells(ch)
-        if used + w > room:
-            break
-        out.append(ch)
-        used += w
-    return "".join(out) + cut
-
-
-def _pad(text: str, n: int, cut: str = "") -> str:
-    text = _clip(text, n, cut)
-    return text + " " * (n - cells(text))
-
-
-def _rpad(text: str, n: int) -> str:
-    text = _clip(text, n)
-    return " " * (n - cells(text)) + text
-
-
-class _Out:
-    """One line being built."""
-
-    def __init__(self) -> None:
-        self.segs: Line = []
-        self.cells = 0
-
-    def put(self, text: object, style: str = "") -> _Out:
-        text = _clean(text)
-        if text:
-            self.segs.append((text, style))
-            self.cells += cells(text)
-        return self
-
-    def extend(self, line: Line) -> _Out:
-        for text, style in line:
-            self.put(text, style)
-        return self
-
-    def to(self, col: int) -> _Out:
-        return self.put(" " * (col - self.cells)) if col > self.cells else self
-
-
-def _line_cells(line: Line) -> int:
-    return sum(cells(t) for t, _ in line)
-
-
-def fit(line: Line, width: int) -> Line:
-    """`line` cut or padded to exactly `width` cells, runs of one style merged."""
-    out: Line = []
-    used = 0
-    for text, style in line:
-        if used >= width:
-            break
-        text = _clip(text, width - used)
-        if not text:
-            continue
-        used += cells(text)
-        if out and out[-1][1] == style:
-            out[-1] = (out[-1][0] + text, style)
-        else:
-            out.append((text, style))
-    if used < width:
-        if out and out[-1][1] == "":
-            out[-1] = (out[-1][0] + " " * (width - used), "")
-        else:
-            out.append((" " * (width - used), ""))
-    return out
-
-
-def _spread(left: Line, right: Line, width: int) -> Line:
-    """`left` at the start and `right` against the end; `left` is cut first, and `right` is
-    dropped when it would leave `left` fewer than 12 cells."""
-    rw = _line_cells(right)
-    room = width - rw - 1
-    if room < 12:
-        return left
-    lw = _line_cells(left)
-    if lw > room:
-        return [*fit(left, room), (" ", ""), *right]
-    return [*left, (" " * (width - lw - rw), ""), *right]
-
-
-def _choose(parts: Sequence[tuple[int, Line]], width: int) -> Line:
-    """The parts, in their order, that fit in `width`, kept most important (lowest rank) first;
-    the most important is cut to fit when it alone does not."""
-    kept: set[int] = set()
-    used = 0
-    for i in sorted(range(len(parts)), key=lambda i: parts[i][0]):
-        n = _line_cells(parts[i][1])
-        if used + n <= width or not kept:
-            kept.add(i)
-            used += n
-    out = [seg for i, (_, line) in enumerate(parts) if i in kept for seg in line]
-    return fit(out, width) if used > width else out
-
-
-def plain(lines: Sequence[Line]) -> str:
-    """The lines as text: styles dropped, trailing spaces and trailing blank lines removed."""
-    text = ["".join(t for t, _ in line).rstrip() for line in lines]
-    while text and not text[-1]:
-        text.pop()
-    return "\n".join(text)
 
 
 # --- numbers and words ---------------------------------------------------------------------------
@@ -1001,13 +851,6 @@ def render(
     return [fit(line, width) for line in lines[:height]]
 
 
-def _ascii(text: str) -> str:
-    """`text` with each character outside ASCII as one `?` per cell it took."""
-    if text.isascii():
-        return text
-    return "".join(ch if ch.isascii() else "?" * _char_cells(ch) for ch in text)
-
-
 # --- the live view -------------------------------------------------------------------------------
 
 
@@ -1084,291 +927,3 @@ def waiting_screen(width: int, height: int, error: str) -> list[Line]:
         lines.append([(" " * pad, ""), *line])
     lines += [[] for _ in range(height - len(lines))]
     return [fit(line, width) for line in lines[:height]]
-
-
-class Watch:
-    """What the live view knows: the last status, recent events and pressure history, and
-    whether the last poll failed. `poll` asks the daemon once."""
-
-    def __init__(self, client: Client, clock: Callable[[], float] = time.monotonic) -> None:
-        self.client = client
-        self.clock = clock
-        self.status: dict | None = None
-        self.received = 0.0
-        self.events: deque[dict] = deque(maxlen=KEEP_EVENTS)
-        self.history: dict[str, deque[float]] = {r: deque(maxlen=HISTORY) for r in RESOURCES}
-        self.since = 0
-        self.error: str | None = None
-
-    def poll(self) -> bool:
-        """Ask for the status and the events since the last poll; False (and `error` set) when
-        the daemon did not answer."""
-        try:
-            status = self.client.status()
-            batch = self.client.events(self.since)
-        except (Unavailable, ApiError) as exc:
-            self.error = str(exc)
-            return False
-        self.error = None
-        self.status = status
-        self.received = self.clock()
-        self.events.extend(batch.get("events") or [])
-        self.since = int(batch.get("next") or 0)
-        pressure = (status.get("load") or {}).get("pressure") or {}
-        for res in RESOURCES:
-            some = ((pressure.get(res) or {}).get("some") or {}).get("avg10")
-            if some is not None:
-                self.history[res].append(float(some))
-        return True
-
-    def now(self) -> float:
-        """Daemon time now: its last `time` plus what has passed here since, so ages are right
-        whatever this machine's clock says."""
-        assert self.status is not None
-        return float(self.status.get("time") or 0.0) + (self.clock() - self.received)
-
-
-def use_color(env: Mapping[str, str], has_colors: bool) -> bool:
-    """Whether to draw in colour: the terminal has it and `NO_COLOR` is unset or empty."""
-    return has_colors and not env.get("NO_COLOR")
-
-
-def _unicode(stream: TextIO) -> bool:
-    encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
-    return encoding.startswith("utf")
-
-
-def _size(stdout: TextIO) -> tuple[int, int] | None:
-    """The terminal's size, or None when `stdout` is not one."""
-    try:
-        if not stdout.isatty():
-            return None
-        size = os.get_terminal_size(stdout.fileno())
-    except (OSError, ValueError, AttributeError):
-        return None
-    return size.columns, size.lines
-
-
-def run(
-    client: Client, *, interval: float = 1.0, once: bool = False, stdout: TextIO | None = None
-) -> int:
-    """Show the machine until `q`; 0. With `once`, off a terminal, or on one smaller than
-    `MIN_SIZE`, print one plain render instead (sized to the terminal, else `PLAIN_SIZE`); that
-    raises `Unavailable` or `ApiError` when the daemon does not answer. The live view keeps
-    retrying instead, and says so."""
-    stdout = sys.stdout if stdout is None else stdout
-    size = _size(stdout)
-    if once or size is None or size[0] < MIN_SIZE[0] or size[1] < MIN_SIZE[1]:
-        status = client.status()
-        events = (client.events(0).get("events") or [])[-KEEP_EVENTS:]
-        width, height = size or PLAIN_SIZE
-        stdout.write(plain(render(status, events, width, height, unicode=_unicode(stdout))))
-        stdout.write("\n")
-        stdout.flush()
-        return 0
-    import curses
-
-    try:
-        return curses.wrapper(_Screen(Watch(client), interval, _unicode(stdout)).loop)
-    except KeyboardInterrupt:
-        return 0
-
-
-# --- curses --------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Look:
-    """How a style is drawn: curses colour numbers (-1: the terminal's own) and attributes."""
-
-    fg: int = -1
-    bg: int = -1
-    attr: int = 0
-
-
-#: Pool colours (256-colour, 8-colour), by pool name; other pools take `_OTHER` in turn.
-_POOL_COLOURS = {"work": (32, 4), "external": (214, 3), "lend": (36, 2), "observed": (247, 7)}
-_OTHER = ((74, 6), (175, 5), (221, 3))
-
-
-def pool_colour(name: str, order: Sequence[str], colors: int) -> int:
-    """The colour number for pool `name`; `order` is the pools in status order."""
-    rich = colors >= 256
-    if name in _POOL_COLOURS:
-        return _POOL_COLOURS[name][0 if rich else 1]
-    others = [p for p in order if p not in _POOL_COLOURS]
-    i = others.index(name) if name in others else 0
-    return _OTHER[i % len(_OTHER)][0 if rich else 1]
-
-
-def look(style: str, *, color: bool, colors: int = 8, pools: Sequence[str] = ()) -> Look:
-    """How to draw `style`. Without `color`, only attributes: held slots in reverse video,
-    warnings and why a lease waits in bold, so nothing depends on colour."""
-    import curses
-
-    rich = colors >= 256
-    base, _, pool = style.partition(":")
-    if not color:
-        attrs = {
-            "title": curses.A_BOLD,
-            "bold": curses.A_BOLD,
-            "key": curses.A_BOLD,
-            "dim": curses.A_DIM,
-            "warn": curses.A_BOLD,
-            "bad": curses.A_BOLD,
-            "wait": curses.A_BOLD,
-            "bay": curses.A_REVERSE,
-            "revoked": curses.A_REVERSE | curses.A_UNDERLINE,
-            "reserved": curses.A_DIM,
-        }
-        return Look(attr=attrs.get(base, 0))
-    status_colours = {
-        "ok": (78 if rich else 2, 0),
-        "warn": (214 if rich else 3, curses.A_BOLD),
-        "bad": (203 if rich else 1, curses.A_BOLD),
-        "wait": (222 if rich else 3, curses.A_BOLD),
-    }
-    if base in status_colours:
-        fg, attr = status_colours[base]
-        return Look(fg=fg, attr=attr)
-    if base == "pool":
-        return Look(fg=pool_colour(pool, pools, colors))
-    if base == "reserved":
-        return Look(fg=pool_colour(pool, pools, colors), attr=curses.A_DIM)
-    if base == "bay":
-        bg = pool_colour(pool, pools, colors)
-        fg = 231 if rich and pool == "work" else (7 if pool == "work" else 0)
-        return Look(fg=fg, bg=bg)
-    if base == "revoked":
-        return Look(fg=231 if rich else 7, bg=160 if rich else 1, attr=curses.A_UNDERLINE)
-    attrs = {"title": curses.A_BOLD, "bold": curses.A_BOLD, "key": curses.A_BOLD}
-    if base == "dim":
-        return Look(fg=245 if rich else -1, attr=0 if rich else curses.A_DIM)
-    return Look(attr=attrs.get(base, 0))
-
-
-class _Painter:
-    """Styles to curses attributes, allocating colour pairs as they are first needed."""
-
-    def __init__(self, color: bool) -> None:
-        import curses
-
-        self.curses = curses
-        self.color = color
-        self.colors = curses.COLORS if color else 0
-        self.pairs: dict[tuple[int, int], int] = {}
-        self.cache: dict[tuple[str, tuple[str, ...]], int] = {}
-
-    def attr(self, style: str, pools: Sequence[str], dim: bool = False) -> int:
-        key = (style, tuple(pools))
-        if key not in self.cache:
-            lk = look(style, color=self.color, colors=self.colors, pools=pools)
-            attr = lk.attr
-            if (lk.fg, lk.bg) != (-1, -1):
-                pair = self.pairs.get((lk.fg, lk.bg))
-                if pair is None and len(self.pairs) + 1 < self.curses.COLOR_PAIRS:
-                    pair = len(self.pairs) + 1
-                    try:
-                        self.curses.init_pair(pair, lk.fg, lk.bg)
-                        self.pairs[(lk.fg, lk.bg)] = pair
-                    except self.curses.error:
-                        pair = None
-                if pair is not None:
-                    attr |= self.curses.color_pair(pair)
-            self.cache[key] = attr
-        return self.cache[key] | (self.curses.A_DIM if dim else 0)
-
-
-class _Screen:
-    def __init__(self, watch: Watch, interval: float, unicode: bool) -> None:
-        self.watch = watch
-        self.interval = interval
-        self.unicode = unicode
-        self.sort = SORTS[0]
-        self.paused = False
-        self.help = False
-        self.frozen: float | None = None
-
-    def loop(self, scr) -> int:
-        import curses
-
-        with contextlib.suppress(curses.error):
-            curses.curs_set(0)
-        color = False
-        if curses.has_colors():
-            curses.start_color()
-            with contextlib.suppress(curses.error):
-                curses.use_default_colors()
-            color = use_color(os.environ, True)
-        painter = _Painter(color)
-        due = 0.0
-        while True:
-            if not self.paused and time.monotonic() >= due:
-                self.watch.poll()
-                due = time.monotonic() + self.interval
-            self.draw(scr, painter)
-            # Redraw for the next poll, or within a second for the running clocks; paused, the
-            # screen changes only on a key.
-            wait = min(1.0, max(0.05, due - time.monotonic()))
-            scr.timeout(-1 if self.paused else int(wait * 1000))
-            key = scr.getch()
-            if key in (ord("q"), ord("Q")):
-                return 0
-            if key == ord("p"):
-                self.paused = not self.paused
-                self.frozen = self.watch.now() if self.paused and self.watch.status else None
-                due = 0.0
-            elif key == ord("s"):
-                self.sort = SORTS[(SORTS.index(self.sort) + 1) % len(SORTS)]
-            elif key in (ord("?"), ord("h")):
-                self.help = not self.help
-            elif key == 27 and self.help:
-                self.help = False
-            elif key == curses.KEY_RESIZE:
-                curses.update_lines_cols()
-
-    def draw(self, scr, painter: _Painter) -> None:
-        height, width = scr.getmaxyx()
-        scr.erase()
-        w = self.watch
-        pools = list((w.status or {}).get("pools") or {})
-        if w.status is None:
-            lines = waiting_screen(width, height, w.error or "connecting")
-            stale = False
-        else:
-            now = self.frozen if self.frozen is not None else w.now()
-            lines = render(
-                w.status,
-                list(w.events),
-                width,
-                height - 1,
-                history=w.history,
-                now=now,
-                sort=self.sort,
-                unicode=self.unicode,
-            )
-            age = None if self.paused and not w.error else time.monotonic() - w.received
-            lines.append(footer(width, sort=self.sort, paused=self.paused, error=w.error, age=age))
-            stale = w.error is not None
-        for y, line in enumerate(lines[:height]):
-            self._put(scr, y, 0, line, painter, pools, dim=stale and y < height - 1)
-        if self.help:
-            box = help_lines(self.unicode)
-            top = max(0, (height - len(box)) // 2)
-            left = max(0, (width - _line_cells(box[0])) // 2)
-            for y, line in enumerate(box[: max(0, height - top)]):
-                room = min(width - left, _line_cells(line))
-                segs = [(t, s or "bold") for t, s in fit(line, room)]
-                self._put(scr, top + y, left, segs, painter, pools, reverse=True)
-        scr.refresh()
-
-    def _put(self, scr, y, x, line, painter, pools, *, dim=False, reverse=False) -> None:
-        import curses
-
-        for text, style in line:
-            text = text if self.unicode else _ascii(text)
-            attr = painter.attr(style, pools, dim) | (curses.A_REVERSE if reverse else 0)
-            # Writing the bottom-right cell succeeds but raises: curses cannot move past it.
-            with contextlib.suppress(curses.error):
-                scr.addstr(y, x, text, attr)
-            x += cells(text)

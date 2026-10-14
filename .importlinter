@@ -4,6 +4,8 @@
 # the daemon. Commands that talk to a daemon (hold, handoff, report, top, the views and the MCP
 # server) reach it only through `leasehold.client`, never by importing the agent, the API or the
 # ledger.
+#
+# A package named here (`cli`, `top`) stands for itself and every module in it.
 
 [importlinter]
 root_package = leasehold
