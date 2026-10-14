@@ -490,7 +490,10 @@ class Ledger:
     ) -> None:
         """Put `item` in line without deciding anything (a no-op if it waits or holds already).
         `queued_at` restores its place from a durable record when a host rebuilds the queue.
-        With `ttl_s` its place lasts only while it is renewed (or polled with `try_admit`)."""
+        With `ttl_s` its place lasts only while it is renewed (or polled with `try_admit`).
+        A weight below 1 is a ValueError."""
+        if item.weight < 1:
+            raise ValueError(f"weight {item.weight} is below 1")
         holder = holder or Holder.current()
         with self._tx() as conn:
             self._reclaim(conn)
@@ -521,7 +524,8 @@ class Ledger:
         """In one transaction: reclaim the dead, put `item` in line if it is not already, admit
         whatever now fits (anyone's -- a holder learns of its lease on its next call), and say
         where `item` stands. Idempotent: an item that holds a lease is `Admitted` again. A key
-        another user holds or waits under is `Refused`: two users never share one lease.
+        another user holds or waits under is `Refused`: two users never share one lease. So is
+        one `policy.refusal` gives a reason for (a weight below 1, or one that could never fit).
         With `ttl_s` the item's place and lease are TTL ones (see the module docstring)."""
         holder = holder or Holder.current()
         with self._tx() as conn:

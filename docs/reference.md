@@ -229,9 +229,13 @@ an example machine. An unknown key is an error.
 | `[guard]` | on for your own daemon | see [Memory guard](#memory-guard): `enabled`, `memory_pressure_on` (20), `memory_pressure_off` (5), `min_available` (5% of memory, at least 512 MiB), `settle_s` (30) |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
 
-The ceiling clamps the pools: a pool's `max` above it is clamped, and a request heavier than it
-is refused. An administrator can change a pool's max until the daemon restarts
-(`leasehold pool set NAME --max N`, or `--reset`), never above the ceiling.
+The ceiling clamps the pools: a pool's `max` is clamped to what the pool could ever hold, the
+ceiling's slots less the other pools' reservations (the observed pool's only to the slots), and
+a request that could not fit even on an idle machine is refused rather than queued. Standing
+weight must leave every pool's reservation whole: each pool's standing weight or its
+reservation, whichever is more, must together fit the slots. An administrator can change a
+pool's max until the daemon restarts (`leasehold pool set NAME --max N`, or `--reset`), never
+above what the pool could ever hold beside the other pools' reservations and standing work.
 
 ## Running work under a lease
 
@@ -442,8 +446,8 @@ The config's rules are tried first, then the built-in ones (`defaults = false` d
 pytest, tox and nox; cargo build, test, check, clippy, bench, run and doc; make, ninja and
 bazel; `cmake --build`; go build and test; mvn and gradle; docker and podman build; npm, pnpm,
 yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. Among
-one source's rules the heaviest match wins. The daemon clamps each weight to its pool's max and
-the ceiling. `leasehold commands` lists the rules; `leasehold commands --test "CMD"` says which
+one source's rules the heaviest match wins. The daemon clamps each weight to the most its pool
+could ever grant one lease, beside the other pools' reservations and standing work. `leasehold commands` lists the rules; `leasehold commands --test "CMD"` says which
 one a command matches.
 
 A command line is read as the shell would split it, without running anything: `&&`, `||`,

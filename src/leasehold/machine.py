@@ -254,6 +254,7 @@ class MachineConfig(_Strict):
         if "observed" in self.kinds and self.kinds["observed"] not in pools:
             # Observing is optional: without its pool, nothing is observed.
             self.kinds = {k: v for k, v in self.kinds.items() if k != "observed"}
+        pools = self.pool_set().pools  # clamped now that the observed pool is known
         errors = []
         for kind, pool in self.kinds.items():
             if kind not in KINDS:
@@ -335,6 +336,17 @@ class MachineConfig(_Strict):
                 f"standing: weight {held_total} is more than the machine's "
                 f"{self.ceiling.slots} slots"
             )
+        elif not errors:
+            # Each pool's reservation must stay whole beside the standing work: a pool's
+            # standing weight counts towards its own reservation, never another's.
+            owed = sum(
+                max(0, pool.reserved - held_by_pool.get(name, 0)) for name, pool in pools.items()
+            )
+            if held_total + owed > self.ceiling.slots:
+                errors.append(
+                    f"standing: weight {held_total} and the {owed} slots reserved for pools "
+                    f"beyond it are more than the machine's {self.ceiling.slots} slots"
+                )
         return errors
 
     @property
@@ -343,13 +355,18 @@ class MachineConfig(_Strict):
         return self.kinds.get("observed")
 
     def pool_set(self) -> PoolSet:
-        """The machine's slots and pools, each pool's `max` clamped to the slots."""
+        """The machine's slots and pools, each pool's `max` clamped to the most it could ever
+        hold: the slots less the other pools' reservations, which are never lent to it (never
+        below its own reservation). The observed pool, which nothing is ever admitted to, is
+        clamped to the slots only."""
         slots = self.ceiling.slots
         pools = self.pools if self.pools is not None else default_pools(slots)
-        clamped = {
-            name: pool if pool.max <= slots else pool.model_copy(update={"max": slots})
-            for name, pool in pools.items()
-        }
+        reserved = sum(pool.reserved for pool in pools.values())
+        clamped = {}
+        for name, pool in pools.items():
+            top = slots if name == self.observed_pool else slots - (reserved - pool.reserved)
+            top = max(top, pool.reserved)
+            clamped[name] = pool if pool.max <= top else pool.model_copy(update={"max": top})
         return PoolSet(slots=slots, pools=clamped)
 
     def limits(self, *, cpus: float, memory_bytes: int) -> MachineLimits:

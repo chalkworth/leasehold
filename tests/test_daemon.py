@@ -96,6 +96,37 @@ def test_status_text_prints_standing_work_and_json_is_the_object(tmp_path, sock_
         daemon.stop()
 
 
+def test_what_other_pools_reservations_put_out_of_reach_is_refused(tmp_path, sock_dir, capsys):
+    """4 slots, `work` reserving 2: `external` can never hold 3, whatever its configured max,
+    so a weight-3 request is refused (not left at the head of the line for good), the next
+    one is granted, and no administrator can raise the pool's max past 2."""
+    sock = sock_dir / "r.sock"
+    config = machine_config(
+        tmp_path,
+        socket=str(sock),
+        ceiling={"slots": 4},
+        pools={
+            "work": {"reserved": 2, "max": 4, "priority": 0},
+            "external": {"reserved": 0, "max": 4, "priority": 1},
+        },
+        kinds={"work": "work", "external": "external"},
+        lend={"pools": [], "quiet_s": 0},
+    )
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    try:
+        client = Client(sock)
+        assert client.status()["pools"]["external"]["max"] == 2
+        big = client.acquire(kind="external", weight=3, lease_id="big")
+        assert big["status"] == "refused" and "max 2" in big["reason"]
+        assert client.acquire(kind="external", weight=1, lease_id="e1")["status"] == "granted"
+        assert client.status()["queue"] == []
+        assert main(["--socket", str(sock), "pool", "set", "external", "--max", "3"]) == 1
+        assert "could never be reached" in capsys.readouterr().err
+    finally:
+        daemon.stop()
+
+
 def test_status_text_leaves_out_an_empty_standing_section(daemon, capsys):
     assert main(["--socket", str(daemon.path), "status"]) == 0
     assert "standing:" not in capsys.readouterr().out
