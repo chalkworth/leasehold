@@ -7,6 +7,38 @@ here.
 
 ## [Unreleased]
 
+### Added
+
+- `AdmissionPolicy.heaviest(pool)`: the most weight one item could ever be admitted with in a
+  pool, with nothing held but the standing work.
+
+### Changed
+
+- **May reject a config that 0.2.1 accepted.** `[[standing]]` weight must leave every pool's
+  reservation whole: each pool's standing weight or its `reserved`, whichever is more, must
+  together fit `[ceiling] slots`. A config with standing work in some pools that eats into
+  another pool's reservation now fails to load; lower the standing weight or the reservation.
+- A pool's effective `max` (in `status`, `GET /v1/commands` and admission) is clamped to the
+  slots less the other pools' reservations, which it could never pass; the observed pool is
+  still clamped only to the slots. A per-pool `[[standing]]` total is checked against this
+  clamped `max`.
+- `leasehold pool set NAME --max N` (`POST /v1/pools/<name>`) refuses a max the pool could never
+  reach beside the other pools' reservations and standing work.
+- `GET /v1/commands` cuts each rule's weight to the most its pool could ever grant one lease,
+  standing work and other pools' reservations included, not only to its `max` and the slots.
+
+### Fixed
+
+- A request that could not fit its pool even on an idle machine because other pools reserve
+  the slots (8 slots, pool `a` reserving 4, weight 6 in pool `b`) is refused with a reason
+  instead of queuing forever and, with no backfill, holding up every later item in its pool.
+  `AdmissionPolicy.refusal` (and so `Ledger.try_admit`) applies the idle-machine test always,
+  not only when there is standing work, and ignores a pool's memory-pressure cap, which is
+  never permanent.
+- `Ledger.try_admit` refuses a weight below 1 (`AdmissionPolicy.refusal`), and
+  `Ledger.enqueue` raises `ValueError` for one: a negative weight was admitted and let its
+  pool over-commit.
+
 ## [0.2.1]
 
 An agent's heavy command waits its turn instead of being refused after 20 s. At 8 agents most

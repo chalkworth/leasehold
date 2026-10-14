@@ -174,12 +174,23 @@ class MachineAgent:
 
     def set_pool_max(self, pool: str, maximum: int | None) -> dict:
         """Give `pool` a `max` other than its configured one until the daemon restarts (None:
-        back to the configured one). Never above the machine's slots."""
+        back to the configured one). Never above the machine's slots, nor above what the pool
+        could ever hold beside the other pools' reservations and standing work."""
         pools = self.config.pool_set().pools
         if pool not in pools:
             raise ValueError(f"there is no pool {pool!r}")
         if maximum is not None and not 1 <= maximum <= self.limits.slots:
             raise ValueError(f"max must be between 1 and the machine's {self.limits.slots} slots")
+        if maximum is not None and pool != self.config.observed_pool:
+            held = self.config.standing_held()
+            others = sum(
+                max(p.reserved, held.get(name, 0)) for name, p in pools.items() if name != pool
+            )
+            if maximum > self.limits.slots - others:
+                raise ValueError(
+                    f"max {maximum} could never be reached: the other pools' reservations and "
+                    f"standing work keep {others} of the {self.limits.slots} slots"
+                )
         if maximum is not None and maximum < pools[pool].reserved:
             raise ValueError(
                 f"max {maximum} is below pool {pool!r}'s reserved {pools[pool].reserved}"
@@ -535,14 +546,14 @@ class MachineAgent:
 
     def commands(self) -> dict:
         """Which commands take a lease, for agent hooks and shims to match against: each rule
-        with its pool named and its weight cut to the most that pool may hold now, so what it
-        asks for can be granted."""
+        with its pool named and its weight cut to the most one lease could ever be admitted
+        with in that pool (`AdmissionPolicy.heaviest`), so what it asks for can be granted."""
         settings = self.config.commands
-        pools = self.config.pool_set().pools
+        policy = self.policy()
         rules = []
         for src, rule in settings.rules():
             pool = rule.pool or self.config.kinds.get("work", "work")
-            top = self._max_overrides.get(pool, pools[pool].max) if pool in pools else rule.weight
+            top = policy.heaviest(pool) if pool in policy.pools else rule.weight
             weight = max(1, min(rule.weight, top, self.config.ceiling.slots))
             rules.append(rule.model_dump() | {"pool": pool, "weight": weight, "source": src})
         return {

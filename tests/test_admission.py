@@ -499,3 +499,50 @@ def test_standing_weight_elsewhere_refuses_what_could_never_fit():
     )
     assert policy.refusal("ci", 2) is not None
     assert policy.refusal("ci", 1) is None
+
+
+def _reserved_elsewhere() -> AdmissionPolicy:
+    """Eight slots: `a` reserves four, so `b` can never hold more than the other four."""
+    return AdmissionPolicy(
+        slots={MACHINE: 8},
+        pools={
+            "a": PoolPolicy(MACHINE, reserved=4, max=8),
+            "b": PoolPolicy(MACHINE, reserved=0, max=8, priority=1),
+        },
+    )
+
+
+def test_an_item_other_pools_reservations_leave_no_room_for_is_refused():
+    """Weight 6 in `b` fits neither now nor ever (four of eight slots are `a`'s), so it is
+    refused rather than queued at the head of `b`'s line, where nothing would pass it."""
+    policy = _reserved_elsewhere()
+    assert policy.heaviest("a") == 8 and policy.heaviest("b") == 4
+    assert policy.refusal("b", 4) is None
+    assert policy.refusal("b", 6) == (
+        "weight 6 cannot fit pool 'b' even on an idle machine, which has room for 4: of the "
+        "8 slots, 4 are reserved for other pools"
+    )
+    assert policy.refusal("a", 8) is None
+
+
+def test_an_item_whose_pool_is_capped_now_is_judged_on_its_max():
+    """A capped pool admits only its reservation for now; that never makes an item one that
+    could never be admitted."""
+    policy = AdmissionPolicy(
+        slots={MACHINE: 4},
+        pools={"work": PoolPolicy(MACHINE, reserved=1, max=4)},
+        standing={"work": 1},
+        capped=frozenset({"work"}),
+    )
+    assert policy.heaviest("work") == 3
+    assert policy.refusal("work", 3) is None
+    assert "held by standing work" in policy.refusal("work", 4)
+
+
+@pytest.mark.parametrize("weight", [0, -5])
+def test_a_weight_below_one_is_refused(weight):
+    assert _reserved_elsewhere().refusal("b", weight) == f"weight {weight} is below 1"
+
+
+def test_heaviest_is_zero_for_a_pool_there_is_not():
+    assert _reserved_elsewhere().heaviest("gone") == 0

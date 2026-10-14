@@ -127,6 +127,40 @@ def test_a_pool_max_override_stays_within_the_slots_and_resets(tmp_path):
     assert agent.status()["pools"]["work"]["max"] == 2
 
 
+def test_a_pool_max_override_the_pool_could_never_reach_is_refused(tmp_path):
+    """On 4 slots `work` reserves 2, so `external` can never hold more than 2."""
+    agent, _, _ = make_agent(tmp_path, ceiling={"slots": 4})
+    agent.tick()
+    with pytest.raises(ValueError, match="keep 2 of the 4 slots"):
+        agent.set_pool_max("external", 3)
+    assert agent.set_pool_max("external", 2)["max"] == 2
+    assert agent.set_pool_max("work", 4)["max"] == 4
+
+
+def test_a_command_rules_weight_is_cut_to_what_its_pool_could_ever_be_given(tmp_path):
+    """`external` names max 4 on 4 slots, but `work` reserves 2 and a VM stands in one of the
+    other 2: a weight-8 rule asks for the 1 slot left, which can be granted."""
+    agent, _, _ = make_agent(
+        tmp_path,
+        ceiling={"slots": 4},
+        pools={
+            "work": {"reserved": 2, "max": 4},
+            "external": {"max": 4, "priority": 1},
+            "lend": {"max": 2, "priority": 2},
+            "observed": {"max": 4, "priority": 3},
+        },
+        standing=[{"name": "vm", "pool": "external", "weight": 1}],
+        commands={
+            "defaults": False,
+            "rule": [{"programs": ["make"], "weight": 8, "pool": "external"}],
+        },
+    )
+    [rule] = agent.commands()["rules"]
+    assert (rule["pool"], rule["weight"]) == ("external", 1)
+    assert agent.acquire(req("external", weight=1), user="ann")["status"] == "granted"
+    assert agent.acquire(req("external", weight=2), user="bob")["status"] == "refused"
+
+
 def test_raising_a_pool_max_admits_what_now_fits(tmp_path):
     agent, _, _ = make_agent(tmp_path, ceiling={"slots": 4})  # external may use 2
     agent.tick()

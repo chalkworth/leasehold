@@ -100,22 +100,49 @@ class AdmissionPolicy:
         )
 
     def refusal(self, pool: str, weight: int) -> str | None:
-        """Why an item of `weight` could never be admitted to `pool`, or None if it could."""
+        """Why an item of `weight` could never be admitted to `pool`, or None if it could: it
+        is below 1, or it would not fit `pool` even with nothing held but the standing work
+        (whatever is capped now). Such an item would block its pool's line forever."""
         policy = self.pools.get(pool)
         if policy is None:
             return f"there is no pool {pool!r}"
         slots = self.slots.get(policy.host, 0)
+        if weight < 1:
+            return f"weight {weight} is below 1"
         if weight > policy.max:
             return f"weight {weight} is more than pool {pool!r}'s max {policy.max}"
         if weight > slots:
             return f"weight {weight} is more than the {slots} slots there are"
-        if self.standing and not fits(_Tally.of(State(), self), self, pool, weight):
-            held = sum(self.standing.values())
-            return (
-                f"weight {weight} cannot fit pool {pool!r} even on an idle machine: "
-                f"{held} slots are held by standing work"
-            )
-        return None
+        most = self.heaviest(pool)
+        if weight <= most:
+            return None
+        idle = _Tally.of(State(), self)
+        held = idle.host_used.get(policy.host, 0)
+        owed = _owed(idle, self, pool)
+        why = [
+            *([f"{held} are held by standing work"] if held else []),
+            *([f"{owed} are reserved for other pools"] if owed else []),
+        ]
+        return (
+            f"weight {weight} cannot fit pool {pool!r} even on an idle machine, which has room "
+            f"for {most}: of the {slots} slots, " + " and ".join(why)
+        )
+
+    def heaviest(self, pool: str) -> int:
+        """The most weight one item could ever be admitted with in `pool`: what fits it with
+        nothing held but the standing work, whatever is capped now. 0 for a pool there is not,
+        or one with no room at all."""
+        policy = self.pools.get(pool)
+        if policy is None:
+            return 0
+        idle = _Tally.of(State(), self)
+        by_pool = policy.max - idle.used.get(pool, 0)
+        by_host = (
+            self.slots.get(policy.host, 0)
+            - idle.host_used.get(policy.host, 0)
+            - _owed(idle, self, pool)
+        )
+        return max(0, min(by_pool, by_host))
 
 
 @dataclass(frozen=True)
@@ -208,13 +235,19 @@ def fits(tally: _Tally, policy: AdmissionPolicy, pool: str, weight: int) -> bool
     p = policy.pools[pool]
     if tally.used.get(pool, 0) + weight > top(policy, pool):
         return False
-    owed = sum(
+    free = policy.slots.get(p.host, 0) - tally.host_used.get(p.host, 0) - weight
+    return free >= _owed(tally, policy, pool)
+
+
+def _owed(tally: _Tally, policy: AdmissionPolicy, pool: str) -> int:
+    """The slots of `pool`'s host still owed to the other pools there: each one's reservation
+    less what it holds."""
+    host = policy.pools[pool].host
+    return sum(
         max(0, q.reserved - tally.used.get(name, 0))
         for name, q in policy.pools.items()
-        if name != pool and q.host == p.host
+        if name != pool and q.host == host
     )
-    free = policy.slots.get(p.host, 0) - tally.host_used.get(p.host, 0) - weight
-    return free >= owed
 
 
 #: A pool's line: user -> session -> that session's items, oldest first.
@@ -363,11 +396,7 @@ def blocker(
         return None
     slots = policy.slots.get(pool.host, 0)
     free = slots - tally.host_used.get(pool.host, 0)
-    owed = sum(
-        max(0, q.reserved - tally.used.get(name, 0))
-        for name, q in policy.pools.items()
-        if name != item.pool and q.host == pool.host
-    )
+    owed = _owed(tally, policy, item.pool)
     if free >= item.weight and owed:
         return f"{free} of {slots} slots are free, but {owed} are reserved for other pools"
     return f"{max(free, 0)} of {slots} slots are free; this needs {item.weight}"
