@@ -1,24 +1,31 @@
 """`leasehold hold -- cmd` with real child processes against a daemon on a real socket: the
 command's exit code comes through, the lease is held only while it runs and is described in the
 command's environment, a revoked lend lease stops the whole process group (SIGKILL after the
-grace for one that ignores SIGTERM), and a wait past `--timeout` exits 75 with its place in line
-given back."""
+grace for one that ignores SIGTERM), a wait past `--timeout` exits 75 with its place in line
+given back, an interrupt before the command runs gives back what was asked for, Ctrl-C on a
+terminal ends `hold` by SIGINT, and renewals ride out a daemon (`Relay`) that does not answer."""
 
 from __future__ import annotations
 
 import fcntl
+import http.server
+import json
 import os
+import signal
+import socketserver
 import subprocess
 import sys
 import termios
 import textwrap
+import threading
 import time
 from pathlib import Path
 
+import pytest
 from support import CHILD_ENV, until
 
 from leasehold import hold as hold_module
-from leasehold.client import Client
+from leasehold.client import ApiError, Client
 from leasehold.exits import EXIT_BUSY, EXIT_REFUSED, EXIT_REVOKED, EXIT_UNAVAILABLE
 from leasehold.hold import waiting_line
 
@@ -287,3 +294,208 @@ def test_ctrl_z_stops_hold_with_the_command_and_fg_continues_both(daemon):
     """)
     assert code == 0, out
     assert "stopped True True" in out and "fg True True" in out and "exit 0" in out, out
+
+
+def no_traceback(proc: subprocess.Popen) -> str:
+    err = proc.stderr.read()
+    assert "Traceback" not in err, err
+    return err
+
+
+@pytest.mark.parametrize(("sig", "ends"), [(signal.SIGINT, -signal.SIGINT), (signal.SIGTERM, 143)])
+def test_an_interrupt_while_waiting_gives_the_place_in_line_back(daemon, sig, ends):
+    client = Client(daemon.path)
+    client.acquire(kind="work", weight=2, ttl_s=30)
+    proc = hold(daemon.path, "--", "true", wait=False)
+    until(lambda: client.leases()["queue"])
+    proc.send_signal(sig)
+    assert proc.wait(timeout=15) == ends  # SIGINT ends it by SIGINT, so a shell loop stops
+    assert "interrupted" in no_traceback(proc)
+    assert client.leases()["queue"] == []
+
+
+def test_ctrl_c_while_acquire_waits_gives_the_place_back_without_a_traceback(daemon):
+    client = Client(daemon.path)
+    client.acquire(kind="work", weight=2, ttl_s=30)
+    argv = [sys.executable, "-m", "leasehold", "--socket", str(daemon.path), "acquire"]
+    proc = subprocess.Popen(
+        [*argv, "--lease-id", "a"], env=CHILD_ENV, stderr=subprocess.PIPE, text=True
+    )
+    until(lambda: client.leases()["queue"])
+    proc.send_signal(signal.SIGINT)
+    assert proc.wait(timeout=15) == -signal.SIGINT
+    no_traceback(proc)
+    assert client.leases()["queue"] == []
+
+
+#: Runs `hold` with a scope prefix that never answers (its pid in `argv[2]`), so an interrupt
+#: arrives while the command is being started; the command would make `argv[3]`.
+STARTING = """
+import sys
+from leasehold import hold
+from leasehold.client import Client
+sock, pidfile, ran = sys.argv[1:4]
+started = f"echo $$ > {pidfile}.new; mv {pidfile}.new {pidfile}; exec sleep 30"
+hold.scope_prefix = lambda *_: ["sh", "-c", started, "--"]
+sys.exit(hold.hold(Client(sock), ["sh", "-c", f"touch {ran}"], weight=1))
+"""
+
+
+@pytest.mark.parametrize(("sig", "ends"), [(signal.SIGINT, -signal.SIGINT), (signal.SIGTERM, 143)])
+def test_an_interrupt_while_the_command_starts_stops_it_and_gives_the_lease_back(
+    daemon, tmp_path, sig, ends
+):
+    pidfile, ran = tmp_path / "prefix.pid", tmp_path / "ran"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", STARTING, str(daemon.path), str(pidfile), str(ran)],
+        env=CHILD_ENV, stderr=subprocess.PIPE, text=True,
+    )  # fmt: skip
+    until(pidfile.exists)
+    started = time.monotonic()
+    proc.send_signal(sig)
+    assert proc.wait(timeout=15) == ends
+    assert time.monotonic() - started < 10  # not the 30 s a scope is waited for
+    assert "interrupted" in no_traceback(proc)
+    assert not alive(int(pidfile.read_text()))
+    assert not ran.exists()
+    assert Client(daemon.path).leases() == {"leases": [], "queue": []}
+
+
+DIES_OF_SIGINT = "import os, signal; signal.signal(signal.SIGINT, signal.SIG_DFL); os.kill(0, 2)"
+
+
+def test_without_a_terminal_a_command_killed_by_sigint_exits_130(daemon):
+    proc = hold(daemon.path, "--", sys.executable, "-c", DIES_OF_SIGINT)
+    assert proc.returncode == 130, proc.stderr.read()
+
+
+def test_ctrl_c_on_a_terminal_ends_hold_by_sigint_once_the_lease_is_given_back(daemon, tmp_path):
+    ready = tmp_path / "ready"
+    sleeper = f"import pathlib, time; pathlib.Path({str(ready)!r}).touch(); time.sleep(30)"
+    code, out = on_a_terminal(f"""
+        import os, pathlib, signal, subprocess, sys, time
+        hold = [sys.executable, "-m", "leasehold", "--socket", {str(daemon.path)!r}, "hold"]
+        job = subprocess.Popen([*hold, "--", sys.executable, "-c", {sleeper!r}])
+        deadline = time.monotonic() + 20
+        while not pathlib.Path({str(ready)!r}).exists() or os.tcgetpgrp(0) == os.getpgrp():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        os.killpg(os.tcgetpgrp(0), signal.SIGINT)  # Ctrl-C: to the terminal's foreground group
+        print("exit", job.wait(timeout=20), "back", os.tcgetpgrp(0) == os.getpgrp())
+    """)
+    assert code == 0, out
+    assert f"exit {-signal.SIGINT} back True" in out, out
+    assert Client(daemon.path).leases() == {"leases": [], "queue": []}
+
+
+class Relay:
+    """A daemon's stand-in on `path`: each request goes on to the daemon at `target`, unless
+    `answer(path, body)` gives an answer of its own (a dict), or `STALL` to give none. The paths
+    asked for, in order, are in `asked`."""
+
+    STALL = "stall"
+
+    def __init__(self, path: Path, target: Path, answer) -> None:
+        relay = self
+        self.path = path
+        self.answer = answer
+        self.asked: list[str] = []
+        self.released = threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args) -> None:
+                pass
+
+            def _serve(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length)) if length else None
+                relay.asked.append(self.path)
+                answer = relay.answer(self.path, body)
+                if answer == Relay.STALL:
+                    relay.released.wait(30)
+                    return
+                status = 200
+                if answer is None:
+                    try:
+                        answer = Client(target).request(self.command, self.path, body)
+                    except ApiError as exc:
+                        status, answer = exc.status, exc.payload
+                data = json.dumps(answer).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_POST = _serve
+
+        self.server = socketserver.ThreadingUnixStreamServer(str(path), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def count(self, path: str) -> int:
+        return self.asked.count(path)
+
+    def close(self) -> None:
+        self.released.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def relay(daemon, sock_dir):
+    """`relay(answer)`: a `Relay` to `daemon` on a socket of its own, closed afterwards."""
+    made: list[Relay] = []
+
+    def make(answer) -> Relay:
+        made.append(Relay(sock_dir / f"relay{len(made)}.sock", daemon.path, answer))
+        return made[-1]
+
+    yield make
+    for r in made:
+        r.close()
+
+
+def test_a_renewal_left_unanswered_does_not_cost_a_lend_lease(relay):
+    def stall_the_first_renewal(path, _body):
+        return Relay.STALL if path == "/v1/renew" and r.count(path) == 1 else None
+
+    r = relay(stall_the_first_renewal)
+    proc = hold(r.path, "--kind", "lend", "--ttl", "3", "--", "sleep", "4")
+    assert proc.returncode == 0, proc.stderr.read()
+    assert r.count("/v1/renew") >= 2, r.asked
+
+
+def test_a_stopping_group_renews_its_lease_every_ttl_third_not_faster(relay):
+    r = relay(lambda _path, _body: None)
+    leftover = "trap '' TERM; sleep 30 & exit 0"  # what is left ignores SIGTERM: the full grace
+    proc = hold(r.path, "--ttl", "3", "--grace", "2", "--", "sh", "-c", leftover)
+    assert proc.returncode == 0, proc.stderr.read()
+    assert r.count("/v1/renew") <= 4, r.asked
+
+
+@pytest.mark.parametrize(
+    ("again", "said"),
+    [
+        ({"status": "refused", "reason": "too heavy now"}, "now refuses it (too heavy now)"),
+        ({"status": "queued", "position": 1}, "waiting in line (place 1)"),
+    ],
+)
+def test_a_lost_work_lease_asked_for_again_says_the_answer_once(relay, again, said):
+    def lost(path, _body):
+        if path == "/v1/renew":
+            return {"status": "unknown"}
+        if path == "/v1/acquire" and r.count(path) > 1:
+            return again
+        return None
+
+    r = relay(lost)
+    proc = hold(r.path, "--ttl", "0.6", "--", "sleep", "2")
+    err = proc.stderr.read()
+    assert proc.returncode == 0, err
+    assert err.count(said) == 1, err
+    asked_again = r.count("/v1/acquire") - 1
+    if again["status"] == "refused":
+        assert asked_again == 1 and r.count("/v1/renew") == 1, r.asked  # not asked again
+    else:
+        assert asked_again >= 3, r.asked  # each renewal asks again, keeping the place

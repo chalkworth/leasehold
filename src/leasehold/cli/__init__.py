@@ -5,13 +5,15 @@ Each module here registers one group of subcommands (`register`) and handles the
 (`serve`, `init`, `doctor`, `observe`), `leases` (`hold`, `acquire`, `keep`, `release`),
 `views` (`status`, `leases`, `facts`, `ui`, `metrics`), `watch` (`top`), `admin` (`lend`,
 `pool`), `push` (`report`), `hooks` (`commands`, `hook`, `shims`), `agents` (`mcp`) and
-`demo`. A handler takes the parsed arguments and a `Context`, and returns the exit code.
+`demo`. A handler takes the parsed arguments and a `Context`, and returns the exit code. A
+command that Ctrl-C (SIGINT) interrupts ends by SIGINT, with no traceback (`exits.end_by`).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -19,7 +21,7 @@ from pathlib import Path
 
 from leasehold import __version__, discovery, paths
 from leasehold.client import Client
-from leasehold.exits import EXIT_UNAVAILABLE
+from leasehold.exits import EXIT_UNAVAILABLE, end_by
 
 # The commands `leasehold --help` lists, in this order. Every other command still works and
 # is named in the help's closing line. A command listed here that no module registers is
@@ -148,4 +150,7 @@ def _also_after_the_command(parser: argparse.ArgumentParser, names: Sequence[str
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    return args.run(args, Context(socket=args.socket, config=args.config))
+    try:
+        return args.run(args, Context(socket=args.socket, config=args.config))
+    except KeyboardInterrupt:
+        return end_by(signal.SIGINT)

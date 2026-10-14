@@ -15,7 +15,7 @@ import threading
 import time
 
 import pytest
-from support import CHILD_ENV, FACTS, FakeLoad, machine_config
+from support import CHILD_ENV, FACTS, FakeLoad, machine_config, until
 
 import leasehold
 from leasehold import ledger as ledger_module
@@ -170,6 +170,23 @@ def test_a_blocking_acquire_is_granted_as_soon_as_capacity_frees(daemon):
     waiter.join(timeout=10)
     assert answers[0]["status"] == "granted"
     assert time.monotonic() - started < 5
+
+
+def test_a_place_given_back_during_a_blocking_acquire_ends_it_and_stays_given_back(daemon):
+    client = Client(daemon.path)
+    client.acquire(kind="work", weight=2, lease_id="big")
+    answers = []
+    waiter = threading.Thread(
+        target=lambda: answers.append(client.acquire(kind="work", lease_id="next", wait_s=10))
+    )
+    started = time.monotonic()
+    waiter.start()
+    until(lambda: client.leases()["queue"])
+    client.release("next")  # as a waiter interrupted while its request is still being served
+    waiter.join(timeout=10)
+    assert answers[0]["status"] == "refused" and "given back" in answers[0]["reason"]
+    assert time.monotonic() - started < 5
+    assert client.leases()["queue"] == []
 
 
 def test_a_blocking_acquire_answers_queued_when_its_wait_is_up(daemon):

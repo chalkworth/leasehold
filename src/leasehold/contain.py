@@ -250,13 +250,19 @@ _TRAMPOLINE = (
 SCOPE_TIMEOUT_S = 30.0
 
 
+class Cancelled(Exception):
+    """`spawn` stopped waiting for a scope because its `cancel_fd` turned readable: the command
+    has not run, and what was started for it has been killed."""
+
+
 def spawn(
-    argv: Sequence[str], prefix: Sequence[str] | None, **popen
+    argv: Sequence[str], prefix: Sequence[str] | None, *, cancel_fd: int | None = None, **popen
 ) -> tuple[subprocess.Popen, str | None]:
     """Start `argv` (with `subprocess.Popen`'s `popen` arguments) in the scope `prefix` makes,
     or as is when there is no prefix. When the scope cannot be made, the command has not run,
-    and it is started as is instead. The process, and why it is not contained when a scope was
-    asked for and could not be made (None otherwise)."""
+    and it is started as is instead. When `cancel_fd` turns readable before the scope is made,
+    raises `Cancelled`. The process, and why it is not contained when a scope was asked for and
+    could not be made (None otherwise)."""
     if not prefix:
         return subprocess.Popen(list(argv), **popen), None
     read_end, write_end = os.pipe()
@@ -265,9 +271,10 @@ def spawn(
         child = subprocess.Popen([*prefix, *trampoline], pass_fds=(write_end,), **popen)
     finally:
         os.close(write_end)
+    waited = [read_end] if cancel_fd is None else [read_end, cancel_fd]
     try:
-        ready, _, _ = select.select([read_end], [], [], SCOPE_TIMEOUT_S)
-        started = bool(ready) and os.read(read_end, 1) == b"x"
+        ready, _, _ = select.select(waited, [], [], SCOPE_TIMEOUT_S)
+        started = read_end in ready and os.read(read_end, 1) == b"x"
     finally:
         os.close(read_end)
     if started:
@@ -275,5 +282,7 @@ def spawn(
     if child.poll() is None:  # no answer in time: the command has not run, and now never will
         child.kill()
     code = child.wait()
+    if cancel_fd is not None and cancel_fd in ready:
+        raise Cancelled
     why = f"no systemd scope (systemd-run exited {code}); running uncontained"
     return subprocess.Popen(list(argv), **popen), why
