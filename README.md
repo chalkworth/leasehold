@@ -69,36 +69,36 @@ In Claude Code, the plugin does the same through a hook, without the shims:
 
 ## What it promises
 
-leasehold decides **when** a command starts and **how much** of the machine it may use while it
-runs. It never decides what runs, and it only touches the processes it started itself.
+leasehold decides when a command starts and how much of the machine it may use while it runs.
+It never decides what runs, and it only touches the processes it started itself.
 
-- **Leases.** A heavy command takes a lease on slots (one slot per CPU, a few kept back for you)
-  before it starts and gives it back when it ends. The kept CPUs are kept from commands that
-  run the job count they are given; one that ignores it can still fill every CPU unless
-  `[contain] hard_cpu = true` caps it (`leasehold doctor` warns while it is off); a holder that crashes gives it back within
-  seconds. Turns go round fairly by user, then by agent session, so one busy agent cannot starve
-  the others.
-- **Sized commands.** The lease's size reaches the command as the job-count variables that
-  cargo, make, ninja, CMake, pytest-xdist, Go and others read, and optionally a GNU make
-  jobserver shared by the whole build tree.
-- **Contained, where systemd allows it.** With a systemd user manager (most desktop and server
-  distributions), each command runs in a user scope with `CPUWeight` in proportion to its lease
-  and, when a rule says so, a `MemoryHigh`. `leasehold doctor` says whether this machine is
-  `enforced (systemd)` or `advisory`, and why. Advisory means the lease and sizing still apply,
-  but a command that ignores its job count is not held back.
-- **Memory.** A command can declare the memory it will use (`hold --memory`, or its rule's
-  `memory`), and declared sizes are counted against a budget: the machine's memory less a share
-  kept for you. A command that declares nothing counts a share in proportion to its weight, which
-  never holds back more than the slots already do, so the budget only binds declared and
-  standing memory. When memory pressure rises, nothing new starts until it eases, and then only
-  within the memory measured free. Other programs' memory is not counted: the guard reacts to
-  it once it shows as pressure ([measured](docs/bench.md#the-03-defaults)).
-- **Clean ends.** `leasehold run` puts the agent's session in a slice of its own and stops what
-  it leaves behind (a stray test server, a hung build) when the agent exits.
+- A heavy command takes a lease on slots (one slot per CPU, a few kept back for you) before it
+  starts and gives it back when it ends. A holder that crashes gives it back within seconds.
+  Commands that run the job count they are given stay off the kept CPUs; one that ignores it
+  can still fill every CPU unless `[contain] hard_cpu = true` caps it (`leasehold doctor` warns
+  while it is off). Turns go round fairly by user, then by agent session, so one busy agent
+  cannot starve the others.
+- The lease's size reaches the command as the job-count variables that cargo, make, ninja,
+  CMake, pytest-xdist, Go and others read, and optionally as a GNU make jobserver shared by the
+  whole build tree.
+- Where there is a systemd user manager (most desktop and server distributions), each command
+  runs in a user scope with `CPUWeight` in proportion to its lease and, when a rule says so, a
+  `MemoryHigh`. `leasehold doctor` says whether this machine is `enforced (systemd)` or
+  `advisory`, and why. Advisory means the lease and sizing still apply, but a command that
+  ignores its job count is not held back.
+- A command can declare the memory it will use (`hold --memory`, or its rule's `memory`), and
+  declared sizes are counted against a budget: the machine's memory less a share kept for you.
+  A command that declares nothing counts a share in proportion to its weight, which never holds
+  back more than the slots already do, so the budget only binds declared and standing memory.
+  When memory pressure rises, nothing new starts until it eases, and then only within the
+  memory measured free. Other programs' memory is not counted: the guard reacts to it once it
+  shows as pressure ([measured](docs/bench.md#the-03-defaults)).
+- `leasehold run` puts the agent's session in a slice of its own and stops what it leaves
+  behind (a stray test server, a hung build) when the agent exits.
 
 ## How it compares
 
-The first question is a fair one: why not just a systemd slice, or `nice`?
+The first question is why not a systemd slice, or `nice`; the first row answers it.
 
 | Tool | What it does | Next to leasehold |
 |---|---|---|
@@ -120,11 +120,11 @@ example of each.
 
 ## What it is not
 
-- **Not a scheduler.** It never runs, places or retries your jobs.
-- **Not a sandbox.** Containment shares CPU by weight and throttles memory softly; it does not
+- It is not a scheduler: it never runs, places or retries your jobs.
+- It is not a sandbox. Containment shares CPU by weight and throttles memory softly; it does not
   stop a command from using an idle machine, and it cannot prevent every out-of-memory kill.
   Without a systemd user manager, it is advisory only.
-- **One machine, Linux only.** It reads `/proc/pressure` and uses cgroup v2.
+- It runs on one machine, Linux only. It reads `/proc/pressure` and uses cgroup v2.
 
 ## Stability
 
