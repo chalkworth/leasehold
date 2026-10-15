@@ -610,3 +610,35 @@ def test_how_long_a_short_head_has_waited_is_measured_on_the_monotonic_clock(tmp
         wall.now -= 3600
         agent.tick()
         assert ask(agent, "small-2", user="bob")["status"] == "queued"  # it holds the pool
+
+
+def test_the_overdue_stamps_are_safe_from_several_threads(tmp_path):
+    """`policy()` runs unlocked from status and the views while acquire runs it under the lock:
+    two threads forgetting the same item that left the line must not race (a race is a
+    KeyError, a 500 in the daemon). A slow delete opens the window every time."""
+    import threading
+    import time
+
+    class SlowDelete(dict):
+        def __delitem__(self, key):
+            time.sleep(0.05)
+            super().__delitem__(key)
+
+    agent, _, _ = make_agent(tmp_path, memory={}, **FOUR)
+    agent._queued_at = SlowDelete({("leasehold", "gone"): 0.0})  # no longer in line
+    start = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def overdue() -> None:
+        start.wait()
+        try:
+            agent._overdue()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=overdue) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and dict(agent._queued_at) == {}

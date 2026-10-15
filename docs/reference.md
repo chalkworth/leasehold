@@ -127,8 +127,9 @@ what new work may start depends on whether memory is counted:
   starts as soon as its memory fits. One whose turn it is but that does not fit what is free,
   though its slots and the budget would take it, does not hold up its pool: lighter work behind
   it that fits may start (its own session's later work keeps waiting behind it), until it has
-  waited `settle_s`; after that it holds up its pool, so a stream of small requests cannot keep
-  it waiting. A daemon started again counts a lease granted within `settle_s` of the restart
+  waited `settle_s`; after that it holds up its pool, so a stream of small requests in its pool
+  cannot keep it waiting (other pools' requests may still start around it, as with slots
+  alone). A daemon started again counts a lease granted within `settle_s` of the restart
   as recent; observed leases are not counted (their memory is already out of what is
   available). What waits
   says "memory is short". The settling and the settle window are measured on a clock that never

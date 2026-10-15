@@ -110,7 +110,8 @@ listed under "May reject" applies with or without it. The built-in rules keep th
   whose turn it is that fails only the memory measured free no longer holds up its pool:
   lighter items behind it that fit may start, its own session's later items still wait, but
   only until it has waited `settle_s`: after that it holds up its pool like any other item
-  whose turn it is, so a stream of small items cannot keep it waiting. How long it has waited
+  whose turn it is, so a stream of small items in its own pool cannot keep it waiting (other
+  pools' items may still start around it, as with slots alone). How long it has waited
   is measured on the monotonic clock from when the daemon first saw it in line (its
   wall-clock `queued_at` taken back from that moment), so a step of the wall clock changes
   nothing.

@@ -219,16 +219,18 @@ class MachineAgent:
         """The waiting items that have waited longer than `settle_s`, measured on `_monotonic`:
         short only of the memory free, they stop letting the items behind them start. Each is
         stamped when first seen waiting, at its wall-clock `queued_at` taken back from now (no
-        later than now), so a step of the wall clock after that moves nothing."""
-        wall, mono = self._clock(), self._monotonic()
-        live = {(r["scope"], r["item_id"]): r["queued_at"] for r in self.ledger.queued()}
-        for key, queued_at in live.items():
-            if key not in self._queued_at:
-                self._queued_at[key] = mono - max(0.0, wall - queued_at)
-        for key in self._queued_at.keys() - live.keys():
-            del self._queued_at[key]
-        since = mono - self.config.guard.settle_s
-        return frozenset(k for k, at in self._queued_at.items() if at < since)
+        later than now), so a step of the wall clock after that moves nothing. Under the lock:
+        `policy()` runs from threads that do not hold it."""
+        with self._lock:
+            wall, mono = self._clock(), self._monotonic()
+            live = {(r["scope"], r["item_id"]): r["queued_at"] for r in self.ledger.queued()}
+            for key, queued_at in live.items():
+                if key not in self._queued_at:
+                    self._queued_at[key] = mono - max(0.0, wall - queued_at)
+            for key in self._queued_at.keys() - live.keys():
+                del self._queued_at[key]
+            since = mono - self.config.guard.settle_s
+            return frozenset(k for k, at in self._queued_at.items() if at < since)
 
     def _note_grants(self) -> None:
         """Note when each lease granted since the last call was first seen; forget ended ones."""

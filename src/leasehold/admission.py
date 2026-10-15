@@ -43,8 +43,9 @@ never as running, so per-user limits and whose turn it is stay a matter of real 
   this allowance (its slots and the budget would take it) waits without blocking its pool:
   the items behind it that fit the allowance may start, while its own session's later items
   keep waiting behind it. An item in `memory_overdue` (one that has waited long enough) does
-  not: it blocks its pool as any item whose turn it is does, so a stream of small items cannot
-  keep it waiting for ever.
+  not: it blocks its pool as any item whose turn it is does, so a stream of small items in its
+  own pool cannot keep it waiting for ever. (Items in other pools on the host may still start
+  around it, as with slots alone.)
 
 A host with no budget counts no memory at all: with none given anywhere, every rule above is
 the slots' alone, exactly as before memory was counted.
