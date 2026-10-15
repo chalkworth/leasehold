@@ -223,15 +223,25 @@ and says so; `leasehold init` writes a commented config sized for the machine to
 3 to 7 CPUs), two pools (`work` for your agents and commands, `background` for `--kind
 external`, which never takes work's reserved half), no lending, memory counted against
 three quarters of the machine's (`[memory]`), the memory guard on, and the built-in build and
-test rules at half the slots (`[commands] heavy_weight`; all of them below 4 slots), so two
-builds or test runs run at once: on 8 CPUs, 6 slots and weight 3.
+test rules at their weight of 4, so on 8 CPUs (6 slots) one build or test run runs at a time.
+
+The two kept CPUs are kept only from commands that run as many jobs as their lease gives them
+(`MAKEFLAGS`, `CARGO_BUILD_JOBS` and the others under [Containment](#containment)); a tool that
+ignores the job count can still fill every CPU. `[contain] hard_cpu = true` caps each contained
+command at its weight in CPUs; it is off by default, and `leasehold doctor` warns while it is.
+
+**Two at once (opt-in).** `[commands] heavy_weight = 3` and `light_weight = 2` (on 6 slots; the
+generated config shows the values for its slots, commented out) let two builds or test runs
+run at once, each with fewer jobs. A command that declares no memory is then counted at its
+weight times the budget over the slots, which may be less than it uses: declare memory for
+memory-heavy work (a rule's `memory`, or `hold --memory`), or two large builds can overlap.
+[Measured](bench.md#two-heavy-jobs-at-once-opt-in).
 
 #### Upgrading a 0.2 config
 
-`setup` never changes a config that is there, so one that leasehold 0.2 wrote keeps 0.2's
-defaults after an upgrade: no memory counted, and the built-in rules at weights 4 and 2 where
-today's config sets them for the slots (on 6 or 7 slots, 4 lets one build or test run at a
-time). Both are optional. For a config that names `mode = "user"`, `leasehold doctor` (check
+`setup` never changes a config that is there, so one that leasehold 0.2 wrote keeps counting no
+memory after an upgrade (the guard then holds pools to their reservations). The `[memory]`
+table is optional. For a config that names `mode = "user"`, `leasehold doctor` (check
 `defaults`) and `leasehold setup` say what it lacks.
 
 ```sh
@@ -241,11 +251,9 @@ systemctl --user restart leasehold
 ```
 
 A config exactly as 0.2's `init` wrote it is written afresh from today's template for the same
-machine (name, slots, CPUs, per-lease memory). One you have edited keeps every line, and gains
-only `heavy_weight` and `light_weight` under `[commands]` and a `[memory]` table at the end
-(and today's comment above `[guard]`, if 0.2's is there unchanged). A `[commands]` written as
-an inline table or dotted keys is not edited: the command says what to add by hand. `--config
-PATH` upgrades another file.
+machine (name, slots, CPUs, per-lease memory; the built-in rules keep their weights). One you
+have edited keeps every line, and gains only a `[memory]` table at the end (and today's comment
+above `[guard]`, if 0.2's is there unchanged). `--config PATH` upgrades another file.
 
 It refuses (exit 1, saying what to do) a config that is a symbolic link or has other hard
 links, one with a `[[commands.rule]]` declaring more memory than the new budget or `[ceiling]
@@ -369,10 +377,12 @@ the lease, so the lease holds the command back instead of only counting it:
 - `CPUWeight` is 100 × the weight. Weights share the CPU among siblings when it is contended,
   and leave any CPU nobody else wants to whoever wants it: a weight-4 command gets four times
   the CPU of a weight-1 command beside it. All of leasehold's scopes sit in `leasehold.slice`,
-  which shares with the rest of your session as one ordinary unit, so leased work cannot crowd
-  out your shell and editor; inside it, each `leasehold run` session's slice shares equally
-  with the others. `[contain] hard_cpu = true` also caps each command at weight CPUs
-  (`CPUQuota`).
+  which shares with the rest of your session as one ordinary unit; inside it, each `leasehold
+  run` session's slice shares equally with the others. Weights decide shares only when the CPU
+  is contended: a command that ignores its job count still runs on every idle CPU, the ones
+  kept for you included, and on this benchmark's machine weights did not keep a shell's wakeup
+  latency down ([bench](bench.md)). `[contain] hard_cpu = true` caps each command at weight
+  CPUs (`CPUQuota`); it is off by default, and `leasehold doctor` warns while it is.
 - `hold --memory 4g`, or a rule's `memory`, sets `MemoryHigh`: past it the kernel throttles the
   command and reclaims its memory. It is soft. It never kills, and it does not bound the
   command outright: nothing sets `MemoryMax`, and the machine can still run out of memory.
@@ -532,8 +542,8 @@ their arguments must contain:
 [commands]
 wait_s = 300           # how long an agent's hook or a shim waits in line (at most 540)
 when_busy = "deny"     # then: "deny" the command, or "run" it without a lease and say so
-heavy_weight = 3       # the built-in build and test rules' weight
-light_weight = 2       # the built-in JavaScript tooling rules' weight
+# heavy_weight = 3     # the built-in build and test rules' weight (default 4)
+# light_weight = 2     # the built-in JavaScript tooling rules' weight (default 2)
 
 [[commands.rule]]
 programs = ["pytest"]
@@ -551,8 +561,8 @@ The config's rules are tried first, then the built-in ones (`defaults = false` d
 pytest, tox and nox; cargo build, test, check, clippy, bench, run and doc; make, ninja and
 bazel; `cmake --build`; go build and test; mvn and gradle; docker and podman build; npm, pnpm,
 yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. The
-builds and test runs weigh `heavy_weight` (4 without the key; the config `init` writes sets
-half the slots), the JavaScript tooling `light_weight` (2; `init`: half of heavy, rounded up).
+builds and test runs weigh `heavy_weight` (4), the JavaScript tooling `light_weight` (2); lower
+them to run more at once ([two at once](#your-own-daemon), opt-in).
 A weight is both what a command costs in slots and the job count it is given. Among
 one source's rules the heaviest match wins. The daemon clamps each weight to the most its pool
 could ever grant one lease, beside the other pools' reservations and standing work. `leasehold commands` lists the rules; `leasehold commands --test "CMD"` says which

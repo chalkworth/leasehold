@@ -170,7 +170,7 @@ def test_the_built_in_weights_come_from_the_config():
     from leasehold import template
 
     weights = {r.programs[0]: r.weight for _src, r in CommandSettings().rules()}
-    assert weights["pytest"] == 4 and weights["npm"] == 2  # 0.2's, without the keys
+    assert weights["pytest"] == 4 and weights["npm"] == 2  # without the keys
     set_ = CommandSettings(heavy_weight=3, light_weight=1)
     weights = {r.programs[0]: r.weight for _src, r in set_.rules()}
     assert weights["pytest"] == weights["cargo"] == weights["make"] == 3

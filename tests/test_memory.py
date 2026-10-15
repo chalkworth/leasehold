@@ -312,3 +312,74 @@ def test_a_ledger_item_with_memory_out_of_range_is_a_value_error():
     for bad in (-1, MEMORY_MAX + 1, 2**63):
         with pytest.raises(ValueError, match="not between 0"):
             LedgerItem(**item, weight=1, memory=bad)
+
+
+def _generated(tmp_path, **contain):
+    """The config `init --user` writes for an 8-CPU, 16 GiB machine: 6 slots, work reserving
+    3, the built-in heavy rules at weight 4, memory counted."""
+    import tomllib
+
+    from leasehold import template
+
+    raw = tomllib.loads(template.sized("user", {"cpus_logical": 8, "memory_bytes": 16 * G}))
+    raw.pop("name")
+    if contain:
+        raw["contain"] = raw["contain"] | contain
+    return machine_config(tmp_path, **raw)
+
+
+def test_a_default_heavy_job_starts_under_the_guard_once_its_memory_fits(tmp_path):
+    """On the generated 6-slot config a build or test run weighs 4, more than work's 3 reserved
+    slots: under pressure it waits, and while the guard settles it starts as soon as the 8 GiB
+    it counts (4 slots at 2 GiB) fits what is free, before the guard goes off."""
+    from leasehold import doctor
+
+    config = _generated(tmp_path)
+    assert config.ceiling.slots == 6 and config.pool_set().pools["work"].reserved == 3
+    facts = {"cpus_logical": 8, "memory_bytes": 16 * G}
+    load, clock = FakeLoad(), Clock()
+    agent = MachineAgent(config, facts=facts, load=load, clock=clock)
+    pytest_rule = next(r for r in agent.commands()["rules"] if "pytest" in r["programs"])
+    assert pytest_rule["weight"] == 4
+    assert doctor.check_guard_weights(config, 16 * G) is None
+    load.set(memory=50.0)
+    agent.tick()
+    answer = ask(agent, "build", weight=4)
+    assert answer["status"] == "queued"
+    assert "nothing new starts" in answer["blocked"]
+    load.set(memory=0.0)
+    load.available = 8 * G  # 7.2 GiB above the floor: not yet
+    clock.now += 2
+    agent.tick()
+    [waiting] = agent.status()["queue"]
+    assert "may start now; this counts 8.0 GiB" in waiting["blocked"]
+    load.available = 10 * G
+    clock.now += 2
+    agent.tick()
+    assert [x["lease_id"] for x in agent.leases()["leases"]] == ["build"]
+    assert agent.guard.on
+
+
+def test_doctor_says_the_kept_cpus_are_kept_only_from_well_behaved_tools(tmp_path):
+    from leasehold import doctor
+
+    check = doctor.check_hard_cpu(_generated(tmp_path))
+    assert check is not None and check.level == "warn"
+    assert "a tool that ignores it can still fill every CPU" in check.detail
+    assert "hard_cpu = true" in check.fix
+    assert doctor.check_hard_cpu(_generated(tmp_path, hard_cpu=True)) is None
+    system = machine_config(tmp_path, mode="system")
+    assert doctor.check_hard_cpu(system) is None
+
+
+def test_the_generated_config_runs_one_heavy_job_and_offers_two_as_an_opt_in(tmp_path):
+    from leasehold import template
+
+    config = _generated(tmp_path)
+    assert (config.commands.heavy_weight, config.commands.light_weight) == (4, 2)
+    assert "heavy_weight" not in config.commands.model_fields_set
+    text = template.sized("user", {"cpus_logical": 8, "memory_bytes": 16 * G})
+    assert "# heavy_weight = 3\n# light_weight = 2\n" in text
+    assert "declare memory for memory-heavy work" in " ".join(text.split("\n# "))
+    wide = template.sized("user", {"cpus_logical": 16, "memory_bytes": 16 * G})
+    assert "# heavy_weight" not in wide  # 14 slots run three at weight 4 already

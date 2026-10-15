@@ -703,13 +703,24 @@ def scope_argv(unit: str, spec: dict) -> list[str]:
     ]
 
 
+def runs(conditions: list[str], rounds: int) -> list[tuple[str, str]]:
+    """Each run as (condition, label): the conditions `rounds` times, every other round in
+    reverse so that no condition always runs first or last; labelled `<condition>-r<n>` when
+    there is more than one round."""
+    out = []
+    for n in range(1, rounds + 1):
+        order = conditions if n % 2 else conditions[::-1]
+        out += [(c, c if rounds == 1 else f"{c}-r{n}") for c in order]
+    return out
+
+
 def run_all(args, spec: dict, outdir: Path, log) -> list[dict]:
     rows = []
     vm0 = None
-    for condition in spec["conditions"]:
-        workdir = outdir / condition
+    for condition, label in runs(spec["conditions"], spec.get("rounds", 1)):
+        workdir = outdir / label
         workdir.mkdir(parents=True, exist_ok=True)
-        log(f"{condition}: {CONDITIONS[condition]}")
+        log(f"{label}: {CONDITIONS[condition]}")
         before = (
             wait_quiet(spec["machine"]["cpus"], args.max_wait, args.settle, log)
             if not args.no_wait
@@ -748,7 +759,7 @@ def run_all(args, spec: dict, outdir: Path, log) -> list[dict]:
             "oom_kill_machine": vm1.get("oom_kill", 0) - vm0.get("oom_kill", 0),
         }
         (workdir / "outer.json").write_text(json.dumps(extra, indent=1))
-        row = summarize_condition(workdir, condition)
+        row = summarize_condition(workdir, label)
         rows.append(row)
         log("  " + ", ".join(f"{k} {v}" for k, v in row.items() if k != "condition"))
     return rows
@@ -943,9 +954,9 @@ def main(argv: list[str] | None = None) -> int:
         outdir = Path(argv[1])
         spec = json.loads((outdir / "spec.json").read_text())
         rows = [
-            summarize_condition(outdir / c, c)
-            for c in spec["conditions"]
-            if (outdir / c / "outer.json").exists()
+            summarize_condition(outdir / label, label)
+            for _c, label in runs(spec["conditions"], spec.get("rounds", 1))
+            if (outdir / label / "outer.json").exists()
         ]
         print(write_summary(outdir, spec, rows))
         return 0
@@ -958,6 +969,12 @@ def main(argv: list[str] | None = None) -> int:
     preset.add_argument("--quick", action="store_true", help="about 2 minutes a condition")
     preset.add_argument("--tiny", action="store_true", help="a seconds-long smoke run")
     parser.add_argument("--conditions", default=",".join(DEFAULT_CONDITIONS))
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help="run the conditions this many times on one plan, every other round in reverse",
+    )
     parser.add_argument("--mem-gib", type=float, help="a mem job's size (default: 0.7 x RAM / 3)")
     parser.add_argument(
         "--cap-gib",
@@ -1054,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
         "preset_name": name,
         "preset": asdict(preset),
         "conditions": conditions,
+        "rounds": args.rounds,
         "plan": plan,
         "nominal_s": nominal,
         "rate_bytes_per_cpu_s": rate,

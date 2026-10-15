@@ -1,18 +1,15 @@
 """Bringing a user's config from leasehold 0.2 up to today's defaults, only when asked.
 
-0.2's `init` wrote a user's config (`mode = "user"`) with no `[memory]` table (memory not
-counted, and the guard holding pools to their reservations) and left the built-in rules at
-weights 4 and 2, where today's config sets them for the machine's slots
-(`leasehold.template.weights`). Both are optional: a config without them works as it did.
-`outdated` says what such a config lacks; `plan` works out the new text and `apply` writes it,
-the old file kept beside it first:
+0.2's `init` wrote a user's config (`mode = "user"`) with no `[memory]` table: memory not
+counted, and the guard holding pools to their reservations. The table is optional: a config
+without it works as it did. `outdated` says what such a config lacks; `plan` works out the new
+text and `apply` writes it, the old file kept beside it first:
 
 * a config exactly as 0.2's `init` wrote it is rendered afresh from today's template, for the
-  same name, slots, CPUs, per-lease memory and description;
-* any other keeps every line it has and gains only what it lacks: `heavy_weight` and
-  `light_weight` under `[commands]`, and a `[memory]` table at the end. A `[commands]` written
-  other than as a `[commands]` header (a dotted key, an inline table) is not edited: `plan`
-  says what to add by hand instead;
+  same name, slots, CPUs, per-lease memory and description (the built-in rules keep their
+  weights);
+* any other keeps every line it has and gains only a `[memory]` table at the end (and today's
+  comment above `[guard]`, if 0.2's is there unchanged);
 * neither is edited when a `[[commands.rule]]` declares more memory than the new budget or the
   `[ceiling]` memory, since a declared size is then refused, not only held to: `plan` names
   the rules to change first.
@@ -29,7 +26,6 @@ from __future__ import annotations
 import contextlib
 import difflib
 import os
-import re
 import tempfile
 import tomllib
 from dataclasses import dataclass
@@ -48,7 +44,6 @@ MEMORY_TABLE = (
     'kept = "25%"             # kept back for you: a share of the memory, or a size\n'
     'assumed_per_slot = "auto"\n'
 )
-_COMMANDS = re.compile(r"^\s*\[\s*commands\s*\]\s*(#.*)?$")
 #: 0.2's comment above `[guard]`, which no longer holds once memory is counted, and today's.
 GUARD_COMMENT_0_2 = (
     "# While memory is short, every pool admits only its reserved slots: what runs keeps running,\n"
@@ -71,42 +66,11 @@ def _lacks_memory(config: MachineConfig) -> bool:
     return _user(config) and config.memory is None
 
 
-def _unset_weights(config: MachineConfig) -> list[str]:
-    return [
-        key
-        for key in ("heavy_weight", "light_weight")
-        if key not in config.commands.model_fields_set
-    ]
-
-
-def _lacks_weights(config: MachineConfig) -> bool:
-    """Whether the built-in rules' weights are left unset where the ones they fall back to
-    differ from what today's config sets for the machine's slots."""
-    commands = config.commands
-    return (
-        _user(config)
-        and commands.defaults
-        and bool(_unset_weights(config))
-        and (commands.heavy_weight, commands.light_weight) != template.weights(config.ceiling.slots)
-    )
-
-
 def outdated(config: MachineConfig) -> list[str]:
     """What a user's own config lacks of today's defaults, in words; empty when nothing, or
     when it does not name `mode = "user"` (the machine's config, which `init` never wrote
     this way, or one written by hand)."""
-    lacks = []
-    if _lacks_memory(config):
-        lacks.append("no [memory] table: memory is not counted")
-    if _lacks_weights(config):
-        c = config.commands
-        heavy, light = template.weights(config.ceiling.slots)
-        lacks.append(
-            f"the built-in rules weigh {c.heavy_weight} (builds and test runs) and "
-            f"{c.light_weight} (JavaScript tooling); for {config.ceiling.slots} slots today's "
-            f"config sets {heavy} and {light}"
-        )
-    return lacks
+    return ["no [memory] table: memory is not counted"] if _lacks_memory(config) else []
 
 
 @dataclass(frozen=True)
@@ -153,16 +117,6 @@ def _pristine(config: MachineConfig, text: str) -> bool:
         ) == text
         for release in template.USER_0_2
     )  # fmt: skip
-
-
-def _weights_lines(config: MachineConfig) -> str:
-    heavy, light = template.weights(config.ceiling.slots)
-    values = {"heavy_weight": heavy, "light_weight": light}
-    return (
-        "# The built-in rules' weights (added by `leasehold setup --upgrade-config`): builds and\n"
-        "# test runs, and JavaScript tooling.\n"
-        + "".join(f"{key} = {values[key]}\n" for key in _unset_weights(config))
-    )
 
 
 def _identity(path: Path) -> tuple[int, int, int, int]:
@@ -212,13 +166,10 @@ def _oversized_rules(config: MachineConfig, memory_bytes: int | None) -> list[st
 
 def manual_steps(config: MachineConfig) -> str:
     """What to add by hand, for a config `plan` will not edit."""
-    heavy, light = template.weights(config.ceiling.slots)
-    steps = []
-    if _lacks_memory(config):
-        steps.append('a [memory] table (budget = "auto", kept = "25%", assumed_per_slot = "auto")')
-    if _lacks_weights(config):
-        steps.append(f"heavy_weight = {heavy} and light_weight = {light} under [commands]")
-    return "add " + ", and ".join(steps) + "; docs/reference.md describes each"
+    return (
+        'add a [memory] table (budget = "auto", kept = "25%", assumed_per_slot = "auto"); '
+        "docs/reference.md describes it"
+    )
 
 
 def plan(path: Path, config: MachineConfig, memory_bytes: int | None = None) -> Plan | None:
@@ -247,30 +198,14 @@ def plan(path: Path, config: MachineConfig, memory_bytes: int | None = None) -> 
             name=config.name, mode="user", slots=c.slots, cpus=c.cpus, memory=c.memory,
             about=_about(old),
         )  # fmt: skip
-        heavy, light = template.weights(c.slots)
         changes = (
             "rewritten from today's template (it was exactly as leasehold 0.2 wrote it): "
-            f'[memory] budget = "auto", kept = "25%"; heavy_weight = {heavy}, '
-            f"light_weight = {light}; every other default and comment as today's",
+            '[memory] budget = "auto", kept = "25%"; every other default and comment as '
+            "today's",
         )
         return Plan(path, old, text, True, changes, identity=identity)
     text = old
     changes: list[str] = []
-    if _lacks_weights(config):
-        lines = text.splitlines(keepends=True)
-        at = next((i for i, line in enumerate(lines) if _COMMANDS.match(line)), None)
-        if at is None and "commands" in tomllib.loads(text):
-            return Plan(path, old, None, False, (), manual=manual_steps(config), identity=identity)
-        weights = _weights_lines(config)
-        if at is None:
-            if not text.endswith("\n"):
-                text += "\n"
-            text += "\n[commands]\n" + weights
-        else:
-            lines.insert(at + 1, weights)
-            text = "".join(lines)
-        added = " and ".join(line for line in weights.splitlines() if not line.startswith("#"))
-        changes.append(f"[commands] gains {added}")
     if _lacks_memory(config):
         if not text.endswith("\n"):
             text += "\n"

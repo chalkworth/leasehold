@@ -123,39 +123,99 @@ more.
   OOM kills in their 8-agent runs. A fixed `-j4` everywhere (`static-jobs`) did not help either:
   it makes each job smaller but not fewer, and at 8 agents it had the most swap and failures.
   What helped was deciding how many heavy jobs run at once.
-- **Where leasehold loses.** Throughput, and the time an agent waits: if you want the batch
-  done soonest and do not use the machine meanwhile, unmanaged or plain serialization with
-  greedy tools (`lh-enforced-greedy`) finished first. 0.2's default budget (2 CPUs kept, every
-  build weighing 4 of 6 slots) is cautious; the 0.3 defaults below run two at once. An agent
-  behind the Claude Code hook, which waits 20 s for a lease by default and then refuses, would
-  have been refused 38 times out of 52 at 8 agents (and 4 out of 25 at 4).
+- **Where leasehold loses.** Throughput, and the time an agent waits: if you want the batch done
+  soonest and do not use the machine meanwhile, unmanaged or plain serialization with greedy
+  tools (`lh-enforced-greedy`) finished first. 0.2's default budget (2 CPUs kept, every build
+  weighing 4 of 6 slots) is cautious, and 0.3 keeps it; two at once is an opt-in (below). An
+  agent behind the Claude Code hook, which waits 20 s for a lease by default and then refuses,
+  would have been refused 38 times out of 52 at 8 agents (and 4 out of 25 at 4).
 
-## Two heavy jobs at once: the 0.3 defaults
+## The 0.3 defaults
 
-The tables above use leasehold 0.2's generated config: 6 slots on 8 CPUs, every build or test
-run weighing 4, so one ran at a time. The config `init` writes now weighs them at half the slots
-(3 of 6 here, `[commands] heavy_weight`) and counts memory (`[memory]`, budget: the machine's
-memory less 25%, each slot assumed to use the budget over the slots), so two run at once while
-both fit. These runs measure that, on the same machine, 8 agents, 240 s plans.
+The config `init --user` writes in 0.3 keeps 0.2's weights (builds and test runs 4, so one at a
+time on 6 slots) and adds memory counting (`[memory]`: budget the machine's memory less 25%,
+each slot assumed to use the budget over the slots) and the memory guard that counts memory
+instead of capping pools. These runs set it against unmanaged and against the config 0.2
+wrote (`lh-enforced-v020`), on the same machine, 8 agents, 240 s plans.
 
-They are not directly comparable with the tables above. Other people's work was using about 6
-GiB of the machine's memory that day, so the benchmark's limit was lowered to 7 GiB (swap 2
-GiB) and the `mem` jobs to 2.5 GiB, which keeps the same shape: two overlapping `mem` jobs fit,
-three do not. `lh-enforced-v020` is the 0.2 config and weight 4, run in the same session for the
-comparison. The `budget 7g` row and the second greedy row ran later, in another and quieter
-session, each as its own invocation (53 jobs: the plan is sized by a calibration that came out
-slightly differently); the `7g` row set `[memory] budget = "7g"`, the memory the jobs had. Summaries: [`k8-full-d240-v030`](../bench/results/8cpu-16g/k8-full-d240-v030.md),
-[`k8-full-d240-v030-budget7g`](../bench/results/8cpu-16g/k8-full-d240-v030-budget7g.md),
-[`k8-memheavy-d240-v030`](../bench/results/8cpu-16g/k8-memheavy-d240-v030.md).
+Each mix ran as one invocation on one plan, every condition twice, the second round in reverse
+order (`--rounds 2`), so the conditions saw the same hours of the machine's other load. That
+load was not steady: about 6 GiB of the memory was in use by other people's work (so the
+benchmark's limit was 7 GiB, swap 2 GiB), the load average before each condition ranged from
+1.0 to 1.9, and the wakeup probe outside the benchmark varied with it between rounds. Read
+differences smaller than the spread between a condition's own two rounds as noise. Summaries:
+[`k8-full-d240-v030-rounds`](../bench/results/8cpu-16g/k8-full-d240-v030-rounds.md) (2.5 GiB
+`mem` jobs, 52 jobs) and
+[`k8-memheavy-d240-v030-rounds`](../bench/results/8cpu-16g/k8-memheavy-d240-v030-rounds.md)
+(3 GiB `mem` jobs, 53 jobs; `lh-enforced-declared` has each declare its size plus 512 MiB).
+
+Each cell gives round 1 / round 2.
+
+| condition | failed | makespan s | job mean s | wait mean s | wake p99 same ms | git p95 ms | swap-in MiB | PSI max % |
+|---|---|---|---|---|---|---|---|---|
+| unmanaged | 0 / 0 | 585 / 729 | 40.2 / 57.9 | 0.1 / 0.2 | 23.2 / 26.6 | 852 / 1218 | 3829 / 1681 | 31.6 / 27.3 |
+| 0.2 config | 0 / 0 | 841 / 842 | 63.4 / 63.3 | 49.4 / 49.2 | 3.6 / 6.3 | 101 / 141 | 532 / 19 | 0.2 / 0.0 |
+| 0.3 defaults | 0 / 0 | 834 / 892 | 62.2 / 69.6 | 48.3 / 54.6 | 3.5 / 9.2 | 108 / 236 | 223 / 284 | 0.0 / 5.6 |
+
+Memory-heavy mix:
+
+| condition | failed (OOM kills) | makespan s | job mean s | wait mean s | wake p99 same ms | git p95 ms | swap-in MiB | PSI max % |
+|---|---|---|---|---|---|---|---|---|
+| unmanaged | 7 (29) / 7 (22) | 584 / 527 | 39.5 / 31.1 | 0.4 / 0.2 | 28.0 / 27.3 | 1746 / 1374 | 9301 / 6580 | 50.3 / 50.1 |
+| 0.3 defaults | 0 / 0 | 701 / 707 | 47.4 / 48.2 | 36.3 / 37.0 | 9.0 / 9.2 | 232 / 232 | 286 / 368 | 5.2 / 6.0 |
+| 0.3 defaults, memory declared | 0 / 0 | 716 / 693 | 49.0 / 46.1 | 37.7 / 35.2 | 8.9 / 9.2 | 190 / 219 | 150 / 93 | 5.5 / 1.5 |
+
+What these say:
+
+- **The 0.3 defaults behave as 0.2's did.** With the same weights, one heavy job runs at a time
+  either way, and the two configs' rows are within each other's spread: 834 and 892 s against
+  841 and 842 s, no failures, a wakeup p99 of 3.5 to 9 ms against unmanaged's 23 to 27 ms. The
+  0.3 defaults' second round met more outside pressure than the 0.2 config's (pressure up to
+  5.6%, the outside probe at 9 ms too), and was slower for it; nothing in these runs separates
+  the two configs.
+- **Memory counting does not bind here, declared or not.** At weight 4 on 6 slots only one heavy
+  job runs, and an undeclared one counts 4 × 2 GiB = 8 GiB of a 11.7 GiB budget, so two could
+  never be admitted by memory either. Declaring each `mem` job's size changed nothing beyond
+  noise (693 to 716 s against 701 to 707 s). What counting adds is for declared sizes,
+  `[[standing]]` memory and the opt-in below.
+- **Against unmanaged**, as at 0.2: no OOM kills where unmanaged lost 7 of 53 jobs in each
+  round of the memory-heavy mix, a `git status` p95 under a third of unmanaged's, and a wakeup
+  p99 under half of it, for a makespan 20 to 45% longer (round against round).
+- **Wakeup latency moved with the machine's other load.** Every leasehold row of the
+  memory-heavy mix, and the second round of the main mix, sat at about 9 ms, inside and
+  outside the benchmark alike; the first round of the main mix at 3.5 ms. It is the 0.2 result
+  (about 3.3 ms) on a quiet machine, and higher on a busier one.
+
+The README's headline table still shows the 0.2 run, which these runs neither contradict nor
+improve on.
+
+## Two heavy jobs at once (opt-in)
+
+`[commands] heavy_weight = 3` and `light_weight = 2` on 6 slots let two builds or test runs
+run at once, with memory counted as above. An earlier draft of 0.3 generated this setting by
+default; these runs measured it then, and are why it is opt-in. One run per condition, in
+sessions earlier the same day as the runs above.
+
+Like those, they are not directly comparable with the 0.2 tables at the top. Other people's work
+was using about 6 GiB of the machine's memory that day, so the benchmark's limit was lowered to
+7 GiB (swap 2 GiB) and the `mem` jobs to 2.5 GiB, which keeps the same shape: two overlapping
+`mem` jobs fit, three do not. `lh-enforced-v020` is the 0.2 config and weight 4, run in the same
+session for the comparison. The `budget 7g` row and the second greedy row ran later, in another
+and quieter session, each as its own invocation (53 jobs: the plan is sized by a calibration
+that came out slightly differently); the `7g` row set `[memory] budget = "7g"`, the memory the
+jobs had. Summaries:
+[`k8-full-d240-two-at-once`](../bench/results/8cpu-16g/k8-full-d240-two-at-once.md),
+[`k8-full-d240-two-at-once-budget7g`](../bench/results/8cpu-16g/k8-full-d240-two-at-once-budget7g.md),
+[`k8-memheavy-d240-two-at-once`](../bench/results/8cpu-16g/k8-memheavy-d240-two-at-once.md).
 
 | condition | failed | makespan s | job mean s | job p95 s | wait mean s | wake p99 same ms | wake p99 out ms | git p95 ms | swap-in MiB | PSI max % | CPU % |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | unmanaged | 4 | 649 | 48.9 | 74.1 | 0.3 | 36.7 | 25.5 | 1638 | 2766 | 30.4 | 78 |
 | lh-enforced, 0.2 config | 0 | 714 | 48.8 | 90.9 | 37.3 | 4.5 | 4.5 | 111 | 14 | 3.8 | 49 |
-| lh-enforced, 0.3 config | 0 | 813 | 62.9 | 131.7 | 39.6 | 19.0 | 19.3 | 454 | 3370 | 22.9 | 67 |
-| lh-enforced, 0.3 config, budget 7g | 0 | 638 | 39.3 | 72.7 | 20.7 | 9.1 | 9.1 | 164 | 25 | 0.0 | 60 |
-| lh-enforced-greedy, 0.3 config | 0 | 550 | 30.9 | 57.7 | 15.2 | (lost) | 19.1 | 276 | 162 | 1.1 | 71 |
-| lh-enforced-greedy, 0.3 config, again | 0 | 604 | 36.8 | 75.1 | 19.8 | 19.2 | 19.1 | 209 | 10 | 0.2 | 69 |
+| lh-enforced, two at once | 0 | 813 | 62.9 | 131.7 | 39.6 | 19.0 | 19.3 | 454 | 3370 | 22.9 | 67 |
+| lh-enforced, two at once, budget 7g | 0 | 638 | 39.3 | 72.7 | 20.7 | 9.1 | 9.1 | 164 | 25 | 0.0 | 60 |
+| lh-enforced-greedy, two at once | 0 | 550 | 30.9 | 57.7 | 15.2 | (lost) | 19.1 | 276 | 162 | 1.1 | 71 |
+| lh-enforced-greedy, two at once, again | 0 | 604 | 36.8 | 75.1 | 19.8 | 19.2 | 19.1 | 209 | 10 | 0.2 | 69 |
 
 The first greedy run's in-cgroup wakeup probe was lost (a second stop signal interrupted its
 write; `bench/probe.py` now ignores it), so it was run again on its own.
@@ -172,10 +232,10 @@ declare its size plus 512 MiB (`hold --memory`).
 
 What these say:
 
-- **In the one like-for-like comparison, the 0.3 defaults did worse than 0.2's on every
-  measure.** The `0.2 config` and `0.3 config` rows ran in the same session, minutes apart,
-  under the same outside load (about 1.9 before each). Against 0.2's one-at-a-time, the 0.3
-  defaults took 813 s against 714 s, a mean job of 63 s against 49 s, read 3.4 GiB back from
+- **In the one like-for-like comparison, two at once did worse than one at a time on every
+  measure.** The `0.2 config` and `two at once` rows ran in the same session, minutes apart,
+  under the same outside load (about 1.9 before each). Against 0.2's one-at-a-time, two at once
+  took 813 s against 714 s, a mean job of 63 s against 49 s, read 3.4 GiB back from
   swap against 14 MiB, and had a `git status` p95 of 454 ms against 111 ms, a wakeup p99 of 19
   ms against 4.5 ms and memory pressure up to 23% against 4%. No job failed in either. Two
   2.5 GiB jobs at once doubled the benchmark's own memory (5.0 GiB at its peak, against 2.5),
@@ -183,7 +243,7 @@ What these say:
   work back (blocked items said "memory is short"), which is where the waits and the makespan
   came from. The run does not separate how much of the pressure was the benchmark's and how
   much others'.
-- **The `budget 7g` and second greedy rows do not show what the defaults do.** They ran later,
+- **The `budget 7g` and second greedy rows do not show what the setting does.** They ran later,
   in a quieter session (load 0.8 and 1.4 before them, against 1.9), with 53 jobs instead of 52,
   so their 638 s and 604 s cannot be set against the 714 s of the 0.2 config. Nor is the 7g row
   a test of the budget: with `assumed_per_slot = "auto"`, two weight-3 jobs count exactly the
@@ -191,9 +251,9 @@ What these say:
   that two at a time on a quiet machine ran without pressure, at a wakeup p99 of 9.1 ms.
 - **With nothing declared, the budget does not bind.** `assumed_per_slot = "auto"` counts a
   request at its weight times the budget over the slots, which is never more than the budget
-  while the weights fit the slots. So for a default user config, memory admission holds back only
-  declared and `[[standing]]` memory; undeclared work is held back by its slots and, under
-  pressure, by the guard.
+  while the weights fit the slots. So memory admission holds back only declared and
+  `[[standing]]` memory; undeclared work is held back by its slots and, under pressure, by the
+  guard. With two at once, declare memory for memory-heavy work.
 - **Declared memory is what protects.** In the memory-heavy run a `mem` job used 3 GiB but was
   assumed to use 2.3, so three could run at once in 7 GiB, and 3 were OOM-killed (against 19
   unmanaged). Declaring the size (`hold --memory 3584m`, or a rule's `memory`) removed every
@@ -202,8 +262,8 @@ What these say:
   whatever its weight, so its wakeup tail is unmanaged's (19 ms) unless `hard_cpu` is on, as at
   0.2.
 
-The README's headline table still shows the 0.2 run: the 0.3 runs had a different memory limit
-and job size, one run per condition, and did not show the new defaults to be better.
+These runs did not show two at once to be better on this machine, which is why it is not the
+default.
 
 ## Caveats
 
@@ -312,12 +372,12 @@ for d in range(200):
 uv run python bench/run.py --agents 4 --duration 240 --git-repo /var/tmp/bigrepo --publish
 uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo --publish \
   --conditions unmanaged,nice,slice,static-jobs,lh-advisory,lh-enforced,lh-enforced-greedy,lh-hardcpu-greedy
-# the 0.3 defaults (the runs above also had --mem-gib 2.5 --cap-gib 7, for the memory in use)
+# the 0.3 defaults, two rounds each (the runs above had --cap-gib 7, for the memory in use)
 uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo \
-  --conditions unmanaged,lh-enforced,lh-enforced-greedy,lh-enforced-v020
+  --mem-gib 2.5 --cap-gib 7 --rounds 2 --conditions unmanaged,lh-enforced-v020,lh-enforced
 uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo \
-  --mem-gib 3 --cap-gib 7 --weights cpu=3,mem=2 --memory-budget 7g \
-  --conditions unmanaged,lh-enforced,lh-enforced-declared
+  --mem-gib 3 --cap-gib 7 --rounds 2 --conditions unmanaged,lh-enforced,lh-enforced-declared
+# two at once (opt-in): --weights cpu=3,mem=3 (and --memory-budget 7g for a matched budget)
 ```
 
 `--out DIR` (default `./bench-results`) receives, per run, `spec.json` (machine, plan, sizes,

@@ -14,6 +14,7 @@ import socket
 from importlib.resources import files
 from string import Template
 
+from leasehold.commands import HEAVY_WEIGHT
 from leasehold.machine import default_pools
 from leasehold.paths import SYSTEM_LEDGER_DIR, SYSTEM_SOCKET, Mode
 
@@ -33,10 +34,11 @@ EXAMPLE = {
 
 
 def weights(slots: int) -> tuple[int, int]:
-    """The built-in rules' (heavy, light) weights a user's own config gets for `slots`: half
-    the slots from 4 up, so two builds or test runs run at once, and all of them below (one at
-    a time, at full width, rather than two of one job each). Light is half of heavy, rounded
-    up."""
+    """The (heavy, light) weights that let two builds or test runs run at once on `slots`
+    slots: half the slots from 4 up, all of them below (one at a time, at full width, rather
+    than two of one job each). Light is half of heavy, rounded up. A user's config offers them
+    as an opt-in (`[commands] heavy_weight`, `light_weight`) where the built-in 4 lets only one
+    run at a time."""
     heavy = slots // 2 if slots >= 4 else max(1, slots)
     return heavy, max(1, (heavy + 1) // 2)
 
@@ -50,8 +52,8 @@ def kept_for_you(cpus: int) -> int:
 def sized(mode: Mode, facts: dict) -> str:
     """The config `init` (and `setup`) writes for a machine of these `facts` (`facts.probe`):
     one slot per CPU, less `kept_for_you` for a user's own daemon, and at most three quarters of
-    the memory to any one lease. A user's own also counts memory (`[memory]`) and weighs the
-    built-in rules by `weights`."""
+    the memory to any one lease. A user's own also counts memory (`[memory]`), and offers the
+    `weights` that run two builds at once as an opt-in."""
     cpus = facts.get("cpus_logical") or os.cpu_count() or 1
     memory = facts.get("memory_bytes") or 0
     kept = kept_for_you(cpus) if mode == "user" else 0
@@ -81,6 +83,20 @@ def _paths(mode: Mode) -> str:
     )
 
 
+def _opt_in(slots: int) -> str:
+    heavy, light = weights(slots)
+    if heavy >= min(HEAVY_WEIGHT, slots):
+        return ""
+    return (
+        f"# To run two at once instead, each with fewer jobs (opt-in):\n"
+        f"# heavy_weight = {heavy}\n"
+        f"# light_weight = {light}\n"
+        "# A command that declares no memory then counts its weight times the budget over the\n"
+        "# slots, which may be less than it uses: declare memory for memory-heavy work (a rule's\n"
+        "# `memory`, or `hold --memory`).\n"
+    )
+
+
 def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about: str) -> str:
     """The config text for a machine with `slots` slots, `cpus` CPUs and `memory` to lend one
     lease (a size such as `48g`)."""
@@ -88,8 +104,7 @@ def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about
     if mode == "user":
         reserved = pools["work"].reserved
         text = (files("leasehold") / "templates" / "user.toml").read_text()
-        heavy, light = weights(slots)
-        at_once = slots // heavy
+        at_once = slots // min(HEAVY_WEIGHT, slots)
         return Template(text).substitute(
             name=name,
             about=about,
@@ -98,12 +113,11 @@ def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about
             memory=memory,
             work_reserved=reserved,
             background_max=max(1, slots - reserved),
-            heavy_weight=heavy,
-            light_weight=light,
-            heavy_note=f"At {heavy} of {slots} slots, "
+            heavy_note=f"On {slots} slots, "
             + (
                 "one of them runs at a time." if at_once == 1 else f"{at_once} of them run at once."
             ),
+            opt_in=_opt_in(slots) if at_once == 1 else "",
         )
 
     text = (files("leasehold") / "templates" / "machine.toml").read_text()

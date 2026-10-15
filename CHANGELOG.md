@@ -7,9 +7,10 @@ here.
 
 ## [Unreleased]
 
-Memory-aware admission, a default budget that runs two builds or test runs at once, and an
+Memory-aware admission, a memory guard that no longer caps pools to their reservations, and an
 upgrade path for configs leasehold 0.2 wrote. A config without the new `[memory]` table admits
-exactly as it did before memory was counted.
+exactly as it did before memory was counted. The built-in rules keep their weights (one build
+or test run at a time on 8 CPUs); two at once is an opt-in setting.
 
 ### Added
 
@@ -22,19 +23,23 @@ exactly as it did before memory was counted.
   counted; `acquire --memory` declares memory for a lease held across processes.
   `POST /v1/acquire` takes `memory` (a size such as `"6g"`).
 - `[commands] heavy_weight` (default 4) and `light_weight` (default 2): the weights of the
-  built-in build and test rules and of the JavaScript tooling rules.
+  built-in build and test rules and of the JavaScript tooling rules. Lowering them (3 and 2 on
+  6 slots) runs two builds or test runs at once: opt-in, shown commented out in the config
+  `init --user` writes where 4 lets only one run. Work that declares no memory is then counted
+  at its weight times the budget over the slots; declare memory for memory-heavy work.
 - `leasehold setup --upgrade-config` (with `--dry-run`, and `--config PATH` for another file):
   brings a user config from 0.2's defaults to today's, showing the diff and keeping the old
   file as `<name>.0.2.bak`. An unedited 0.2.0 or 0.2.1 config is written afresh for the same
-  machine; an edited one gains only the unset `heavy_weight`/`light_weight` and a `[memory]`
-  table. It exits 0 when it wrote the file, found nothing to change or (`--dry-run`) could
-  write it, and 1 when the config does not load, cannot be edited automatically (an inline
-  `[commands]`; a symbolic or hard-linked file; a `[[commands.rule]]` declaring more memory
-  than the new budget or `[ceiling] memory`), or changed while it worked. `--dry-run` without
+  machine; an edited one gains only a `[memory]` table. The built-in weights are never
+  changed. It exits 0 when it wrote the file, found nothing to change or (`--dry-run`) could
+  write it, and 1 when the config does not load, cannot be edited automatically (a symbolic or
+  hard-linked file; a `[[commands.rule]]` declaring more memory than the new budget or
+  `[ceiling] memory`), or changed while it worked. `--dry-run` without
   `--upgrade-config` is refused (exit 1).
 - `leasehold doctor` warns (check `defaults`) when a config naming `mode = "user"` lacks a
-  `[memory]` table or leaves the built-in weights unset where today's config sets others for
-  its slots (both optional); (check `guard`) when no built-in build or test rule could start
+  `[memory]` table (optional); (check `hard_cpu`) for a user's own daemon with `[contain]
+  hard_cpu` off, that the CPUs kept for you are kept only from tools that respect the job
+  count; (check `guard`) when no built-in build or test rule could start
   while the memory guard is on; and (check `memory`) fails when the `[memory]` budget worked out
   for the machine is 0 or filled by `[[standing]]` memory, and warns when standing memory cuts
   the built-in rules' weight or `assumed_per_slot` is 0. `leasehold setup` says what the config
@@ -58,11 +63,13 @@ exactly as it did before memory was counted.
   keywords `memory_bytes`, `memory_free`, `memory_short`, `memory_pressing`.
   `leasehold.commands.default_rules`, `HEAVY_WEIGHT`, `LIGHT_WEIGHT`.
   `leasehold.guard.Guard.pressing` and `Reading.at`. `leasehold.agent.MachineAgent` takes
-  `monotonic`. `leasehold.upgrade`. `leasehold.units.MEMORY_MAX`. `leasehold.doctor.check_memory`.
-  `leasehold.template.weights`, `USER_0_2` and `render_user_0_2`.
+  `monotonic`. `leasehold.upgrade`. `leasehold.units.MEMORY_MAX`. `leasehold.doctor.check_memory`
+  and `check_hard_cpu`. `leasehold.template.weights` (the opt-in weights that run two at once),
+  `USER_0_2` and `render_user_0_2`.
 - The benchmark (`bench/run.py`): conditions `lh-enforced-declared` (memory jobs declare their
-  size) and `lh-enforced-v020` (0.2.0's generated config and weights), `--memory-budget`, and
-  `--weights` defaulting to the generated config's `heavy_weight`.
+  size) and `lh-enforced-v020` (0.2.0's generated config), `--memory-budget`, `--rounds`
+  (every condition again on the same plan, alternate rounds reversed), and `--weights`
+  defaulting to the generated config's `heavy_weight`.
 
 - `AdmissionPolicy.heaviest(pool)`: the most weight one item could ever be admitted with in a
   pool, with nothing held but the standing work (and, with a memory budget and nothing
@@ -70,10 +77,8 @@ exactly as it did before memory was counted.
 
 ### Changed
 
-- The config `init --user` and `setup` write: a `[memory]` table, and `heavy_weight` at half the
-  slots (all of them below 4 slots) with `light_weight` half of that, rounded up, so two builds
-  or test runs run at once: on 8 CPUs, 6 slots and weight 3 instead of 4. Each weight is still
-  both the slots a command holds and the job count it is given.
+- The config `init --user` and `setup` write gains a `[memory]` table and today's comment above
+  `[guard]`; the built-in rules keep their weights (4 and 2).
 - With `[memory]`, the memory guard no longer holds pools to their reservations: while it is on,
   new work may count at most the memory measured free (none while pressure is over the
   threshold or memory under the floor; while it settles, what is available above the floor less
@@ -160,9 +165,8 @@ exactly as it did before memory was counted.
 - Nothing is removed or renamed. Without a memory budget, `decide`, `positions`, `blocker`,
   `fits` and `refusal` answer exactly as they did before memory was counted (a test compares
   them against that module on random states), and a config without `[memory]` admits as
-  before. `AdmissionPolicy`
-  with several hosts in `slots`, and `PoolPolicy.host`, are unchanged; a memory budget is per
-  host.
+  before. `AdmissionPolicy` with several hosts in `slots`, and `PoolPolicy.host`, are
+  unchanged; a memory budget is per host.
 - A 0.2 config keeps 0.2's defaults until it is upgraded (`setup --upgrade-config`); nothing
   rewrites it on its own.
 - A 0.3 client asking a 0.2 daemon for a lease with `memory` is refused for the unknown field;

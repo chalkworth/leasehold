@@ -141,6 +141,22 @@ def check_memory(config, memory_bytes: int | None) -> Check | None:
     return None
 
 
+def check_hard_cpu(config) -> Check | None:
+    """A warning, for a user's own daemon, that without `[contain] hard_cpu` the CPUs kept for
+    the person are kept only from commands that run as many jobs as they are given."""
+    if config is None or (config.mode or "user") != "user" or config.contain.hard_cpu:
+        return None
+    return Check(
+        "hard_cpu",
+        "warn",
+        "the CPUs kept for you are kept only from tools that respect the job count a lease "
+        "gives them (MAKEFLAGS, CARGO_BUILD_JOBS and the like); a tool that ignores it can still "
+        "fill every CPU while it holds a lease",
+        "to cap each contained command at its weight in CPUs, set `hard_cpu = true` under "
+        "[contain] (it then cannot use idle CPUs either); see docs/reference.md, Containment",
+    )
+
+
 def check_guard_weights(config, memory_bytes: int | None) -> Check | None:
     """A warning when no built-in build or test rule could start while the memory guard is on:
     without `[memory]`, one heavier than its pool's reservation; with it, one that counts more
@@ -427,6 +443,7 @@ def run(
     for extra in (
         check_upgrade(config, env, resolved),
         check_memory(resolved, memory_bytes),
+        check_hard_cpu(resolved),
         check_guard_weights(resolved, memory_bytes),
         check_ledger(resolved),
     ):

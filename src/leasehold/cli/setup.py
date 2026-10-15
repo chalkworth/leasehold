@@ -22,8 +22,8 @@ def register(sub) -> None:
         "--upgrade-config",
         action="store_true",
         help="only bring the config (--config, else yours) from leasehold 0.2's defaults to "
-        "today's: memory counted, two builds or test runs at once. Shows the change and keeps "
-        "the old file beside it",
+        "today's: memory counted, and the memory guard counting memory instead of capping "
+        "pools. Shows the change and keeps the old file beside it",
     )
     s.add_argument(
         "--dry-run",

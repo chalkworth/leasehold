@@ -43,11 +43,7 @@ def run(*args: str) -> subprocess.CompletedProcess:
 
 def test_a_0_2_config_is_known_by_what_it_lacks(tmp_path):
     config = machine.load(old_config(tmp_path / "m.toml"))
-    assert upgrade.outdated(config) == [
-        "no [memory] table: memory is not counted",
-        "the built-in rules weigh 4 (builds and test runs) and 2 (JavaScript tooling); for 6 "
-        "slots today's config sets 3 and 2",
-    ]
+    assert upgrade.outdated(config) == ["no [memory] table: memory is not counted"]
     fresh = template.sized("user", {"cpus_logical": 8, "memory_bytes": 16 << 30})
     assert upgrade.outdated(MachineConfig.model_validate(tomllib.loads(fresh))) == []
 
@@ -68,7 +64,7 @@ def test_an_unedited_0_2_config_is_rendered_afresh_for_the_same_machine(tmp_path
     assert backup == tmp_path / "m.toml.0.2.bak"
     assert backup.read_text() == plan.old
     new = machine.load(path)
-    assert (new.commands.heavy_weight, new.commands.light_weight) == (3, 2)
+    assert (new.commands.heavy_weight, new.commands.light_weight) == (4, 2)
     assert new.memory is not None and upgrade.outdated(new) == []
     assert upgrade.plan(path, new) is None
 
@@ -81,7 +77,6 @@ def test_an_edited_config_keeps_its_lines_and_gains_only_what_it_lacks(tmp_path)
     plan = upgrade.plan(path, machine.load(path))
     assert plan is not None and not plan.pristine and plan.text is not None
     assert plan.changes == (
-        "[commands] gains heavy_weight = 3 and light_weight = 2",
         'a [memory] table: budget = "auto", kept = "25%", assumed_per_slot "auto"',
         "the comment above [guard], which described 0.2's guard",
     )
@@ -94,21 +89,20 @@ def test_an_edited_config_keeps_its_lines_and_gains_only_what_it_lacks(tmp_path)
     upgrade.apply(plan)
     new = machine.load(path)
     assert new.guard.settle_s == 45 and new.memory is not None
-    assert new.commands.heavy_weight == 3
+    assert new.commands.heavy_weight == 4
     assert "settle_s = 45  # mine" in path.read_text()
 
 
-def test_a_commands_table_written_inline_is_left_to_be_edited_by_hand(tmp_path):
+def test_a_commands_table_written_inline_gains_the_memory_table_too(tmp_path):
     path = tmp_path / "m.toml"
     path.write_text(
         'mode = "user"\ncommands = { wait_s = 10 }\n[ceiling]\nslots = 6\n'
         '[pools.work]\nreserved = 3\nmax = 6\n[kinds]\nwork = "work"\n[lend]\npools = []\n'
     )
-    plan = upgrade.plan(path, machine.load(path))
-    assert plan is not None and plan.text is None
-    assert "heavy_weight = 3 and light_weight = 2 under [commands]" in (plan.manual or "")
     done = run("--config", str(path), "setup", "--upgrade-config")
-    assert done.returncode == 1 and "cannot be changed automatically" in done.stdout
+    assert done.returncode == 0, done.stdout + done.stderr
+    new = machine.load(path)
+    assert new.memory is not None and new.commands.wait_s == 10
 
 
 def test_setup_upgrade_config_dry_run_writes_nothing_and_without_it_backs_up(tmp_path):
@@ -158,7 +152,7 @@ def test_doctor_warns_when_a_heavy_rule_counts_more_than_can_ever_start(tmp_path
     )
     config = MachineConfig.model_validate(tomllib.loads(text))
     check = doctor.check_guard_weights(config, 16 << 30)
-    assert check is not None and "counts 15.0 GiB, more than the 12.0 GiB" in check.detail
+    assert check is not None and "counts 20.0 GiB, more than the 12.0 GiB" in check.detail
 
 
 def test_an_unedited_0_2_1_config_is_known_as_well(tmp_path):
@@ -181,33 +175,22 @@ def _user_config(path: Path, slots: int, extra: str = "") -> MachineConfig:
     return machine.load(path)
 
 
-@pytest.mark.parametrize(
-    ("slots", "weights"), [(3, (3, 2)), (6, (3, 2)), (8, None), (10, (5, 3)), (14, (7, 4))]
-)
-def test_unset_weights_are_compared_with_todays_for_every_slot_count(tmp_path, slots, weights):
-    """The weights a config falls back to (4 and 2) are outdated wherever today's config would
-    set others for its slots, whatever the count; at 8 slots they are today's."""
+@pytest.mark.parametrize("slots", [3, 6, 8, 10, 14])
+def test_weights_are_never_part_of_the_upgrade(tmp_path, slots):
+    """The built-in weights stay as they are (4 and 2 unless set): with a [memory] table a
+    config lacks nothing, whatever its slots; without one it gains only the table."""
     config = _user_config(tmp_path / "m.toml", slots, '[memory]\nbudget = "auto"\n')
-    if weights is None:
-        assert upgrade.outdated(config) == []
-        return
-    [lacks] = upgrade.outdated(config)
-    assert lacks.endswith(f"today's config sets {weights[0]} and {weights[1]}")
-    plan = upgrade.plan(tmp_path / "m.toml", config)
-    upgrade.apply(plan)
-    new = machine.load(tmp_path / "m.toml")
-    assert (new.commands.heavy_weight, new.commands.light_weight) == weights
-
-
-def test_only_the_unset_weight_is_added(tmp_path):
-    config = _user_config(
-        tmp_path / "m.toml", 10, '[memory]\nbudget = "auto"\n[commands]\nlight_weight = 1\n'
+    assert upgrade.outdated(config) == []
+    bare = _user_config(tmp_path / "b.toml", slots)
+    plan = upgrade.plan(tmp_path / "b.toml", bare)
+    assert plan.changes == (
+        'a [memory] table: budget = "auto", kept = "25%", assumed_per_slot "auto"',
     )
-    plan = upgrade.plan(tmp_path / "m.toml", config)
-    assert plan.changes == ("[commands] gains heavy_weight = 5",)
     upgrade.apply(plan)
-    new = machine.load(tmp_path / "m.toml")
-    assert (new.commands.heavy_weight, new.commands.light_weight) == (5, 1)
+    new = machine.load(tmp_path / "b.toml")
+    assert new.memory is not None
+    assert "heavy_weight" not in new.commands.model_fields_set
+    assert (new.commands.heavy_weight, new.commands.light_weight) == (4, 2)
 
 
 def test_a_config_that_does_not_name_user_mode_is_not_called_outdated(tmp_path):
