@@ -28,6 +28,10 @@ class _Stop(Exception):
 
 
 def _stop(_sig, _frame):
+    """Stop measuring, once: a second SIGTERM or SIGINT (the harness's, then its scope's) is
+    ignored, so it cannot interrupt the write that follows."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     raise _Stop
 
 

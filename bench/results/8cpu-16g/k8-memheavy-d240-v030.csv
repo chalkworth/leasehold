@@ -1,0 +1,4 @@
+condition,jobs,failed,makespan_s,job_mean_s,job_p95_s,wait_mean_s,wait_p95_s,run_mean_s,wake_same_p50_ms,wake_same_p99_ms,wake_same_max_ms,wake_out_p50_ms,wake_out_p99_ms,git_p50_ms,git_p95_ms,oom_kills,oom_kills_machine,swapin_mib,mem_some_max,mem_some_mean,mem_full_max,bench_mem_peak_gib,cpu_busy_mean,cpu_steal_mean,jobs_in_lease_scope,load_before,aborted
+unmanaged,52,5,579.0,44.6,81.6,0.2,0.5,43.9,0.14,27.29,195.0,0.12,19.15,292.0,1007.0,19,19,3726.0,35.8,5.8,11.3,7.0,77.0,2.0,0,1.51,
+lh-enforced,52,3,754.0,53.5,113.7,30.0,75.5,23.3,0.13,8.9,36.0,0.13,9.02,91.0,145.0,3,3,3016.0,36.0,3.2,33.6,7.0,53.0,0.7,52,2.0,
+lh-enforced-declared,52,0,697.0,48.3,87.9,26.7,66.2,21.4,0.13,8.83,42.0,0.12,9.03,86.0,125.0,0,0,43.0,0.9,0.0,0.9,6.05,55.0,0.8,52,1.85,

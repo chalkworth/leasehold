@@ -125,10 +125,78 @@ more.
   What helped was deciding how many heavy jobs run at once.
 - **Where leasehold loses.** Throughput, and the time an agent waits: if you want the batch
   done soonest and do not use the machine meanwhile, unmanaged or plain serialization with
-  greedy tools (`lh-enforced-greedy`) finished first. The default budget (2 CPUs kept, every
-  build weighing 4 of 6 slots) is cautious. An agent behind the Claude Code hook, which waits
-  20 s for a lease by default and then refuses, would have been refused 38 times out of 52 at 8
-  agents (and 4 out of 25 at 4).
+  greedy tools (`lh-enforced-greedy`) finished first. 0.2's default budget (2 CPUs kept, every
+  build weighing 4 of 6 slots) is cautious; the 0.3 defaults below run two at once. An agent
+  behind the Claude Code hook, which waits 20 s for a lease by default and then refuses, would
+  have been refused 38 times out of 52 at 8 agents (and 4 out of 25 at 4).
+
+## Two heavy jobs at once: the 0.3 defaults
+
+The tables above use leasehold 0.2's generated config: 6 slots on 8 CPUs, every build or test
+run weighing 4, so one ran at a time. The config `init` writes now weighs them at half the slots
+(3 of 6 here, `[commands] heavy_weight`) and counts memory (`[memory]`, budget: the machine's
+memory less 25%, each slot assumed to use the budget over the slots), so two run at once while
+both fit. These runs measure that, on the same machine, 8 agents, 240 s plans.
+
+They are not directly comparable with the tables above. Other people's work was using about 6
+GiB of the machine's memory that day, so the benchmark's limit was lowered to 7 GiB (swap 2
+GiB) and the `mem` jobs to 2.5 GiB, which keeps the same shape: two overlapping `mem` jobs fit,
+three do not. `lh-enforced-v020` is the 0.2 config and weight 4, run in the same session for the
+comparison. The `budget 7g` row ran later, as its own invocation (53 jobs: the plan is sized by
+a calibration that came out slightly differently), with `[memory] budget = "7g"`, the memory
+the jobs actually had. Summaries: [`k8-full-d240-v030`](../bench/results/8cpu-16g/k8-full-d240-v030.md),
+[`k8-full-d240-v030-budget7g`](../bench/results/8cpu-16g/k8-full-d240-v030-budget7g.md),
+[`k8-memheavy-d240-v030`](../bench/results/8cpu-16g/k8-memheavy-d240-v030.md).
+
+| condition | failed | makespan s | job mean s | job p95 s | wait mean s | wake p99 same ms | wake p99 out ms | git p95 ms | swap-in MiB | PSI max % | CPU % |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| unmanaged | 4 | 649 | 48.9 | 74.1 | 0.3 | 36.7 | 25.5 | 1638 | 2766 | 30.4 | 78 |
+| lh-enforced, 0.2 config | 0 | 714 | 48.8 | 90.9 | 37.3 | 4.5 | 4.5 | 111 | 14 | 3.8 | 49 |
+| lh-enforced, 0.3 config | 0 | 813 | 62.9 | 131.7 | 39.6 | 19.0 | 19.3 | 454 | 3370 | 22.9 | 67 |
+| lh-enforced, 0.3 config, budget 7g | 0 | 638 | 39.3 | 72.7 | 20.7 | 9.1 | 9.1 | 164 | 25 | 0.0 | 60 |
+| lh-enforced-greedy, 0.3 config | 0 | 550 | 30.9 | 57.7 | 15.2 | (lost) | 19.1 | 276 | 162 | 1.1 | 71 |
+| lh-enforced-greedy, 0.3 config, again | 0 | 604 | 36.8 | 75.1 | 19.8 | 19.2 | 19.1 | 209 | 10 | 0.2 | 69 |
+
+The first greedy run's in-cgroup wakeup probe was lost (a second stop signal interrupted its
+write; `bench/probe.py` now ignores it), so it was run again on its own.
+
+Memory-heavy jobs: 3 GiB each, `[memory] budget = "7g"`, weights cpu 3 and mem 2, so a `mem`
+job is assumed to use 2.3 GiB unless it declares more. `lh-enforced-declared` has each `mem` job
+declare its size plus 512 MiB (`hold --memory`).
+
+| condition | failed | OOM kills | makespan s | job mean s | wait mean s | wake p99 same ms | git p95 ms | swap-in MiB | PSI max % |
+|---|---|---|---|---|---|---|---|---|---|
+| unmanaged | 5 | 19 | 579 | 44.6 | 0.2 | 27.3 | 1007 | 3726 | 35.8 |
+| lh-enforced (assumed memory) | 3 | 3 | 754 | 53.5 | 30.0 | 8.9 | 145 | 3016 | 36.0 |
+| lh-enforced-declared | 0 | 0 | 697 | 48.3 | 26.7 | 8.8 | 125 | 43 | 0.9 |
+
+What these say:
+
+- **When the budget matches the memory there is, two at a time is faster and still safe.** With
+  `budget = "7g"`, the 0.3 config finished the work in 638 s against 714 s for the 0.2 config
+  and 649 s unmanaged, job mean 39 s against 49 s for both, with no failures, no swap and no
+  memory pressure. The cost is latency: the wakeup p99 was 9.1 ms, against 4.5 ms with one job
+  at a time and 37 ms unmanaged. Two weight-3 jobs keep 6 of 8 CPUs busy, and with the
+  machine's own load that is close to the point where this guest's wakeup tail rises (the side
+  measurement above).
+- **The automatic budget does not see a limit below the machine's memory, or other people's
+  memory.** In the first 0.3 run the budget was the machine's 15.6 GiB less 25%, while the
+  benchmark had 7 GiB. Its own memory peaked at 5.0 GiB (two `mem` jobs), the same as in the
+  `7g` run, but the machine as a whole was under pressure from outside it: 3.4 GiB swapped
+  back in, pressure up to 23%. The guard then held new work (blocked items said "memory is
+  short"), which is where the longer waits and makespan came from; no job failed. The same
+  admission later that night, on a quieter machine, gave the `7g` row. Admission cannot tell these
+  apart from inside; the guard is what reacts to memory used by others.
+- **Assumed memory protects only jobs that stay near their share.** In the memory-heavy run a
+  `mem` job used 3 GiB but counted 2.3 GiB, so three could be admitted into 7 GiB, and 3 were
+  OOM-killed (against 19 unmanaged). Declaring the size (`hold --memory 3.5g`, or a rule's
+  `memory`) removed every failure and nearly all the swap, at a makespan 20% above unmanaged.
+- **Greedy tools are still the CPU problem.** A tool that ignores the job count fills every CPU
+  whatever its weight, so its wakeup tail is unmanaged's (19 ms) unless `hard_cpu` is on, as at
+  0.2. It is also the fastest leasehold row, as before.
+
+The README's headline table still shows the 0.2 run: the 0.3 runs had a different memory limit
+and job size, and one run per condition is not enough to replace it.
 
 ## Caveats
 
@@ -189,6 +257,8 @@ pressure under 10%):
 | `lh-advisory-greedy` | as `lh-advisory`, jobs ignore the job count |
 | `lh-enforced-greedy` | as `lh-enforced`, jobs ignore the job count |
 | `lh-hardcpu-greedy` | as `lh-enforced-greedy`, with `[contain] hard_cpu = true` (`CPUQuota` = weight CPUs) |
+| `lh-enforced-declared` | as `lh-enforced`, each `mem` job declaring its size plus 512 MiB (`hold --memory`) |
+| `lh-enforced-v020` | as `lh-enforced`, on the config leasehold 0.2.0's `init --user` wrote, weight 4 |
 
 leasehold runs as a private user-mode daemon on a socket of its own, with the config `leasehold
 init --user` writes for this machine: 6 slots of 8 CPUs (2 kept for the person), pool `work`
@@ -235,6 +305,12 @@ for d in range(200):
 uv run python bench/run.py --agents 4 --duration 240 --git-repo /var/tmp/bigrepo --publish
 uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo --publish \
   --conditions unmanaged,nice,slice,static-jobs,lh-advisory,lh-enforced,lh-enforced-greedy,lh-hardcpu-greedy
+# the 0.3 defaults (the runs above also had --mem-gib 2.5 --cap-gib 7, for the memory in use)
+uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo \
+  --conditions unmanaged,lh-enforced,lh-enforced-greedy,lh-enforced-v020
+uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo \
+  --mem-gib 3 --cap-gib 7 --weights cpu=3,mem=2 --memory-budget 7g \
+  --conditions unmanaged,lh-enforced,lh-enforced-declared
 ```
 
 `--out DIR` (default `./bench-results`) receives, per run, `spec.json` (machine, plan, sizes,
