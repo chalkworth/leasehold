@@ -123,7 +123,7 @@ def pools(
 ) -> dict[str, dict]:
     """Per pool: its shape (with any override applied) and what it holds and has waiting.
     `held_weight` includes standing weight; `running`, `revoked` and `queued` count leases;
-    `memory_bytes` is the memory admission counts there (standing memory included)."""
+    `memory_counted_bytes` is the memory admission counts there (standing memory included)."""
     held_standing = config.standing_held()
     standing_memory = policy.standing_memory
     lend = set(config.lend.pools)
@@ -144,7 +144,7 @@ def pools(
             "running": len(held),
             "revoked": sum(1 for x in held if x["revoked"]),
             "queued": sum(1 for x in queue if x["pool"] == name),
-            "memory_bytes": sum(counted(policy, x) for x in held)
+            "memory_counted_bytes": sum(counted(policy, x) for x in held)
             + (standing_memory.get(name, 0) if policy.memory else 0),
         }
     return out

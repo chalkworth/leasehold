@@ -39,3 +39,13 @@ def memory_to_bytes(memory: str) -> int:
     if size > MEMORY_MAX:
         raise ValueError(f"memory {memory!r} is more than 1 EiB, more than any machine has")
     return size
+
+
+def declared_to_bytes(memory: str) -> int:
+    """A size a command declares it will use (`hold --memory`, a rule's `memory`, a request's
+    `memory`): as `memory_to_bytes`, and more than 0, since a contained command is held to it
+    (`MemoryHigh`) and 0 would hold it to no memory at all."""
+    size = memory_to_bytes(memory)
+    if size == 0:
+        raise ValueError(f"memory {memory!r} is 0: a command cannot be held to no memory")
+    return size

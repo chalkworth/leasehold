@@ -35,7 +35,7 @@ from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, some_avg10
 from leasehold.machine import MachineConfig
 from leasehold.proctable import Proc
-from leasehold.units import memory_to_bytes
+from leasehold.units import declared_to_bytes, memory_to_bytes
 
 #: The ledger scope observed processes' leases are filed under; no client may name it.
 OBSERVED_SCOPE = "leasehold.observed"
@@ -74,7 +74,7 @@ class AcquireRequest(BaseModel):
     @classmethod
     def _memory(cls, value: str | None) -> str | None:
         if value is not None:
-            memory_to_bytes(value)
+            declared_to_bytes(value)
         return value
 
     @field_validator("lease_id", "session")
@@ -167,9 +167,11 @@ class MachineAgent:
         #: Observed leases given back because their process stopped matching, since then.
         self._unmatched: set[tuple[str, str]] = set()
         #: When each live lease was first seen granted, on `_monotonic`: the settle window.
-        #: Leases from before this daemon started count as granted long ago.
+        #: A lease from before this daemon started is placed by its wall-clock `acquired_at`
+        #: (no later than now), so one granted within `settle_s` of a restart is still recent.
+        wall, mono = self._clock(), self._monotonic()
         self._granted_at: dict[tuple, float] = {
-            _grant_key(r): float("-inf") for r in self.ledger.leases()
+            _grant_key(r): mono - max(0.0, wall - r["acquired_at"]) for r in self.ledger.leases()
         }
         self._seen = self._snapshot()
 
@@ -188,13 +190,18 @@ class MachineAgent:
             memory_free=free,
             memory_short=self._memory_short() if free is not None else None,
             memory_pressing=guarding and counting and self.guard.pressing,
+            # An item waiting longer than the settle window stops letting others by.
+            memory_backfill_since=(
+                self._clock() - self.config.guard.settle_s if free is not None else None
+            ),
         )
 
     def memory_free(self) -> int:
         """While the guard is on, the most memory new work may count: none while a reading is
         over a threshold, else what is available above the floor less what leases granted
         within `settle_s` count (they may not have grown to it yet). A lease not yet seen
-        granted counts as recent."""
+        granted counts as recent. Observed leases are not counted: they record processes
+        already running, whose memory `MemAvailable` already leaves out."""
         available = (self.last_load or {}).get("mem_available_bytes")
         if self.guard.pressing or available is None or self.budget is None:
             return 0
@@ -204,7 +211,8 @@ class MachineAgent:
             if row["memory"] is not None
             else row["weight"] * self.budget.assumed_per_slot
             for row in self.ledger.leases()
-            if self._granted_at.get(_grant_key(row), since) >= since
+            if row["scope"] != OBSERVED_SCOPE
+            and self._granted_at.get(_grant_key(row), since) >= since
         )
         return max(0, available - self.guard.min_available - recent)
 
@@ -639,24 +647,31 @@ class MachineAgent:
 
     def commands(self) -> dict:
         """Which commands take a lease, for agent hooks and shims to match against: each rule
-        with its pool named and its weight cut to the most one lease could ever be admitted
-        with in that pool (`AdmissionPolicy.heaviest`: with a memory budget, a rule declaring no
-        memory is also cut to what its assumed memory fits), so what it asks for can be
-        granted."""
+        with its pool named and its weight cut to the most one lease declaring its memory could
+        ever be admitted with in that pool (`AdmissionPolicy.heaviest`), so what it asks for can
+        be granted. A rule no lease could ever be granted for (its declared memory does not fit
+        beside the standing memory, say) is not served: it is listed under `never`, with the
+        reason, so hooks and shims never ask for it."""
         settings = self.config.commands
         policy = self.policy()
-        rules = []
+        rules, never = [], []
         for src, rule in settings.rules():
             pool = rule.pool or self.config.kinds.get("work", "work")
-            top = (
-                policy.heaviest(pool, declared=rule.memory is not None)
-                if pool in policy.pools
-                else rule.weight
-            )
-            weight = max(1, min(rule.weight, top, self.config.ceiling.slots))
-            rules.append(rule.model_dump() | {"pool": pool, "weight": weight, "source": src})
+            memory = None if rule.memory is None else memory_to_bytes(rule.memory)
+            top = policy.heaviest(pool, memory) if pool in policy.pools else rule.weight
+            weight = min(rule.weight, top, self.config.ceiling.slots)
+            served = rule.model_dump() | {"pool": pool, "source": src}
+            if weight < 1:
+                asked = max(1, min(rule.weight, self.config.ceiling.slots))
+                reason = (
+                    policy.refusal(pool, asked, memory) if pool in policy.pools else None
+                ) or f"no lease in pool {pool!r} could ever be granted"
+                never.append(served | {"weight": rule.weight, "reason": reason})
+                continue
+            rules.append(served | {"weight": weight})
         return {
             "rules": rules,
+            "never": never,
             "wait_s": settings.wait_s,
             "when_busy": settings.when_busy,
         }

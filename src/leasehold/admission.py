@@ -42,7 +42,9 @@ never as running, so per-user limits and whose turn it is stay a matter of real 
   may together count at most that much more. An item whose turn it is but which fails only
   this allowance (its slots and the budget would take it) waits without blocking its pool:
   the items behind it that fit the allowance may start, while its own session's later items
-  keep waiting behind it.
+  keep waiting behind it. Where `memory_backfill_since` names the host, only an item queued
+  at or after that time lets others by; one queued before it blocks its pool as any item
+  whose turn it is does, so a stream of small items cannot keep it waiting for ever.
 
 A host with no budget counts no memory at all: with none given anywhere, every rule above is
 the slots' alone, exactly as before memory was counted.
@@ -108,6 +110,10 @@ class AdmissionPolicy:
     #: Hosts where nothing new starts now, whatever it counts: memory is under real pressure
     #: there (a machine agent's guard, while a reading is over a threshold).
     memory_pressing: frozenset[str] = frozenset()
+    #: Host to the time (as `Waiting.order`'s) before which an item queued, short only of
+    #: `memory_free`, no longer lets the items behind it start. A host not named here has no
+    #: such bound.
+    memory_backfill_since: Mapping[str, float] = field(default_factory=dict, hash=False)
 
     @classmethod
     def from_pools(
@@ -123,12 +129,14 @@ class AdmissionPolicy:
         memory_free: int | None = None,
         memory_short: str | None = None,
         memory_pressing: bool = False,
+        memory_backfill_since: float | None = None,
     ) -> AdmissionPolicy:
         """The policy for one machine's `PoolSet`, every pool on host `MACHINE`. `memory` is
         the machine's memory budget in bytes (None: no memory is counted), `assumed_memory`
         what one slot of weight counts as when an item declares none, and `memory_free` the
         most one decision may admit while memory is short (None: no such limit).
-        `memory_pressing` stops every new start on the machine."""
+        `memory_pressing` stops every new start on the machine. `memory_backfill_since`
+        bounds which short items let others by (None: no bound)."""
         return cls(
             slots={MACHINE: pool_set.slots},
             pools={
@@ -150,6 +158,9 @@ class AdmissionPolicy:
             memory_free={} if memory_free is None else {MACHINE: memory_free},
             memory_short=memory_short,
             memory_pressing=frozenset({MACHINE}) if memory_pressing else frozenset(),
+            memory_backfill_since=(
+                {} if memory_backfill_since is None else {MACHINE: memory_backfill_since}
+            ),
         )
 
     def counted(self, host: str, weight: int, memory: int | None) -> int:
@@ -192,21 +203,26 @@ class AdmissionPolicy:
             f"for {most}: of the {slots} slots, " + " and ".join(why)
         )
 
-    def heaviest(self, pool: str, *, declared: bool = False) -> int:
-        """The most weight one item could ever be admitted with in `pool`: what fits its slots
-        with nothing held but the standing work, whatever is capped now, and, for an item that
-        declares no memory (`declared` false) on a host with a memory budget, whose assumed
-        memory fits beside the standing memory. 0 for a pool there is not, or one with no room
-        at all."""
+    def heaviest(self, pool: str, memory: int | None = None) -> int:
+        """The most weight one item declaring `memory` bytes (None: none) could ever be
+        admitted with in `pool`: what fits its slots with nothing held but the standing work,
+        whatever is capped now, and, on a host with a memory budget, whose memory fits beside
+        the standing memory: a declared size fits whatever the weight or never (0), an assumed
+        one is cut to the weight whose share fits. 0 for a pool there is not, or one where such
+        an item could never be admitted (`refusal` gives the reason)."""
         policy = self.pools.get(pool)
         if policy is None:
             return 0
         most = self._slots_heaviest(pool)
-        budget = None if declared else self.memory.get(policy.host)
-        per_slot = self.assumed_memory.get(policy.host, 0)
-        if budget is None or per_slot <= 0:
+        budget = self.memory.get(policy.host)
+        if budget is None:
             return most
         held = _Tally.of(State(), self).memory.get(policy.host, 0)
+        if memory is not None:
+            return most if held + memory <= budget else 0
+        per_slot = self.assumed_memory.get(policy.host, 0)
+        if per_slot <= 0:
+            return most
         return max(0, min(most, (budget - held) // per_slot))
 
     def _slots_heaviest(self, pool: str) -> int:
@@ -374,6 +390,13 @@ def _only_short(
     return _slots_fit(tally, policy, pool, weight) and tally.memory.get(host, 0) + need <= budget
 
 
+def _lets_by(policy: AdmissionPolicy, pool: str, head: Waiting) -> bool:
+    """Whether `head`, short only of the allowance, lets the items behind it start: it was
+    queued no earlier than its host's `memory_backfill_since`."""
+    since = policy.memory_backfill_since.get(policy.pools[pool].host)
+    return since is None or head.order[0] >= since
+
+
 def _slots_fit(tally: _Tally, policy: AdmissionPolicy, pool: str, weight: int) -> bool:
     """The two slot rules alone, for `weight` more in `pool`."""
     p = policy.pools[pool]
@@ -494,7 +517,9 @@ def decide(state: State, policy: AdmissionPolicy) -> list[ItemKey]:
             session = _next_session(line[user], tally, pool, user)
             head = line[user][session][0]
             if not fits(tally, policy, pool, head.weight, head.memory):
-                if _only_short(tally, policy, pool, head.weight, head.memory):
+                if _only_short(tally, policy, pool, head.weight, head.memory) and _lets_by(
+                    policy, pool, head
+                ):
                     # It waits for the allowance; its session waits behind it, the rest may
                     # start if they fit what is free.
                     del line[user][session]

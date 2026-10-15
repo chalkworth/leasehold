@@ -10,13 +10,19 @@ text and `apply` writes it, the old file kept beside it first:
   weights);
 * any other keeps every line it has and gains only a `[memory]` table at the end (and today's
   comment above `[guard]`, if 0.2's is there unchanged);
-* neither is edited when a `[[commands.rule]]` declares more memory than the new budget or the
-  `[ceiling]` memory, since a declared size is then refused, not only held to: `plan` names
-  the rules to change first.
+* neither is edited when, with the budget the table would have on this machine, work could
+  not start as it did: `[[standing]]` memory fills the budget, a `[[commands.rule]]` declares
+  memory that never fits beside the standing memory or is more than `[ceiling] memory` (a
+  declared size is then refused, not only held to), or the built-in heavy rules would be cut
+  to a lighter weight. `plan` names what to change first.
+
+Line endings are kept: a file with CRLF ones gets CRLF in what is added.
 
 `apply` writes only a regular file with one link (not a symbolic link, not a hard-linked one),
-through a new temporary file synced to disk, and only if the file is still the one `plan`
-read.
+through a new temporary file synced to disk, after a byte-for-byte backup, and only if the file
+is still the one `plan` read. It checks that last just before the new file takes the old one's
+place (a rename); a write to the file that lands in the instant between the two is lost from
+the file (the backup does not have it either).
 
 Nothing here runs on its own: `setup` and `doctor` only report what `outdated` finds.
 """
@@ -32,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from leasehold import template
-from leasehold.machine import MachineConfig, MemorySettings
+from leasehold.machine import MachineConfig
 from leasehold.units import memory_to_bytes
 
 #: The `[memory]` table an edited config gains.
@@ -56,20 +62,13 @@ GUARD_COMMENT = (
 )
 
 
-def _user(config: MachineConfig) -> bool:
-    """A user's own config, as `init --user` writes it: `mode = "user"` named. A config that
-    leaves the mode out may be either kind, and is left alone."""
-    return config.mode == "user"
-
-
 def _lacks_memory(config: MachineConfig) -> bool:
-    return _user(config) and config.memory is None
+    return config.for_user and config.memory is None
 
 
 def outdated(config: MachineConfig) -> list[str]:
-    """What a user's own config lacks of today's defaults, in words; empty when nothing, or
-    when it does not name `mode = "user"` (the machine's config, which `init` never wrote
-    this way, or one written by hand)."""
+    """What a user's own config (`MachineConfig.for_user`) lacks of today's defaults, in
+    words; empty when nothing, or for the machine's config."""
     return ["no [memory] table: memory is not counted"] if _lacks_memory(config) else []
 
 
@@ -80,6 +79,7 @@ class Plan:
     change in words."""
 
     path: Path
+    #: The file as `plan` read it, decoded (line endings as they are).
     old: str
     text: str | None
     pristine: bool
@@ -87,6 +87,8 @@ class Plan:
     manual: str | None = None
     #: The file `plan` read: (device, inode, size, modification time in ns).
     identity: tuple[int, int, int, int] | None = None
+    #: Its bytes, which `apply` copies to the backup as they are.
+    raw: bytes = b""
 
     def diff(self) -> str:
         if self.text is None:
@@ -104,6 +106,15 @@ class Plan:
 def _about(text: str) -> str:
     lines = text.splitlines()
     return lines[1][2:] if len(lines) > 1 and lines[1].startswith("# ") else ""
+
+
+def pristine(path: Path, config: MachineConfig) -> bool:
+    """Whether the config at `path` (loaded as `config`) is exactly as 0.2's `init` wrote it."""
+    try:
+        text = path.read_bytes().decode()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _pristine(config, text.replace("\r\n", "\n"))
 
 
 def _pristine(config: MachineConfig, text: str) -> bool:
@@ -140,28 +151,28 @@ def _unsafe(path: Path) -> str | None:
     return None
 
 
-def _oversized_rules(config: MachineConfig, memory_bytes: int | None) -> list[str]:
-    """The rules whose memory a `[memory]` table would refuse: more than the budget it would
-    have on this machine, or than `[ceiling] memory`."""
-    limits = []
+def _oversized_rules(config: MachineConfig) -> list[str]:
+    """The rules whose memory a `[memory]` table would refuse for being more than `[ceiling]
+    memory`."""
+    if config.ceiling.memory is None:
+        return []
+    limit = memory_to_bytes(config.ceiling.memory)
+    return [
+        f"commands.rule[{n}] ({', '.join(rule.programs)}) declares {rule.memory}, more than "
+        f"[ceiling] memory ({config.ceiling.memory})"
+        for n, rule in enumerate(config.commands.rule)
+        if rule.memory is not None and memory_to_bytes(rule.memory) > limit
+    ]
+
+
+def _blocked(new: MachineConfig, memory_bytes: int | None) -> list[str]:
+    """Why the upgraded config `new` would not let work start as before on a machine of
+    `memory_bytes` (None: unknown, then only what needs no machine): every problem
+    `MachineConfig.memory_problems` finds, and rules over `[ceiling] memory`."""
+    found = _oversized_rules(new)
     if memory_bytes:
-        budget = MemorySettings().resolve(memory_bytes=memory_bytes, slots=config.ceiling.slots)
-        limits.append(("the memory budget it would have", budget.budget))
-    if config.ceiling.memory is not None:
-        limits.append(("[ceiling] memory", memory_to_bytes(config.ceiling.memory)))
-    out = []
-    for n, rule in enumerate(config.commands.rule):
-        if rule.memory is None:
-            continue
-        size = memory_to_bytes(rule.memory)
-        for what, limit in limits:
-            if size > limit:
-                out.append(
-                    f"commands.rule[{n}] ({', '.join(rule.programs)}) declares {rule.memory}, "
-                    f"more than {what} ({limit / 2**30:.1f} GiB)"
-                )
-                break
-    return out
+        found += [what for _, what, _ in new.memory_problems(memory_bytes)]
+    return found
 
 
 def manual_steps(config: MachineConfig) -> str:
@@ -179,18 +190,38 @@ def plan(path: Path, config: MachineConfig, memory_bytes: int | None = None) -> 
     if not lacks:
         return None
     identity = _identity(path)
-    old = path.read_text()
+    raw = path.read_bytes()
+    old = raw.decode()
     unsafe = _unsafe(path)
     if unsafe is not None:
-        return Plan(path, old, None, False, (), manual=unsafe, identity=identity)
-    oversized = _oversized_rules(config, memory_bytes) if _lacks_memory(config) else []
-    if oversized:
-        manual = (
-            "; ".join(oversized)
-            + ". With memory counted, a declared size over these is refused, not only held "
-            "to: lower or remove those rules' memory, then run it again"
+        return Plan(path, old, None, False, (), manual=unsafe, identity=identity, raw=raw)
+    crlf = "\r\n" in old
+    lf = old.replace("\r\n", "\n")
+    text, pristine_, changes = _upgraded(config, lf)
+    try:
+        new = MachineConfig.model_validate(tomllib.loads(text))
+    except (ValueError, tomllib.TOMLDecodeError):
+        return Plan(
+            path, old, None, False, (), manual=manual_steps(config), identity=identity, raw=raw
         )
-        return Plan(path, old, None, False, (), manual=manual, identity=identity)
+    blocked = _blocked(new, memory_bytes)
+    if blocked:
+        manual = (
+            "with the [memory] table it would gain on this machine, "
+            + "; ".join(blocked)
+            + ". Change that first (by hand: "
+            + manual_steps(config)
+            + "), then run it again"
+        )
+        return Plan(path, old, None, False, (), manual=manual, identity=identity, raw=raw)
+    if crlf:
+        text = text.replace("\n", "\r\n")
+    return Plan(path, old, text, pristine_, changes, identity=identity, raw=raw)
+
+
+def _upgraded(config: MachineConfig, old: str) -> tuple[str, bool, tuple[str, ...]]:
+    """The new text for `old` (with LF line endings), whether `old` was 0.2's own, and the
+    changes in words."""
     if _pristine(config, old):
         c = config.ceiling
         assert c.cpus is not None and c.memory is not None
@@ -203,7 +234,7 @@ def plan(path: Path, config: MachineConfig, memory_bytes: int | None = None) -> 
             '[memory] budget = "auto", kept = "25%"; every other default and comment as '
             "today's",
         )
-        return Plan(path, old, text, True, changes, identity=identity)
+        return text, True, changes
     text = old
     changes: list[str] = []
     if _lacks_memory(config):
@@ -214,11 +245,7 @@ def plan(path: Path, config: MachineConfig, memory_bytes: int | None = None) -> 
         if text.count(GUARD_COMMENT_0_2) == 1:
             text = text.replace(GUARD_COMMENT_0_2, GUARD_COMMENT)
             changes.append("the comment above [guard], which described 0.2's guard")
-    try:
-        MachineConfig.model_validate(tomllib.loads(text))
-    except (ValueError, tomllib.TOMLDecodeError):
-        return Plan(path, old, None, False, (), manual=manual_steps(config), identity=identity)
-    return Plan(path, old, text, False, tuple(changes), identity=identity)
+    return text, False, tuple(changes)
 
 
 def backup_path(path: Path) -> Path:
@@ -231,23 +258,27 @@ def backup_path(path: Path) -> Path:
     return candidate
 
 
+def _changed(p: Plan) -> ValueError:
+    return ValueError(f"{p.path} changed while it was being upgraded; run it again")
+
+
 def _unchanged(p: Plan) -> None:
     """Raise ValueError unless the file is still the one `plan` read, and still safe to write."""
     unsafe = _unsafe(p.path)
     if unsafe is not None:
         raise ValueError(unsafe)
-    if _identity(p.path) != p.identity or p.path.read_text() != p.old:
-        raise ValueError(f"{p.path} changed while it was being upgraded; run it again")
+    if _identity(p.path) != p.identity or p.path.read_bytes() != p.raw:
+        raise _changed(p)
 
 
-def _write_new(path: Path, text: str, mode: int, *, prefix: str) -> Path:
-    """`text` in a new file beside `path` (never an existing one, never through a link),
+def _write_new(path: Path, data: bytes, mode: int, *, prefix: str) -> Path:
+    """`data` in a new file beside `path` (never an existing one, never through a link),
     synced to disk."""
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=prefix, suffix=".upgrading")
     try:
         os.fchmod(fd, mode)
-        with os.fdopen(fd, "w") as out:
-            out.write(text)
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
             out.flush()
             os.fsync(out.fileno())
     except BaseException:
@@ -257,22 +288,26 @@ def _write_new(path: Path, text: str, mode: int, *, prefix: str) -> Path:
 
 
 def apply(p: Plan) -> Path:
-    """Write `p.text` over its file, after copying the file as it is to `backup_path`; the
-    backup's path. Refuses (ValueError) a symbolic or hard-linked file, and one that changed
-    since `plan` read it: checked first, and again just before the new file takes its place."""
+    """Write `p.text` over its file, after copying the file byte for byte to `backup_path`;
+    the backup's path. Refuses (ValueError) a symbolic or hard-linked file, and one that
+    changed since `plan` read it: checked in full first and after the new file is written,
+    then by its identity alone (one `lstat`) just before the rename. A write landing between
+    that last check and the rename is lost."""
     if p.text is None:
         raise ValueError(f"{p.path} cannot be upgraded automatically: {p.manual}")
     _unchanged(p)
     mode = p.path.stat().st_mode & 0o777
     backup = backup_path(p.path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-    with os.fdopen(os.open(backup, flags, mode), "w") as out:
-        out.write(p.old)
+    with os.fdopen(os.open(backup, flags, mode), "wb") as out:
+        out.write(p.raw)
         out.flush()
         os.fsync(out.fileno())
-    tmp = _write_new(p.path, p.text, mode, prefix=f".{p.path.name}.")
+    tmp = _write_new(p.path, p.text.encode(), mode, prefix=f".{p.path.name}.")
     try:
         _unchanged(p)
+        if _identity(p.path) != p.identity:
+            raise _changed(p)
         os.replace(tmp, p.path)
     except BaseException:
         tmp.unlink(missing_ok=True)

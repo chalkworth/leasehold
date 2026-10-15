@@ -12,7 +12,8 @@ A shim passes straight to the real program, with no lease, when one is held alre
 `make` under a leased `cargo`, any command under `leasehold hold`: `LEASEHOLD_LEASE_ID` is
 set; or an agent hook's lease for this program under this agent, `leasehold.hooknotes`), when
 `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. A busy machine is
-`[commands] when_busy`'s: wait `wait_s`, then exit 75, or run without a lease.
+`[commands] when_busy`'s: wait `wait_s`, then exit 75, or run without a lease. A request the
+daemon refuses (one that could never be granted) exits 77 without running the program.
 
 A shim costs a Python start (about 0.1 s) on every run of its program, `--version` included.
 """
@@ -26,7 +27,7 @@ from pathlib import Path
 
 from leasehold import busy, discovery, hooknotes, shell
 from leasehold.client import ApiError, Client, Unavailable
-from leasehold.exits import EXIT_BUSY, EXIT_NOT_STARTED
+from leasehold.exits import EXIT_BUSY, EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, run_leased, wait_for_grant
 
 #: The first line after the shebang of every shim this module writes: what `remove` and
@@ -177,8 +178,13 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     if code == EXIT_BUSY:
         why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
         _say(f"{why}; running {program} without a lease")
+    elif code == EXIT_UNAVAILABLE:
+        _say(f"no daemon answers; running {program} without a lease")
     else:
-        _say(f"running {program} without a lease (exit {code})")
+        # Refused, or answered with an error: a working daemon said no.
+        why = answer.get("reason") or "the daemon answered the request with an error"
+        _say(f"not running {program}: refused: {why}")
+        return EXIT_REFUSED
     os.execv(target, argv)
 
 

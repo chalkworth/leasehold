@@ -201,3 +201,45 @@ def test_an_agent_hooks_lease_for_this_program_covers_it_and_no_other(setup, tmp
         renewer.wait()
     hooknotes.write(notes, "cc.toolu_1", renewer.pid, os.getpid(), "fakebuild")
     assert "lease=cc.toolu_1" not in run(env, "build").stdout  # its renewer is gone
+
+
+def test_a_refused_run_exits_77_without_running_the_program(tmp_path, sock_dir):
+    """A refusal (here: the user's submit rate in the pool) is a working daemon saying no: the
+    shim does not run the program unleased, even with `when_busy = "run"`."""
+    from leasehold.client import Client
+
+    config = machine_config(
+        tmp_path,
+        socket=str(sock_dir / "r.sock"),
+        pools={"work": {"reserved": 2, "max": 2, "create_rate_per_min": 1}},
+        kinds={"work": "work"},
+        lend={"pools": []},
+        commands={
+            "defaults": False,
+            "rule": [{"programs": ["fakebuild"], "args": "^build", "weight": 1}],
+            "when_busy": "run",
+        },
+    )
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    try:
+        real = tmp_path / "bin"
+        real.mkdir()
+        (real / "fakebuild").write_text(FAKE)
+        (real / "fakebuild").chmod(0o755)
+        shim_dir = tmp_path / "shims"
+        shims.install(shim_dir, ["fakebuild"], python=sys.executable)
+        env = {
+            "PATH": f"{shim_dir}:{real}:/usr/bin:/bin",
+            "LEASEHOLD_SOCKET": str(daemon.path),
+            "PYTHONPATH": str(ROOT / "src"),
+            "HOME": str(tmp_path),
+        }
+        Client(daemon.path).acquire(kind="work", weight=1, lease_id="first")
+        done = run(env, "build")
+        assert done.returncode == 77
+        assert done.stdout == ""  # the program never ran
+        assert "not running fakebuild: refused:" in done.stderr
+        assert "per-user limit" in done.stderr
+    finally:
+        daemon.stop()

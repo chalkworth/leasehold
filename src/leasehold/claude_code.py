@@ -43,7 +43,7 @@ from pathlib import Path
 
 from leasehold import busy, handoff, hooknotes, programs, shell
 from leasehold.client import ApiError, Client, Unavailable
-from leasehold.exits import EXIT_BUSY
+from leasehold.exits import EXIT_BUSY, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, wait_for_grant
 from leasehold.proctable import scan
 
@@ -141,8 +141,9 @@ def pre(
     watch_pid: int | None,
     spawn: Callable[[list[str]], int] = handoff.spawn_keeper,
 ) -> Reply:
-    """Before a Bash command: wait for its lease, or let it run, or (busy, `when_busy =
-    "deny"`) refuse it."""
+    """Before a Bash command: wait for its lease, or let it run, or refuse it: when busy and
+    `when_busy = "deny"`, and always when the daemon refuses the request. Only when no daemon
+    answers does a matched command run without a lease."""
     reply = Reply()
     command = (event.get("tool_input") or {}).get("command")
     lid = lease_id(event)
@@ -205,7 +206,13 @@ def pre(
         else:
             reply.output = _message(f"{why}; running {found.program} without a lease")
         return reply
-    reply.output = _message(f"running {found.program} without a lease (exit {code})")
+    if code == EXIT_UNAVAILABLE:
+        reply.output = _message(f"no daemon answers; running {found.program} without a lease")
+        return reply
+    # Refused (it could never be granted, or the daemon answered with an error): a working
+    # daemon said no, so the command does not run unleased, whatever `when_busy` says.
+    why = answer.get("reason") or "the daemon answered the request with an error"
+    reply.output = _deny(f"leasehold: {found.program} refused: {why}")
     return reply
 
 

@@ -53,7 +53,7 @@ served longest ago. Within a user's turn, the user's **sessions** take turns the
 sessions only divides that user's own share. There is no backfill: a small request does not
 jump a large one at the head of the queue, so a large one is never starved. The one exception
 is short-lived: while the [memory guard](#memory-guard) settles, a request held back only by
-the memory measured free lets lighter work behind it start.
+the memory measured free lets lighter work behind it start, for at most `settle_s`.
 
 Each waiting item says why it waits (`blocked`), for example "pool work holds 6 of 6; this
 needs 1" or "2 of 12 slots are free; this needs 4", and, with memory counted, "the memory
@@ -85,12 +85,17 @@ and `[[standing]]` memory with it, and undeclared work by its slots and the guar
 size to assume a fixed amount a slot, or `"0g"` to count only what is declared (`leasehold
 doctor` warns about that).
 
-A budget given as a size must be more than 0 and more than the `[[standing]]` memory, or the
-config does not load; an `"auto"` budget worked out as 0 (`kept` over the machine's memory), or
-one that standing memory fills, fails `leasehold doctor`'s `memory` check. When standing memory
-leaves room for less than a built-in rule's weight at `assumed_per_slot`, the rules are served
-to hooks and shims at the weight that fits (so what they ask for is granted, not refused), and
-`doctor` warns. A size anywhere (config, `--memory`, `POST /v1/acquire`) is at most 1 EiB.
+A budget given as a size must be more than 0 and more than the `[[standing]]` memory, and
+leave room beside it for every `[[commands.rule]]`'s declared memory, or the config does not
+load. An `"auto"` budget worked out as 0 (`kept` at or over the machine's memory) stops the
+daemon starting; one that standing memory fills, or that leaves a rule's declared memory no
+room, fails `leasehold doctor`'s `memory` check. A rule no lease could ever be granted for is
+not served to hooks and shims (`leasehold commands` lists it as never served, with the reason),
+so its commands take no lease. When standing memory leaves room for less than a rule's weight
+at `assumed_per_slot`, the rule is served at the weight that fits (so what it asks for is
+granted, not refused), and `doctor` warns when that cuts the built-in rules. A declared size
+(`hold --memory`, a rule's `memory`, `POST /v1/acquire`'s `memory`) is more than 0; a size
+anywhere is at most 1 EiB.
 
 A declared size is also what a contained command is held to (`MemoryHigh`, see
 [Containment](#containment)), which throttles it past that size but never kills it: the budget
@@ -119,7 +124,11 @@ what new work may start depends on whether memory is counted:
   count (they may not have grown to it yet). A request heavier than its pool's reservation
   starts as soon as its memory fits. One whose turn it is but that does not fit what is free,
   though its slots and the budget would take it, does not hold up its pool: lighter work behind
-  it that fits may start (its own session's later work keeps waiting behind it). What waits
+  it that fits may start (its own session's later work keeps waiting behind it), until it has
+  waited `settle_s`; after that it holds up its pool, so a stream of small requests cannot keep
+  it waiting. A daemon started again counts a lease granted within `settle_s` of the restart
+  as recent; observed leases are not counted (their memory is already out of what is
+  available). What waits
   says "memory is short". The settling and the settle window are measured on a clock that never
   steps, so changing the system time does not end or stretch them.
 - **Without it** (a 0.2 config), every pool admits only its reserved slots, and the rest waits,
@@ -241,8 +250,10 @@ memory-heavy work (a rule's `memory`, or `hold --memory`), or two large builds c
 
 `setup` never changes a config that is there, so one that leasehold 0.2 wrote keeps counting no
 memory after an upgrade (the guard then holds pools to their reservations). The `[memory]`
-table is optional. For a config that names `mode = "user"`, `leasehold doctor` (check
-`defaults`) and `leasehold setup` say what it lacks.
+table is optional. For a user's own config (`mode = "user"`, or no `mode`, which the daemon
+reads as user), `leasehold doctor` (check `defaults`) and `leasehold setup` say what it lacks:
+`doctor` as a warning for a config exactly as 0.2 wrote it, and as information for one you
+have edited since.
 
 ```sh
 leasehold setup --upgrade-config --dry-run   # what would change, as a diff
@@ -255,11 +266,16 @@ machine (name, slots, CPUs, per-lease memory; the built-in rules keep their weig
 have edited keeps every line, and gains only a `[memory]` table at the end (and today's comment
 above `[guard]`, if 0.2's is there unchanged). `--config PATH` upgrades another file.
 
-It refuses (exit 1, saying what to do) a config that is a symbolic link or has other hard
-links, one with a `[[commands.rule]]` declaring more memory than the new budget or `[ceiling]
-memory` (with memory counted, such a rule's commands would be refused, not only held to it), and
-one that changes while it works: the file is checked again just before the new one, written to
-a new temporary file and synced to disk, takes its place.
+Line endings are kept (CRLF in, CRLF in what is added), and the backup is a byte-for-byte
+copy. It refuses (exit 1, saying what to do) a config that is a symbolic link or has other hard
+links, and one that, with the budget the new table would have on this machine, would not let
+work start as before: `[[standing]]` memory that fills the budget, a `[[commands.rule]]` whose
+declared memory never fits beside the standing memory or is more than `[ceiling] memory` (with
+memory counted, such a rule's commands would be refused, not only held to it), or the built-in
+rules cut to a lighter weight. It also refuses one that changes while it works: the file is
+checked again after the new one is written to a temporary file and synced to disk, and its
+identity once more just before the rename. A write landing in the instant between that last
+check and the rename is lost: neither the new file nor the backup has it.
 
 ### The machine's daemon
 
@@ -601,6 +617,9 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
   pool, by its command and session, and the command's place in line: `machine busy for 300s:
   cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds 14 of 14;
   this needs 4; queued #1`. `leasehold doctor` warns when `wait_s` is under 120 s.
+- **A refusal.** A request the daemon refuses (one that could never be granted, a per-user
+  limit, an error answer) is denied with the daemon's reason, whatever `when_busy` says: a
+  working daemon said no, so the command does not run unleased.
 - **Passes through** for a command run in the background, when no daemon answers, and inside a
   lease already held (`LEASEHOLD_LEASE_ID` set).
 
@@ -631,7 +650,8 @@ process. It passes straight through, as if no shim were there, inside a lease al
 claude` with the plugin takes one lease per command, not two), with `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. While it
 waits it says its place on stderr, again whenever that changes and at least every 20 s. Busy
 past `wait_s`, it exits 75 and says why on stderr (`when_busy = "run"`: runs the program without a
-lease and says so).
+lease and says so). A request the daemon refuses makes it exit 77 with the reason, without
+running the program, whatever `when_busy` says.
 
 Shims see only what is run through PATH: `.venv/bin/pytest`, `python -m pytest` and absolute
 paths go round them. `shims list` shows what is installed, `shims remove` removes only shims.
@@ -708,7 +728,7 @@ client for it.
 | `GET /v1/status` | | the machine: [below](#the-status-object) |
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
-| `GET /v1/commands` | | the `[commands]` rules, each weight clamped as the daemon would grant it |
+| `GET /v1/commands` | | the `[commands]` rules, each weight clamped as the daemon would grant it; under `never`, with a `reason`, the rules no lease could ever be granted for |
 | `POST /v1/acquire` | `kind`, `pool`, `weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` (a size such as `"6g"`) | `status`: `granted` (with `lease`), `queued` (with `position` and `blocked`) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown` |
 | `POST /v1/release` | `lease_id` | `released` |
@@ -748,9 +768,9 @@ when a field is removed or changes meaning:
 - `ceiling` (`slots`, `cpus`, `memory`, `memory_bytes`), and the machine's `slots`, `held` and
   `overcommitted`;
 - `pools`, per pool: `reserved`, `max`, `priority`, `preemptible`, `observed`, `closed`,
-  `held_weight`, `overcommitted`, `running`, `revoked`, `queued`, `memory_bytes`. A pool's
-  `held_weight` includes its standing weight; `running` counts leases only; `memory_bytes` is
-  the memory admission counts there (0 without `[memory]`);
+  `held_weight`, `overcommitted`, `running`, `revoked`, `queued`, `memory_counted_bytes`. A
+  pool's `held_weight` includes its standing weight; `running` counts leases only;
+  `memory_counted_bytes` is the memory admission counts there (0 without `[memory]`);
 - `load`: `pressure`, `loadavg`, `mem_available_bytes`, `mem_total_bytes`, `cgroup_v2`,
   `slices`;
 - `lend`: `eligible`, `reason`, `quiet_since`, `quiet_s`, `window`, `pools`, `switch`;

@@ -73,7 +73,7 @@ def test_declared_and_assumed_memory_count_against_the_budget(tmp_path):
     assert lease["memory_bytes"] == lease["memory_counted_bytes"] == 10 * G
     [waiting] = st["queue"]
     assert waiting["memory_bytes"] is None and waiting["memory_counted_bytes"] == 3 * G
-    assert st["pools"]["work"]["memory_bytes"] == 10 * G
+    assert st["pools"]["work"]["memory_counted_bytes"] == 10 * G
     agent.release("big", user="ann")
     assert [x["lease_id"] for x in agent.leases()["leases"]] == ["small"]
 
@@ -133,9 +133,7 @@ def test_the_guard_limits_new_work_to_memory_free_not_to_reserved_slots(tmp_path
     assert agent.memory_free() == 14 * G - 16 * G // 20 - 9 * G
 
 
-@pytest.mark.parametrize(
-    ("memory", "declared"), [({}, "0g"), ({}, "0b"), ({"assumed_per_slot": "0g"}, None)]
-)
+@pytest.mark.parametrize(("memory", "declared"), [({}, "1b"), ({"assumed_per_slot": "0g"}, None)])
 def test_under_pressure_nothing_starts_even_what_counts_no_memory(tmp_path, memory, declared):
     agent, _, load = make_agent(tmp_path, memory=memory, **FOUR)
     load.set(memory=50.0)
@@ -195,6 +193,12 @@ def test_doctor_checks_the_budget_worked_out_for_the_machine(tmp_path):
 
     nothing = machine_config(tmp_path, memory={"kept": "20g"}, **FOUR)
     check = doctor.check_memory(nothing, 16 * G)
+    assert check.level == "fail" and "leaves no budget" in check.detail
+    full = machine_config(
+        tmp_path, memory={}, standing=[{"name": "db", "pool": "background", "weight": 1,
+        "memory": "12g"}], **FOUR,
+    )  # fmt: skip
+    check = doctor.check_memory(full, 16 * G)
     assert check.level == "fail" and "nothing that counts memory can start" in check.detail
     standing = [{"name": "db", "pool": "background", "weight": 1, "memory": "7g"}]
     cut = machine_config(tmp_path, memory={}, standing=standing, **FOUR)
@@ -383,3 +387,190 @@ def test_the_generated_config_runs_one_heavy_job_and_offers_two_as_an_opt_in(tmp
     assert "declare memory for memory-heavy work" in " ".join(text.split("\n# "))
     wide = template.sized("user", {"cpus_logical": 16, "memory_bytes": 16 * G})
     assert "# heavy_weight" not in wide  # 14 slots run three at weight 4 already
+
+
+def _rules(agent) -> tuple[dict, dict]:
+    served = agent.commands()
+    return (
+        {r["programs"][0]: r for r in served["rules"]},
+        {r["programs"][0]: r for r in served["never"]},
+    )
+
+
+STANDING_7G = [{"name": "db", "pool": "background", "weight": 1, "memory": "7g"}]
+
+
+def test_commands_never_serves_a_rule_whose_declared_memory_cannot_fit(tmp_path):
+    """A declared size above the budget, or above the room beside the standing memory, could
+    never be granted: such a rule is not served (and not forced to weight 1); it is listed
+    under `never` with the refusal's reason. One that fits keeps its weight."""
+    rules = {
+        "defaults": False,
+        "rule": [
+            {"programs": ["huge"], "weight": 2, "memory": "13g"},  # over the 12 GiB budget
+            {"programs": ["big"], "weight": 2, "memory": "6g"},  # over 12 - 7 GiB of room
+            {"programs": ["fits"], "weight": 2, "memory": "5g"},
+        ],
+    }
+    config = machine_config(tmp_path, memory={}, standing=STANDING_7G, commands=rules, **FOUR)
+    agent = MachineAgent(config, facts=FACTS, load=FakeLoad())
+    served, never = _rules(agent)
+    assert set(served) == {"fits"} and served["fits"]["weight"] == 2
+    assert set(never) == {"huge", "big"}
+    assert "13.0 GiB" in never["huge"]["reason"]
+    assert "7.0 GiB is held by standing work" in never["big"]["reason"]
+    assert ask(agent, "x", weight=2, memory="6g")["status"] == "refused"  # what it would get
+
+
+def test_commands_never_serves_a_rule_whose_assumed_memory_has_no_room(tmp_path):
+    """Undeclared, a rule counts its weight at 3 GiB a slot; beside 10 GiB of standing memory
+    in a 12 GiB budget not even weight 1 fits, so it is not served rather than served at 1."""
+    standing = [{"name": "db", "pool": "background", "weight": 1, "memory": "10g"}]
+    rules = {"defaults": False, "rule": [{"programs": ["build"], "weight": 2}]}
+    config = machine_config(tmp_path, memory={}, standing=standing, commands=rules, **FOUR)
+    agent = MachineAgent(config, facts=FACTS, load=FakeLoad())
+    served, never = _rules(agent)
+    assert served == {} and set(never) == {"build"}
+    assert ask(agent, "x", weight=1)["status"] == "refused"
+
+
+def test_a_rule_that_cannot_fit_a_fixed_budget_fails_the_config(tmp_path):
+    rules = {"defaults": False, "rule": [{"programs": ["big"], "weight": 2, "memory": "6g"}]}
+    with pytest.raises(ValueError, match=r"commands.rule\[0\]: memory 6g cannot fit"):
+        machine_config(
+            tmp_path, memory={"budget": "12g"}, standing=STANDING_7G, commands=rules, **FOUR
+        )
+
+
+def test_doctor_fails_a_rule_that_cannot_fit_beside_the_standing_memory(tmp_path):
+    from leasehold import doctor
+
+    rules = {"rule": [{"programs": ["big"], "weight": 2, "memory": "6g"}]}
+    config = machine_config(tmp_path, memory={}, standing=STANDING_7G, commands=rules, **FOUR)
+    check = doctor.check_memory(config, 16 * G)
+    assert check.level == "fail"
+    assert "commands.rule[0] (big) declares 6g, which never fits" in check.detail
+
+
+@pytest.mark.parametrize("size", ["0g", "0b", "0m"])
+def test_a_declared_size_of_nothing_is_refused_everywhere(tmp_path, size):
+    """A request, a rule and `hold --memory` may not declare 0; `assumed_per_slot` may."""
+    with pytest.raises(ValueError, match="is 0"):
+        AcquireRequest(kind="work", lease_id="z", weight=1, memory=size)
+    rules = {"rule": [{"programs": ["x"], "weight": 1, "memory": size}]}
+    with pytest.raises(ValueError, match="is 0"):
+        machine_config(tmp_path, commands=rules, **FOUR)
+    with pytest.raises(SystemExit) as exit_:
+        main(["hold", "--memory", size, "--", "true"])
+    assert exit_.value.code == 2
+    machine_config(tmp_path, memory={"assumed_per_slot": "0g"}, **FOUR)  # allowed
+
+
+def test_an_auto_budget_of_nothing_stops_the_daemon_starting(tmp_path):
+    """`kept` at or over the machine's memory leaves an `auto` budget of 0: as with a budget of
+    0 given as a size, the daemon does not start, rather than admitting nothing."""
+    config = machine_config(tmp_path, memory={"kept": "16g"}, **FOUR)
+    with pytest.raises(ValueError, match="leaves no budget"):
+        MachineAgent(config, facts=FACTS, load=FakeLoad())
+
+
+def test_small_arrivals_backfill_only_until_the_short_head_has_waited_settle_s(tmp_path):
+    """While the guard stays on (pressure between its two thresholds), an item short only of
+    the memory free lets smaller ones by, but only for `settle_s`: after that it blocks its
+    pool, the recent grants age out, and it starts, however steadily small items arrive."""
+    agent, clock, load = make_agent(
+        tmp_path, memory={}, guard={"settle_s": 30}, lease_ttl_s=300, **FOUR
+    )
+    floor = 16 * G // 20
+    load.set(memory=50.0)
+    agent.tick()
+    load.set(memory=10.0)  # under 20% (not pressing), over 5% (never settles)
+    load.available = floor + 7 * G  # 7 GiB free above the floor, less recent grants
+    clock.now += 1
+    agent.tick()
+    assert agent.guard.on and not agent.guard.pressing
+    held: dict[str, float] = {}
+    assert ask(agent, "small-0", user="bob")["status"] == "granted"  # counts 3 GiB
+    held["small-0"] = clock.now
+    clock.now += 1
+    queued_at = clock.now
+    assert ask(agent, "head", weight=2)["status"] == "queued"  # 6 GiB > 4 GiB free
+    started, backfilled, n = None, [], 0
+    while started is None and clock.now - queued_at < 300:
+        clock.now += 5
+        for lid, at in list(held.items()):
+            if clock.now - at >= 25:  # each small runs 25 s, so two overlap
+                agent.release(lid, user="bob")
+                del held[lid]
+        if round(clock.now - queued_at) % 15 == 10:  # a new small every 15 s
+            n += 1
+            if ask(agent, f"small-{n}", user="bob")["status"] == "granted":
+                held[f"small-{n}"] = clock.now
+                backfilled.append(clock.now - queued_at)
+        agent.tick()
+        if any(x["lease_id"] == "head" for x in agent.leases()["leases"]):
+            started = clock.now - queued_at
+    assert started is not None and started <= 30 + 25
+    assert backfilled and min(backfilled) < 30  # it did let small ones by at first
+    assert all(t <= 30 for t in backfilled)  # but none once it had waited settle_s
+
+
+def _settling(agent, clock, load) -> None:
+    """Pressure, then none: the guard on and settling, 7 GiB free above the floor."""
+    load.set(memory=50.0)
+    agent.tick()
+    load.set(memory=0.0)
+    load.available = 16 * G // 20 + 7 * G
+    clock.now += 1
+    agent.tick()
+    assert agent.guard.on and not agent.guard.pressing
+
+
+def test_a_restart_still_counts_what_was_granted_within_the_settle_window(tmp_path):
+    """A daemon started again places the leases it finds by their wall-clock `acquired_at`:
+    one granted within `settle_s` still counts as recent, an older one does not."""
+    clock, load = Clock(), FakeLoad()
+    config = machine_config(tmp_path, memory={}, guard={"settle_s": 30}, **FOUR)
+    first = MachineAgent(config, facts=FACTS, load=load, clock=clock)
+    assert ask(first, "old")["status"] == "granted"  # 3 GiB
+    clock.now += 100
+    assert ask(first, "new")["status"] == "granted"
+    clock.now += 5  # the daemon restarts 5 s after "new" was granted
+    again = MachineAgent(config, facts=FACTS, load=load, clock=clock)
+    _settling(again, clock, load)
+    assert again.memory_free() == 7 * G - 3 * G  # "new" only
+    clock.now += 30
+    assert again.memory_free() == 7 * G
+
+
+def test_observed_leases_are_not_counted_as_recent_grants(tmp_path):
+    """An observed lease records a process already running: `MemAvailable` already leaves out
+    its memory, so the settle window does not count it again."""
+    from leasehold.agent import OBSERVED_SCOPE
+    from leasehold.ledger import Holder, LedgerItem
+
+    agent, clock, load = make_agent(tmp_path, memory={}, guard={"settle_s": 30}, **FOUR)
+    _settling(agent, clock, load)
+    item = LedgerItem(
+        scope=OBSERVED_SCOPE, item_id="p1", kind="observed", user="ann", pool="work", weight=2
+    )
+    assert agent.ledger.impose(item, agent.policy(), holder=Holder.current())
+    agent.tick()
+    assert agent.memory_free() == 7 * G
+    assert ask(agent, "a")["status"] == "granted"
+    assert agent.memory_free() == 7 * G - 3 * G
+
+
+def test_doctor_blames_memory_only_when_memory_cut_the_heavy_rules(tmp_path):
+    """Standing work holding slots (not memory) cuts the heavy rules by slots: that is no
+    memory problem, so the memory check says nothing; standing memory that cuts them is."""
+    from leasehold import doctor
+
+    by_slots = [{"name": "svc", "pool": "work", "weight": 2}]
+    config = machine_config(tmp_path, memory={}, standing=by_slots, **FOUR)
+    assert config.policy().heaviest("work") == 2  # cut, by slots
+    assert doctor.check_memory(config, 16 * G) is None
+    by_memory = [{"name": "db", "pool": "background", "weight": 1, "memory": "5g"}]
+    config = machine_config(tmp_path, memory={}, standing=by_memory, **FOUR)
+    check = doctor.check_memory(config, 16 * G)
+    assert check.level == "warn" and "[[standing]] memory (5.0 GiB)" in check.detail

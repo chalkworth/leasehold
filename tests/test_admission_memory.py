@@ -303,7 +303,7 @@ def _old(cls, obj):
 
 
 @pytest.mark.parametrize("block", range(4))
-def test_without_a_budget_admission_is_as_before_memory(block):
+def test_without_a_budget_slot_admission_is_as_before_memory(block):
     """Every decision, line, blocker and refusal is the one made before memory was counted, both
     with no memory fields at all and with a budget that counts nothing (no item declares memory
     and none is assumed)."""

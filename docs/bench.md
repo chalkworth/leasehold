@@ -11,8 +11,10 @@ The script is [`bench/run.py`](../bench/run.py); the summaries are under
 One machine, so far: a KVM guest with 8 vCPUs, 15.6 GiB memory and 8 GiB swap, Debian 13,
 kernel 6.12, systemd user manager with cpu and memory delegated. It is a working machine:
 other people's test runs were going on beside the benchmark (load around 1.5 to 2 before each
-condition), which is noise in every row. Each condition ran once, with plans of 240 s per agent
-(not the default 600 s, to keep the whole run under three hours). Full tables, with more
+condition), which is noise in every row. In the 0.2 runs and the two-at-once runs each
+condition ran once; the [0.3 defaults](#the-03-defaults) comparison ran every condition twice,
+in interleaved rounds. All used plans of 240 s per agent (not the default 600 s, to keep the
+whole run under three hours). Full tables, with more
 columns, are in [`bench/results/8cpu-16g/`](../bench/results/8cpu-16g/), the raw per-job and
 per-second rows beside them.
 
@@ -174,10 +176,10 @@ What these say:
   5.6%, the outside probe at 9 ms too), and was slower for it; nothing in these runs separates
   the two configs.
 - **Memory counting does not bind here, declared or not.** At weight 4 on 6 slots only one heavy
-  job runs, and an undeclared one counts 4 × 2 GiB = 8 GiB of a 11.7 GiB budget, so two could
-  never be admitted by memory either. Declaring each `mem` job's size changed nothing beyond
-  noise (693 to 716 s against 701 to 707 s). What counting adds is for declared sizes,
-  `[[standing]]` memory and the opt-in below.
+  job runs, and an undeclared one counts 4 × 2 GiB = 8 GiB of a 11.7 GiB budget, so memory
+  could not have admitted a second one either; the declared rounds took 693 and 716 s against
+  701 and 707 s. What counting adds is for declared sizes, `[[standing]]` memory and the
+  opt-in below.
 - **Against unmanaged**, as at 0.2: no OOM kills where unmanaged lost 7 of 53 jobs in each
   round of the memory-heavy mix, a `git status` p95 under a third of unmanaged's, and a wakeup
   p99 under half of it, for a makespan 20 to 45% longer (round against round).
@@ -220,8 +222,8 @@ jobs had. Summaries:
 The first greedy run's in-cgroup wakeup probe was lost (a second stop signal interrupted its
 write; `bench/probe.py` now ignores it), so it was run again on its own.
 
-Memory-heavy jobs: 3 GiB each, `[memory] budget = "7g"`, weights cpu 3 and mem 2, so a `mem`
-job is assumed to use 2.3 GiB unless it declares more. `lh-enforced-declared` has each `mem` job
+Memory-heavy jobs (52 jobs): 3 GiB each, `[memory] budget = "7g"`, weights cpu 3 and mem 2, so
+a `mem` job is assumed to use 2.3 GiB unless it declares more. `lh-enforced-declared` has each `mem` job
 declare its size plus 512 MiB (`hold --memory`).
 
 | condition | failed | OOM kills | makespan s | job mean s | wait mean s | wake p99 same ms | git p95 ms | swap-in MiB | PSI max % |
@@ -267,7 +269,8 @@ default.
 
 ## Caveats
 
-- One machine, a virtual one, and one run per condition. Run-to-run variance is large for the
+- One machine, a virtual one, and one run per condition except in the 0.3-defaults comparison
+  (two interleaved rounds). Run-to-run variance is large for the
   memory results (whether three `mem` jobs overlap is a matter of seconds), smaller for the
   latency ones. The machine had other work on it throughout.
 - Synthetic jobs. They scale perfectly with workers and cost little to oversubscribe, which

@@ -74,6 +74,9 @@ def _commands(args, ctx) -> int:
     print(f"agents wait up to {answer['wait_s']:g}s, then {_busy(answer['when_busy'])}")
     for rule in settings.rules:
         print(f"  {rule.source:7}  {', '.join(sorted(rule.programs))}: {_rule_line(rule)}")
+    for rule in answer.get("never", []):
+        names = ", ".join(sorted(rule["programs"]))
+        print(f"  {rule['source']:7}  {names}: never served: {rule['reason']}")
     return 0
 
 

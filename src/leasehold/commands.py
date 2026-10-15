@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from leasehold import shell
 from leasehold.model import Name
-from leasehold.units import memory_to_bytes
+from leasehold.units import declared_to_bytes
 
 
 class CommandRule(BaseModel):
@@ -38,7 +38,7 @@ class CommandRule(BaseModel):
     @classmethod
     def _size(cls, value: str | None) -> str | None:
         if value is not None:
-            memory_to_bytes(value)
+            declared_to_bytes(value)
         return value
 
     @field_validator("args")

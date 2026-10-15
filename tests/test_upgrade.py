@@ -193,15 +193,83 @@ def test_weights_are_never_part_of_the_upgrade(tmp_path, slots):
     assert (new.commands.heavy_weight, new.commands.light_weight) == (4, 2)
 
 
-def test_a_config_that_does_not_name_user_mode_is_not_called_outdated(tmp_path):
-    path = tmp_path / "m.toml"
-    path.write_text(
+def test_a_config_that_names_no_mode_is_read_as_a_users_by_every_check(tmp_path):
+    """One rule, the daemon's: no `mode` is a user's own config, for the upgrade and for
+    doctor's hard_cpu warning alike; `mode = "system"` is neither."""
+    body = (
         "[ceiling]\nslots = 6\n[pools.work]\nreserved = 6\nmax = 6\n"
         '[kinds]\nwork = "work"\n[lend]\npools = []\n'
     )
+    path = tmp_path / "m.toml"
+    path.write_text(body)
     config = machine.load(path)
-    assert upgrade.outdated(config) == []
-    assert doctor.check_upgrade(str(path), {}, config) is None
+    assert config.for_user
+    assert upgrade.outdated(config) == ["no [memory] table: memory is not counted"]
+    assert doctor.check_hard_cpu(config) is not None
+    assert upgrade.plan(path, config) is not None
+    system = MachineConfig.model_validate(tomllib.loads('mode = "system"\n' + body))
+    assert upgrade.outdated(system) == [] and doctor.check_hard_cpu(system) is None
+
+
+def test_doctor_warns_only_for_a_config_as_0_2_wrote_it(tmp_path):
+    """A pristine 0.2 config has 0.2's defaults, not chosen ones: a warning. An edited one
+    without [memory] was someone's choice: the same news, at ok, for information."""
+    path = old_config(tmp_path / "m.toml")
+    check = doctor.check_upgrade(str(path), {}, machine.load(path))
+    assert check.level == "warn"
+    path.write_text(path.read_text() + "# mine\n")
+    check = doctor.check_upgrade(str(path), {}, machine.load(path))
+    assert check.level == "ok" and "for information" in check.detail
+
+
+def test_crlf_line_endings_are_kept_and_the_backup_is_byte_for_byte(tmp_path):
+    path = old_config(tmp_path / "m.toml")
+    original = (path.read_text() + "# mine\n").replace("\n", "\r\n").encode()
+    path.write_bytes(original)
+    plan = upgrade.plan(path, machine.load(path))
+    assert plan is not None and plan.text is not None and not plan.pristine
+    backup = upgrade.apply(plan)
+    assert backup.read_bytes() == original
+    new = path.read_bytes()
+    assert b"\r\n# mine\r\n" in new and b"\r\n[memory]\r\n" in new
+    assert new.count(b"\n") == new.count(b"\r\n")  # no bare LF added
+    assert machine.load(path).memory is not None
+
+
+@pytest.mark.parametrize(
+    ("memory_bytes", "extra", "said"),
+    [
+        (
+            64 << 30,
+            '\n[[standing]]\nname = "db"\npool = "background"\nweight = 1\nmemory = "48g"\n',
+            "all held by [[standing]] memory",
+        ),
+        (
+            16 << 30,
+            '\n[[standing]]\nname = "db"\npool = "background"\nweight = 1\nmemory = "7g"\n'
+            '\n[[commands.rule]]\nprograms = ["bigbuild"]\nweight = 2\nmemory = "6g"\n',
+            "commands.rule[0] (bigbuild) declares 6g, which never fits",
+        ),
+        (
+            16 << 30,
+            '\n[[standing]]\nname = "db"\npool = "background"\nweight = 1\nmemory = "5g"\n',
+            "the built-in build and test rules (weight 4) are cut to it",
+        ),
+    ],
+)
+def test_no_edit_that_would_stop_work_starting_on_this_machine(tmp_path, memory_bytes, extra, said):
+    """The would-be budget is worked out for this machine: an upgrade that would leave nothing
+    to start, a rule that could never be served, or the built-in heavy rules cut, is refused
+    with what to change, and the file is left as it is."""
+    path = old_config(tmp_path / "m.toml")
+    path.write_text(path.read_text().replace('memory = "11g"', 'memory = "40g"') + extra)
+    before = path.read_bytes()
+    plan = upgrade.plan(path, machine.load(path), memory_bytes)
+    assert plan is not None and plan.text is None
+    assert said in plan.manual and "Change that first" in plan.manual
+    with pytest.raises(ValueError, match="cannot be upgraded automatically"):
+        upgrade.apply(plan)
+    assert path.read_bytes() == before
 
 
 def test_a_symbolic_link_is_not_written_through(tmp_path):
@@ -275,4 +343,4 @@ def test_a_rule_declaring_more_memory_than_the_new_budget_stops_the_automatic_ed
     plan = upgrade.plan(path, machine.load(path), 16 << 30)
     assert plan is not None and plan.text is None
     assert "commands.rule[0] (bigbuild) declares 14g" in plan.manual
-    assert "lower or remove those rules' memory" in plan.manual
+    assert "more than [ceiling] memory (11g)" in plan.manual and "Change that first" in plan.manual

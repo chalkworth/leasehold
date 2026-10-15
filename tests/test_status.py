@@ -44,7 +44,7 @@ POOL_FIELDS = {
     "running",
     "revoked",
     "queued",
-    "memory_bytes",
+    "memory_counted_bytes",
 }
 
 

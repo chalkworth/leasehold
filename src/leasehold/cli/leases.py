@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from leasehold import handoff
 from leasehold.hold import hold
 from leasehold.kinds import GRANTED, KINDS
-from leasehold.units import memory_to_bytes
+from leasehold.units import declared_to_bytes
 
 ENV_SESSION = "LEASEHOLD_SESSION"
 ENV_IF_UNAVAILABLE = "LEASEHOLD_IF_UNAVAILABLE"
@@ -160,7 +160,7 @@ def _hold(args, ctx) -> int:
 
 def _memory(value: str) -> str:
     try:
-        memory_to_bytes(value)
+        declared_to_bytes(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
     return value

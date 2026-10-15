@@ -208,13 +208,20 @@ class MemorySettings(_Strict):
     _kept = field_validator("kept")(_share)
 
     def resolve(self, *, memory_bytes: int, slots: int) -> MemoryBudget:
-        """The budget for a machine of `memory_bytes` and `slots` slots."""
+        """The budget for a machine of `memory_bytes` and `slots` slots. An `auto` budget that
+        comes to nothing (`kept` at or over the machine's memory) is a ValueError, as a budget
+        of 0 given as a size is when the config loads."""
         if self.budget == "auto":
             if self.kept.endswith("%"):
                 kept = int(memory_bytes * float(self.kept[:-1]) / 100)
             else:
                 kept = memory_to_bytes(self.kept)
             budget = max(0, memory_bytes - kept)
+            if budget == 0:
+                raise ValueError(
+                    f"memory: kept = {self.kept!r} leaves no budget of the machine's "
+                    f"{memory_bytes / 2**30:.1f} GiB, so nothing that counts memory could start"
+                )
         else:
             kept, budget = 0, memory_to_bytes(self.budget)
         if self.assumed_per_slot == "auto":
@@ -375,18 +382,100 @@ class MachineConfig(_Strict):
         return self
 
     def _memory_errors(self) -> list[str]:
-        """A `[memory]` budget given as a size that `[[standing]]` memory already fills. (An
-        `auto` budget depends on the machine: `leasehold doctor` checks it.)"""
+        """A `[memory]` budget given as a size that `[[standing]]` memory already fills, and a
+        `[[commands.rule]]` whose declared memory could never fit beside it. (An `auto` budget
+        depends on the machine: `memory_problems`, which `leasehold doctor` reports.)"""
         if self.memory is None or self.memory.budget == "auto":
             return []
         budget = memory_to_bytes(self.memory.budget)
         standing = sum(self.standing_memory().values())
-        if standing < budget:
-            return []
+        if standing >= budget:
+            return [
+                f"memory.budget: {self.memory.budget} is filled by the {standing / 2**30:.1f} "
+                "GiB that [[standing]] memory holds, so nothing that counts memory could start"
+            ]
         return [
-            f"memory.budget: {self.memory.budget} is filled by the {standing / 2**30:.1f} GiB "
-            "that [[standing]] memory holds, so nothing that counts memory could start"
+            f"commands.rule[{n}]: memory {rule.memory} cannot fit the {self.memory.budget} "
+            f"memory budget beside the {standing / 2**30:.1f} GiB of [[standing]] memory"
+            for n, rule in enumerate(self.commands.rule)
+            if rule.memory is not None and standing + memory_to_bytes(rule.memory) > budget
         ]
+
+    @property
+    def for_user(self) -> bool:
+        """Whether this is a user's own daemon's config: `mode = "user"`, or no mode named,
+        which a daemon started without `--system` reads as user (`resolve`)."""
+        return (self.mode or "user") == "user"
+
+    def memory_problems(self, memory_bytes: int) -> list[tuple[str, str, str]]:
+        """What keeps `[memory]`, worked out for a machine of `memory_bytes`, from letting work
+        start as it should, as (`fail` or `warn`, what, what to do); empty without `[memory]`
+        or when nothing does. Fails: a budget of nothing, or one `[[standing]]` memory fills; a
+        `[[commands.rule]]` whose declared memory never fits beside the standing memory (it is
+        never served). Warns: the built-in heavy rules cut to a lighter weight because their
+        assumed memory does not fit beside the standing memory; `assumed_per_slot` of 0."""
+        if self.memory is None:
+            return []
+        gib = lambda n: f"{n / 2**30:.1f} GiB"  # noqa: E731
+        try:
+            budget = self.memory.resolve(memory_bytes=memory_bytes, slots=self.ceiling.slots)
+        except ValueError as exc:
+            return [("fail", str(exc), "lower [memory] kept, or give budget as a size")]
+        standing = sum(self.standing_memory().values())
+        if budget.budget <= standing:
+            return [
+                (
+                    "fail",
+                    f"the {gib(budget.budget)} memory budget is all held by [[standing]] memory "
+                    f"({gib(standing)}): nothing that counts memory can start",
+                    "lower [memory] kept, or set budget to a size above the standing memory",
+                )
+            ]
+        problems = []
+        policy = self.policy(memory_bytes=memory_bytes)
+        by_slots = self.policy()
+        work = self.kinds.get("work", "work")
+        for n, rule in enumerate(self.commands.rule):
+            pool = rule.pool or work
+            if rule.memory is None or pool not in policy.pools:
+                continue
+            if policy.heaviest(pool, memory_to_bytes(rule.memory)) == 0 < by_slots.heaviest(pool):
+                problems.append(
+                    (
+                        "fail",
+                        f"commands.rule[{n}] ({', '.join(rule.programs)}) declares "
+                        f"{rule.memory}, which never fits the {gib(budget.budget)} memory "
+                        f"budget beside {gib(standing)} of [[standing]] memory: it is never "
+                        "served, so its commands take no lease",
+                        "lower that rule's memory or the standing memory, or raise the budget",
+                    )
+                )
+        if self.commands.defaults and work in policy.pools:
+            heavy = min(self.commands.heavy_weight, policy.pools[work].max)
+            most, slots_most = policy.heaviest(work), by_slots.heaviest(work)
+            if most < min(heavy, slots_most):
+                problems.append(
+                    (
+                        "warn",
+                        f"[[standing]] memory ({gib(standing)}) leaves room in the "
+                        f"{gib(budget.budget)} budget for weight {most} at "
+                        f"{gib(budget.assumed_per_slot)} a slot: the built-in build and test "
+                        f"rules (weight {heavy}) are cut to it",
+                        "lower the standing memory or [memory] assumed_per_slot, or raise the "
+                        "budget",
+                    )
+                )
+        if budget.assumed_per_slot == 0:
+            problems.append(
+                (
+                    "warn",
+                    "[memory] assumed_per_slot is 0: work that declares no memory counts none, "
+                    "so the budget limits only declared and standing memory",
+                    "leave assumed_per_slot at auto, or declare memory in [[commands.rule]] "
+                    "and hold --memory",
+                )
+            )
+        return problems
 
     def _observe_errors(self) -> list[str]:
         errors = []
@@ -513,12 +602,14 @@ class MachineConfig(_Strict):
         memory_free: int | None = None,
         memory_short: str | None = None,
         memory_pressing: bool = False,
+        memory_backfill_since: float | None = None,
     ) -> AdmissionPolicy:
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
         `capped` every pool held to its reservation. With a `[memory]` table and the machine's
         `memory_bytes`, the memory budget too (with `[[standing]]` memory held), and
-        `memory_free` (why: `memory_short`) as the most one decision may admit, and with
+        `memory_free` (why: `memory_short`) as the most one decision may admit (an item short
+        of it lets others by only if queued at or after `memory_backfill_since`), and with
         `memory_pressing` nothing new admitted at all."""
         pool_set = self.pool_set()
         if max_overrides:
@@ -546,6 +637,7 @@ class MachineConfig(_Strict):
             memory_free=memory_free,
             memory_short=memory_short,
             memory_pressing=memory_pressing,
+            memory_backfill_since=memory_backfill_since,
         )
 
     @property

@@ -75,8 +75,9 @@ def check_config(explicit: str | None, env: Mapping[str, str]) -> tuple[Check, o
 
 
 def check_upgrade(explicit: str | None, env: Mapping[str, str], config) -> Check | None:
-    """A warning when a user's own config (`mode = "user"`) lacks what today's config has
-    (`leasehold.upgrade`), with the command that adds it. Both are optional."""
+    """When a user's own config lacks what today's config has (`leasehold.upgrade`), the
+    command that adds it: a warning for a config exactly as 0.2's `init` wrote it (it has
+    0.2's defaults, not chosen ones), information (ok) for one edited since. Both optional."""
     if config is None:
         return None
     lacks = upgrade.outdated(config)
@@ -87,10 +88,13 @@ def check_upgrade(explicit: str | None, env: Mapping[str, str], config) -> Check
     except FileNotFoundError:
         path = None
     flag = "" if path is None or path == paths.user_config(env) else f" --config {path}"
+    pristine = path is not None and upgrade.pristine(path, config)
     return Check(
         "defaults",
-        "warn",
-        f"{path or 'the config'} lacks what today's config has: " + "; ".join(lacks),
+        "warn" if pristine else "ok",
+        f"{path or 'the config'} lacks what today's config has: "
+        + "; ".join(lacks)
+        + ("" if pristine else " (it was edited, so this is for information)"),
         f"optional: `leasehold setup --upgrade-config{flag} --dry-run` shows the change, and "
         f"without --dry-run makes it (keeping the old file beside it); or by hand: "
         f"{upgrade.manual_steps(config)}",
@@ -98,53 +102,27 @@ def check_upgrade(explicit: str | None, env: Mapping[str, str], config) -> Check
 
 
 def check_memory(config, memory_bytes: int | None) -> Check | None:
-    """With `[memory]`, whether its budget, worked out for this machine, lets work start: a
-    failure when it is 0 or `[[standing]]` memory fills it, a warning when the built-in heavy
-    rules are cut to fit beside the standing memory, or when undeclared work counts nothing."""
+    """With `[memory]`, whether its budget, worked out for this machine, lets work start
+    (`MachineConfig.memory_problems`): the worst problem, the others after it."""
     if config is None or config.memory is None or not memory_bytes:
         return None
-    budget = config.memory_budget(memory_bytes)
-    assert budget is not None
-    standing = sum(config.standing_memory().values())
-    if budget.budget <= standing:
-        held = f", all of it held by [[standing]] memory ({gib(standing)})" if standing else ""
-        return Check(
-            "memory",
-            "fail",
-            f"the memory budget is {gib(budget.budget)}{held}: nothing that counts memory can "
-            "start",
-            "lower [memory] kept, or set budget to a size above the standing memory",
-        )
-    pool = config.kinds.get("work", "work")
-    policy = config.policy(memory_bytes=memory_bytes)
-    if config.commands.defaults and pool in policy.pools:
-        heavy = min(config.commands.heavy_weight, policy.pools[pool].max)
-        most = policy.heaviest(pool)
-        if most < heavy:
-            return Check(
-                "memory",
-                "warn",
-                f"[[standing]] memory ({gib(standing)}) leaves room in the "
-                f"{gib(budget.budget)} budget for weight {most} at {gib(budget.assumed_per_slot)}"
-                f" a slot: the built-in build and test rules (weight {heavy}) are cut to it",
-                "lower the standing memory or [memory] assumed_per_slot, or raise the budget",
-            )
-    if budget.assumed_per_slot == 0:
-        return Check(
-            "memory",
-            "warn",
-            "[memory] assumed_per_slot is 0: work that declares no memory counts none, so the "
-            "budget limits only declared and standing memory",
-            "leave assumed_per_slot at auto, or declare memory in [[commands.rule]] and hold "
-            "--memory",
-        )
-    return None
+    problems = config.memory_problems(memory_bytes)
+    if not problems:
+        return None
+    problems.sort(key=lambda p: p[0] != "fail")
+    level = problems[0][0]
+    return Check(
+        "memory",
+        level,
+        "; ".join(detail for _, detail, _ in problems),
+        "; ".join(dict.fromkeys(fix for _, _, fix in problems)),
+    )
 
 
 def check_hard_cpu(config) -> Check | None:
     """A warning, for a user's own daemon, that without `[contain] hard_cpu` the CPUs kept for
     the person are kept only from commands that run as many jobs as they are given."""
-    if config is None or (config.mode or "user") != "user" or config.contain.hard_cpu:
+    if config is None or not config.for_user or config.contain.hard_cpu:
         return None
     return Check(
         "hard_cpu",
@@ -168,7 +146,10 @@ def check_guard_weights(config, memory_bytes: int | None) -> Check | None:
     if pool not in pools:
         return None
     heavy = min(config.commands.heavy_weight, pools[pool].max)
-    budget = config.memory_budget(memory_bytes) if memory_bytes else None
+    try:
+        budget = config.memory_budget(memory_bytes) if memory_bytes else None
+    except ValueError:
+        return None  # no budget at all: `check_memory` fails it
     if config.memory is None:
         reserved = pools[pool].reserved
         if heavy <= reserved:
