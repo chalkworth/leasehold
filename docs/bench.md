@@ -88,44 +88,42 @@ more.
 
 ## Reading
 
-- **Interactive latency.** Only the conditions that leave CPUs idle kept the person's wakeup
-  tail low: `lh-advisory`, `lh-enforced` (p99 about 3 ms against 19 to 27 ms) and
-  `lh-hardcpu-greedy` (about 5 ms). They do so because of the slot budget: 6 slots of 8 CPUs,
-  weight 4 a job, so one job runs at a time with 4 workers and at least 3 CPUs stay free. `nice`
-  and a `CPUWeight=20` slice did not move the p99 at all on this machine (see above), and
-  neither did `CPUWeight` on leasehold's own scopes once jobs used every CPU
-  (`lh-enforced-greedy`). The probe in a separate login session fared no better than the one
-  beside the jobs, so on this machine a separate cgroup bought nothing for latency either.
-- **Memory, at 8 agents.** Without admission, two or three 3.65 GiB jobs overlapped: memory
-  pressure peaked at 45 to 73%, 2.8 to 10 GiB was swapped back in, `git status` p95 went from
-  70 ms to about 1 s, and in three of the four unadmitted conditions the OOM killer took 5 to 9
-  `mem` jobs inside the benchmark's limit (unmanaged was spared in its run; which jobs overlap
-  shifts from run to run). Every leasehold condition finished all 52 jobs with pressure under
-  1% and `git status` under 210 ms. That came from admission alone: weight 4 on 6 slots lets
-  only one heavy job run, whatever its memory. The memory guard never had cause to act
-  (pressure stayed under 1%, at least 6.3 GiB available), and `MemoryHigh` was not used (no
-  `--memory`).
-- **What it costs.** With well-behaved jobs (they take the 4 workers they are given), leasehold
-  ran the same work at 4 agents with a 17% longer makespan and 29 to 38% longer mean job time,
-  and at 8 agents with a 50% longer makespan and a job time 1.7 times as long (64 s against 38
-  s), most of it waiting for a lease (50 s on average, p95 about 100 s). The CPUs were 44 to
-  46% busy against 53 to 72% unmanaged: one weight-4 job at a time on 6 slots leaves 2 slots
-  idle that no other weight-4 job fits, and that is a third of the machine.
-- **Greedy tools.** A tool that ignores the job count is the case containment is for. Under
-  leasehold it still waits its turn, so `lh-enforced-greedy` kept the memory result (no
-  failures, pressure under 1%) at near-unmanaged speed (job mean 40 s against 38 s at 8 agents;
-  at 4 agents faster than unmanaged, 13.3 s against 14.9 s, since jobs that run one after
-  another each finish sooner). But it used every CPU, so the wakeup tail was as bad as
-  unmanaged. `hard_cpu = true` caps each scope at its weight in CPUs: that restored the latency
-  (p99 about 5 ms) at about the cost of the cooperative case. Without `hard_cpu`, enforcement
-  changed little against advisory on this machine; with it, it is what holds a greedy tool
-  back.
-- **Against the alternatives.** `nice` and a low-weight slice, the usual advice, did nothing
-  here for latency, memory or throughput: their rows are unmanaged's within noise, and they had
-  OOM kills in their 8-agent runs. A fixed `-j4` everywhere (`static-jobs`) did not help either:
-  it makes each job smaller but not fewer, and at 8 agents it had the most swap and failures.
-  What helped was deciding how many heavy jobs run at once.
-- **Where leasehold loses.** Throughput, and the time an agent waits: if you want the batch done
+- Only the conditions that leave CPUs idle kept the person's wakeup tail low: `lh-advisory`,
+  `lh-enforced` (p99 about 3 ms against 19 to 27 ms) and `lh-hardcpu-greedy` (about 5 ms). They
+  do so because of the slot budget: 6 slots of 8 CPUs, weight 4 a job, so one job runs at a time
+  with 4 workers and at least 3 CPUs stay free. `nice` and a `CPUWeight=20` slice did not move
+  the p99 at all on this machine (see above), and neither did `CPUWeight` on leasehold's own
+  scopes once jobs used every CPU (`lh-enforced-greedy`). The probe in a separate login session
+  fared no better than the one beside the jobs, so on this machine a separate cgroup bought
+  nothing for latency either.
+- At 8 agents without admission, two or three 3.65 GiB jobs overlapped: memory pressure peaked
+  at 45 to 73%, 2.8 to 10 GiB was swapped back in, `git status` p95 went from 70 ms to about 1
+  s, and in three of the four unadmitted conditions the OOM killer took 5 to 9 `mem` jobs inside
+  the benchmark's limit (unmanaged was spared in its run; which jobs overlap shifts from run to
+  run). Every leasehold condition finished all 52 jobs with pressure under 1% and `git status`
+  under 210 ms. That came from admission alone: weight 4 on 6 slots lets only one heavy job run,
+  whatever its memory. The memory guard never had cause to act (pressure stayed under 1%, at
+  least 6.3 GiB available), and `MemoryHigh` was not used (no `--memory`).
+- With well-behaved jobs (they take the 4 workers they are given), leasehold ran the same work
+  at 4 agents with a 17% longer makespan and 29 to 38% longer mean job time, and at 8 agents
+  with a 50% longer makespan and a job time 1.7 times as long (64 s against 38 s), most of it
+  waiting for a lease (50 s on average, p95 about 100 s). The CPUs were 44 to 46% busy against
+  53 to 72% unmanaged: one weight-4 job at a time on 6 slots leaves 2 slots idle that no other
+  weight-4 job fits, and that is a third of the machine.
+- A tool that ignores the job count is the case containment is for. Under leasehold it still
+  waits its turn, so `lh-enforced-greedy` kept the memory result (no failures, pressure under
+  1%) at near-unmanaged speed (job mean 40 s against 38 s at 8 agents; at 4 agents faster than
+  unmanaged, 13.3 s against 14.9 s, since jobs that run one after another each finish sooner).
+  But it used every CPU, so the wakeup tail was as bad as unmanaged. `hard_cpu = true` caps each
+  scope at its weight in CPUs: that restored the latency (p99 about 5 ms) at about the cost of
+  the cooperative case. Without `hard_cpu`, enforcement changed little against advisory on this
+  machine; with it, it is what holds a greedy tool back.
+- `nice` and a low-weight slice, the usual advice, did nothing here for latency, memory or
+  throughput: their rows are unmanaged's within noise, and they had OOM kills in their 8-agent
+  runs. A fixed `-j4` everywhere (`static-jobs`) did not help either: it makes each job smaller
+  but not fewer, and at 8 agents it had the most swap and failures. What helped was deciding how
+  many heavy jobs run at once.
+- leasehold loses on throughput and on the time an agent waits: if you want the batch done
   soonest and do not use the machine meanwhile, unmanaged or plain serialization with greedy
   tools (`lh-enforced-greedy`) finished first. 0.2's default budget (2 CPUs kept, every build
   weighing 4 of 6 slots) is cautious, and 0.3 keeps it; two at once is an opt-in (below). An
@@ -169,24 +167,23 @@ Memory-heavy mix:
 
 What these say:
 
-- **The 0.3 defaults behave as 0.2's did.** With the same weights, one heavy job runs at a time
+- The 0.3 defaults behave as 0.2's did. With the same weights, one heavy job runs at a time
   either way, and the two configs' rows are within each other's spread: 834 and 892 s against
   841 and 842 s, no failures, a wakeup p99 of 3.5 to 9 ms against unmanaged's 23 to 27 ms. The
   0.3 defaults' second round met more outside pressure than the 0.2 config's (pressure up to
   5.6%, the outside probe at 9 ms too), and was slower for it; nothing in these runs separates
   the two configs.
-- **Memory counting does not bind here, declared or not.** At weight 4 on 6 slots only one heavy
-  job runs, and an undeclared one counts 4 × 2 GiB = 8 GiB of a 11.7 GiB budget, so memory
-  could not have admitted a second one either; the declared rounds took 693 and 716 s against
-  701 and 707 s. What counting adds is for declared sizes, `[[standing]]` memory and the
-  opt-in below.
-- **Against unmanaged**, as at 0.2: no OOM kills where unmanaged lost 7 of 53 jobs in each
-  round of the memory-heavy mix, a `git status` p95 under a third of unmanaged's, and a wakeup
-  p99 under half of it, for a makespan 20 to 45% longer (round against round).
-- **Wakeup latency moved with the machine's other load.** Every leasehold row of the
-  memory-heavy mix, and the second round of the main mix, sat at about 9 ms, inside and
-  outside the benchmark alike; the first round of the main mix at 3.5 ms. It is the 0.2 result
-  (about 3.3 ms) on a quiet machine, and higher on a busier one.
+- Memory counting does not bind here, declared or not. At weight 4 on 6 slots only one heavy job
+  runs, and an undeclared one counts 4 × 2 GiB = 8 GiB of a 11.7 GiB budget, so memory could not
+  have admitted a second one either; the declared rounds took 693 and 716 s against 701 and 707
+  s. What counting adds is for declared sizes, `[[standing]]` memory and the opt-in below.
+- Against unmanaged, as at 0.2, leasehold had no OOM kills where unmanaged lost 7 of 53 jobs in
+  each round of the memory-heavy mix, a `git status` p95 under a third of unmanaged's, and a
+  wakeup p99 under half of it, for a makespan 20 to 45% longer (round against round).
+- Wakeup latency moved with the machine's other load. Every leasehold row of the memory-heavy
+  mix, and the second round of the main mix, sat at about 9 ms, inside and outside the benchmark
+  alike; the first round of the main mix at 3.5 ms. It is the 0.2 result (about 3.3 ms) on a
+  quiet machine, and higher on a busier one.
 
 The README's headline table still shows the 0.2 run, which these runs neither contradict nor
 improve on.
@@ -234,33 +231,32 @@ declare its size plus 512 MiB (`hold --memory`).
 
 What these say:
 
-- **In the one like-for-like comparison, two at once did worse than one at a time on every
-  measure.** The `0.2 config` and `two at once` rows ran in the same session, minutes apart,
-  under the same outside load (about 1.9 before each). Against 0.2's one-at-a-time, two at once
-  took 813 s against 714 s, a mean job of 63 s against 49 s, read 3.4 GiB back from
-  swap against 14 MiB, and had a `git status` p95 of 454 ms against 111 ms, a wakeup p99 of 19
-  ms against 4.5 ms and memory pressure up to 23% against 4%. No job failed in either. Two
-  2.5 GiB jobs at once doubled the benchmark's own memory (5.0 GiB at its peak, against 2.5),
-  and with what other people had in use the machine went into swap; the guard then held new
-  work back (blocked items said "memory is short"), which is where the waits and the makespan
-  came from. The run does not separate how much of the pressure was the benchmark's and how
-  much others'.
-- **The `budget 7g` and second greedy rows do not show what the setting does.** They ran later,
-  in a quieter session (load 0.8 and 1.4 before them, against 1.9), with 53 jobs instead of 52,
-  so their 638 s and 604 s cannot be set against the 714 s of the 0.2 config. Nor is the 7g row
-  a test of the budget: with `assumed_per_slot = "auto"`, two weight-3 jobs count exactly the
+- In the one like-for-like comparison, two at once did worse than one at a time on every
+  measure. The `0.2 config` and `two at once` rows ran in the same session, minutes apart, under
+  the same outside load (about 1.9 before each). Against 0.2's one-at-a-time, two at once took
+  813 s against 714 s, a mean job of 63 s against 49 s, read 3.4 GiB back from swap against 14
+  MiB, and had a `git status` p95 of 454 ms against 111 ms, a wakeup p99 of 19 ms against 4.5 ms
+  and memory pressure up to 23% against 4%. No job failed in either. Two 2.5 GiB jobs at once
+  doubled the benchmark's own memory (5.0 GiB at its peak, against 2.5), and with what other
+  people had in use the machine went into swap; the guard then held new work back (blocked items
+  said "memory is short"), which is where the waits and the makespan came from. The run does not
+  separate how much of the pressure was the benchmark's and how much others'.
+- The `budget 7g` and second greedy rows do not show what the setting does. They ran later, in a
+  quieter session (load 0.8 and 1.4 before them, against 1.9), with 53 jobs instead of 52, so
+  their 638 s and 604 s cannot be set against the 714 s of the 0.2 config. Nor is the 7g row a
+  test of the budget: with `assumed_per_slot = "auto"`, two weight-3 jobs count exactly the
   budget whatever it is, so `7g` and `auto` admit the same work here. What the row does show is
   that two at a time on a quiet machine ran without pressure, at a wakeup p99 of 9.1 ms.
-- **With nothing declared, the budget does not bind.** `assumed_per_slot = "auto"` counts a
-  request at its weight times the budget over the slots, which is never more than the budget
-  while the weights fit the slots. So memory admission holds back only declared and
-  `[[standing]]` memory; undeclared work is held back by its slots and, under pressure, by the
-  guard. With two at once, declare memory for memory-heavy work.
-- **Declared memory is what protects.** In the memory-heavy run a `mem` job used 3 GiB but was
+- With nothing declared, the budget does not bind. `assumed_per_slot = "auto"` counts a request
+  at its weight times the budget over the slots, which is never more than the budget while the
+  weights fit the slots. So memory admission holds back only declared and `[[standing]]` memory;
+  undeclared work is held back by its slots and, under pressure, by the guard. With two at once,
+  declare memory for memory-heavy work.
+- Declared memory is what protects. In the memory-heavy run a `mem` job used 3 GiB but was
   assumed to use 2.3, so three could run at once in 7 GiB, and 3 were OOM-killed (against 19
   unmanaged). Declaring the size (`hold --memory 3584m`, or a rule's `memory`) removed every
   failure and nearly all the swap, at a makespan 20% above unmanaged.
-- **Greedy tools are still the CPU problem.** A tool that ignores the job count fills every CPU
+- Greedy tools are still the CPU problem. A tool that ignores the job count fills every CPU
   whatever its weight, so its wakeup tail is unmanaged's (19 ms) unless `hard_cpu` is on, as at
   0.2.
 
