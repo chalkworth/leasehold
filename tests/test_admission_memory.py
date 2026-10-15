@@ -158,6 +158,71 @@ def test_zero_memory_free_admits_nothing_that_counts_memory():
     assert decide(State(waiting=(item("a", weight=1),)), p) == []
 
 
+def test_pressing_admits_nothing_whatever_it_counts():
+    """Under real pressure nothing new starts: not an item declaring 0 bytes, not one counted
+    as 0 because nothing is assumed per slot, not one on a budget of 0."""
+    for p, declared in (
+        (policy(memory=100 * G, assumed_memory=G, memory_free=0, memory_pressing=True), 0),
+        (policy(memory=100 * G, memory_free=0, memory_pressing=True), None),
+        (policy(memory=0, memory_free=0, memory_pressing=True), 0),
+    ):
+        state = State(waiting=(item("a", weight=4, memory=declared),))
+        assert decide(state, p) == []
+        assert blocker(state, p, ("s", "a")) == (
+            "memory is short: nothing new starts until the pressure eases"
+        )
+
+
+def test_pressing_is_off_by_default_and_only_where_named():
+    p = policy(memory=100 * G, assumed_memory=G)
+    assert p.memory_pressing == frozenset()
+    assert names(decide(State(waiting=(item("a", weight=4, memory=0),)), p)) == ["a"]
+
+
+def test_an_item_short_only_of_memory_free_lets_what_fits_start_behind_it():
+    """While the guard settles, the head that fits its slots and the budget but not what is
+    free waits without blocking: a lighter item behind it, in another session, that fits what
+    is free starts. Its own session's later items keep waiting behind it."""
+    p = policy(memory=100 * G, assumed_memory=G, memory_free=2 * G)
+    state = State(
+        waiting=(
+            item("heavy", weight=3, user="ann", session="s1"),
+            item("after-heavy", weight=1, user="ann", session="s1", order=1),
+            item("light", weight=1, user="bob", order=2),
+        )
+    )
+    assert names(decide(state, p)) == ["light"]
+
+
+def test_a_head_that_fails_slots_or_the_budget_still_blocks_its_pool():
+    by_slots = policy(memory=100 * G, assumed_memory=G, memory_free=100 * G)
+    state = State(
+        held=(held(weight=4),),
+        waiting=(item("heavy", weight=3, user="ann"), item("light", weight=1, user="bob", order=1)),
+    )
+    assert decide(state, by_slots) == []
+    by_budget = policy(memory=4 * G, assumed_memory=G, memory_free=100 * G)
+    state = State(
+        held=(held(weight=1, memory=3 * G),),
+        waiting=(
+            item("big", weight=1, memory=2 * G, user="ann"),
+            item("light", weight=1, memory=G // 2, user="bob", order=1),
+        ),
+    )
+    assert decide(state, by_budget) == []
+
+
+def test_heaviest_is_cut_to_what_fits_beside_standing_memory():
+    """The weight the daemon serves a rule at is one that refusal accepts: undeclared, its
+    assumed memory must fit the budget beside the standing memory."""
+    p = policy(memory=6 * G, assumed_memory=G, standing_memory={"work": 4 * G})
+    assert p.heaviest("work") == 2
+    assert p.refusal("work", 2) is None
+    assert p.refusal("work", 3) is not None
+    assert policy(memory=6 * G, assumed_memory=G).heaviest("work") == 6
+    assert policy(memory=6 * G).heaviest("work") == 6  # nothing assumed: slots alone
+
+
 def test_fits_takes_memory_optionally():
     p = policy(memory=4 * G)
     tally = _Tally.of(State(), p)

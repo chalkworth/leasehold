@@ -1,32 +1,43 @@
 """Bringing a user's config from leasehold 0.2 up to today's defaults, only when asked.
 
-0.2's `init` wrote a user's config with no `[memory]` table (memory not counted, and the guard
-holding pools to their reservations) and left the built-in rules at weight 4, so on a typical
-machine one build or test run ran at a time. `outdated` says what such a config lacks; `plan`
-works out the new text and `apply` writes it, the old file kept beside it first:
+0.2's `init` wrote a user's config (`mode = "user"`) with no `[memory]` table (memory not
+counted, and the guard holding pools to their reservations) and left the built-in rules at
+weights 4 and 2, where today's config sets them for the machine's slots
+(`leasehold.template.weights`). Both are optional: a config without them works as it did.
+`outdated` says what such a config lacks; `plan` works out the new text and `apply` writes it,
+the old file kept beside it first:
 
 * a config exactly as 0.2's `init` wrote it is rendered afresh from today's template, for the
   same name, slots, CPUs, per-lease memory and description;
 * any other keeps every line it has and gains only what it lacks: `heavy_weight` and
   `light_weight` under `[commands]`, and a `[memory]` table at the end. A `[commands]` written
   other than as a `[commands]` header (a dotted key, an inline table) is not edited: `plan`
-  says what to add by hand instead.
+  says what to add by hand instead;
+* neither is edited when a `[[commands.rule]]` declares more memory than the new budget or the
+  `[ceiling]` memory, since a declared size is then refused, not only held to: `plan` names
+  the rules to change first.
+
+`apply` writes only a regular file with one link (not a symbolic link, not a hard-linked one),
+through a new temporary file synced to disk, and only if the file is still the one `plan`
+read.
 
 Nothing here runs on its own: `setup` and `doctor` only report what `outdated` finds.
 """
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import os
 import re
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from leasehold import template
-from leasehold.commands import HEAVY_WEIGHT
-from leasehold.machine import MachineConfig
+from leasehold.machine import MachineConfig, MemorySettings
+from leasehold.units import memory_to_bytes
 
 #: The `[memory]` table an edited config gains.
 MEMORY_TABLE = (
@@ -51,36 +62,49 @@ GUARD_COMMENT = (
 
 
 def _user(config: MachineConfig) -> bool:
-    return (config.mode or "user") == "user"
+    """A user's own config, as `init --user` writes it: `mode = "user"` named. A config that
+    leaves the mode out may be either kind, and is left alone."""
+    return config.mode == "user"
 
 
 def _lacks_memory(config: MachineConfig) -> bool:
     return _user(config) and config.memory is None
 
 
+def _unset_weights(config: MachineConfig) -> list[str]:
+    return [
+        key
+        for key in ("heavy_weight", "light_weight")
+        if key not in config.commands.model_fields_set
+    ]
+
+
 def _lacks_weights(config: MachineConfig) -> bool:
-    """Whether the built-in heavy rules are left at 0.2's weight where that lets only one run
-    at a time, though half the slots would let two."""
-    commands, slots = config.commands, config.ceiling.slots
+    """Whether the built-in rules' weights are left unset where the ones they fall back to
+    differ from what today's config sets for the machine's slots."""
+    commands = config.commands
     return (
         _user(config)
         and commands.defaults
-        and "heavy_weight" not in commands.model_fields_set
-        and 4 <= slots < HEAVY_WEIGHT * 2
+        and bool(_unset_weights(config))
+        and (commands.heavy_weight, commands.light_weight) != template.weights(config.ceiling.slots)
     )
 
 
 def outdated(config: MachineConfig) -> list[str]:
-    """What a user's own config lacks of today's defaults, in words; empty when nothing (or
-    when it is the machine's config, which `init` never wrote this way)."""
+    """What a user's own config lacks of today's defaults, in words; empty when nothing, or
+    when it does not name `mode = "user"` (the machine's config, which `init` never wrote
+    this way, or one written by hand)."""
     lacks = []
     if _lacks_memory(config):
-        lacks.append("memory is not counted (no [memory] table)")
-    slots = config.ceiling.slots
+        lacks.append("no [memory] table: memory is not counted")
     if _lacks_weights(config):
+        c = config.commands
+        heavy, light = template.weights(config.ceiling.slots)
         lacks.append(
-            f"the built-in build and test rules weigh {HEAVY_WEIGHT} of {slots} slots, so "
-            "one runs at a time"
+            f"the built-in rules weigh {c.heavy_weight} (builds and test runs) and "
+            f"{c.light_weight} (JavaScript tooling); for {config.ceiling.slots} slots today's "
+            f"config sets {heavy} and {light}"
         )
     return lacks
 
@@ -97,6 +121,8 @@ class Plan:
     pristine: bool
     changes: tuple[str, ...]
     manual: str | None = None
+    #: The file `plan` read: (device, inode, size, modification time in ns).
+    identity: tuple[int, int, int, int] | None = None
 
     def diff(self) -> str:
         if self.text is None:
@@ -129,14 +155,59 @@ def _pristine(config: MachineConfig, text: str) -> bool:
     )  # fmt: skip
 
 
-def _weights_lines(slots: int) -> str:
-    heavy, light = template.weights(slots)
+def _weights_lines(config: MachineConfig) -> str:
+    heavy, light = template.weights(config.ceiling.slots)
+    values = {"heavy_weight": heavy, "light_weight": light}
     return (
         "# The built-in rules' weights (added by `leasehold setup --upgrade-config`): builds and\n"
         "# test runs, and JavaScript tooling.\n"
-        f"heavy_weight = {heavy}\n"
-        f"light_weight = {light}\n"
+        + "".join(f"{key} = {values[key]}\n" for key in _unset_weights(config))
     )
+
+
+def _identity(path: Path) -> tuple[int, int, int, int]:
+    st = path.stat(follow_symlinks=False)
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _unsafe(path: Path) -> str | None:
+    """Why the file at `path` is not one to write over, or None."""
+    st = path.stat(follow_symlinks=False)
+    if path.is_symlink():
+        return (
+            f"{path} is a symbolic link (to {os.readlink(path)}); run it on the file itself "
+            "with --config, or change it by hand"
+        )
+    if st.st_nlink > 1:
+        return (
+            f"{path} has {st.st_nlink} hard links, which writing a new file would part; "
+            "change it by hand"
+        )
+    return None
+
+
+def _oversized_rules(config: MachineConfig, memory_bytes: int | None) -> list[str]:
+    """The rules whose memory a `[memory]` table would refuse: more than the budget it would
+    have on this machine, or than `[ceiling] memory`."""
+    limits = []
+    if memory_bytes:
+        budget = MemorySettings().resolve(memory_bytes=memory_bytes, slots=config.ceiling.slots)
+        limits.append(("the memory budget it would have", budget.budget))
+    if config.ceiling.memory is not None:
+        limits.append(("[ceiling] memory", memory_to_bytes(config.ceiling.memory)))
+    out = []
+    for n, rule in enumerate(config.commands.rule):
+        if rule.memory is None:
+            continue
+        size = memory_to_bytes(rule.memory)
+        for what, limit in limits:
+            if size > limit:
+                out.append(
+                    f"commands.rule[{n}] ({', '.join(rule.programs)}) declares {rule.memory}, "
+                    f"more than {what} ({limit / 2**30:.1f} GiB)"
+                )
+                break
+    return out
 
 
 def manual_steps(config: MachineConfig) -> str:
@@ -150,13 +221,25 @@ def manual_steps(config: MachineConfig) -> str:
     return "add " + ", and ".join(steps) + "; docs/reference.md describes each"
 
 
-def plan(path: Path, config: MachineConfig) -> Plan | None:
-    """The upgrade of the config at `path` (already loaded as `config`), or None when it lacks
-    nothing."""
+def plan(path: Path, config: MachineConfig, memory_bytes: int | None = None) -> Plan | None:
+    """The upgrade of the config at `path` (already loaded as `config`) on a machine of
+    `memory_bytes` (None: unknown), or None when it lacks nothing."""
     lacks = outdated(config)
     if not lacks:
         return None
+    identity = _identity(path)
     old = path.read_text()
+    unsafe = _unsafe(path)
+    if unsafe is not None:
+        return Plan(path, old, None, False, (), manual=unsafe, identity=identity)
+    oversized = _oversized_rules(config, memory_bytes) if _lacks_memory(config) else []
+    if oversized:
+        manual = (
+            "; ".join(oversized)
+            + ". With memory counted, a declared size over these is refused, not only held "
+            "to: lower or remove those rules' memory, then run it again"
+        )
+        return Plan(path, old, None, False, (), manual=manual, identity=identity)
     if _pristine(config, old):
         c = config.ceiling
         assert c.cpus is not None and c.memory is not None
@@ -170,15 +253,15 @@ def plan(path: Path, config: MachineConfig) -> Plan | None:
             f'[memory] budget = "auto", kept = "25%"; heavy_weight = {heavy}, '
             f"light_weight = {light}; every other default and comment as today's",
         )
-        return Plan(path, old, text, True, changes)
+        return Plan(path, old, text, True, changes, identity=identity)
     text = old
     changes: list[str] = []
     if _lacks_weights(config):
         lines = text.splitlines(keepends=True)
         at = next((i for i, line in enumerate(lines) if _COMMANDS.match(line)), None)
         if at is None and "commands" in tomllib.loads(text):
-            return Plan(path, old, None, False, (), manual=manual_steps(config))
-        weights = _weights_lines(config.ceiling.slots)
+            return Plan(path, old, None, False, (), manual=manual_steps(config), identity=identity)
+        weights = _weights_lines(config)
         if at is None:
             if not text.endswith("\n"):
                 text += "\n"
@@ -186,8 +269,8 @@ def plan(path: Path, config: MachineConfig) -> Plan | None:
         else:
             lines.insert(at + 1, weights)
             text = "".join(lines)
-        heavy, light = template.weights(config.ceiling.slots)
-        changes.append(f"[commands] gains heavy_weight = {heavy} and light_weight = {light}")
+        added = " and ".join(line for line in weights.splitlines() if not line.startswith("#"))
+        changes.append(f"[commands] gains {added}")
     if _lacks_memory(config):
         if not text.endswith("\n"):
             text += "\n"
@@ -199,8 +282,8 @@ def plan(path: Path, config: MachineConfig) -> Plan | None:
     try:
         MachineConfig.model_validate(tomllib.loads(text))
     except (ValueError, tomllib.TOMLDecodeError):
-        return Plan(path, old, None, False, (), manual=manual_steps(config))
-    return Plan(path, old, text, False, tuple(changes))
+        return Plan(path, old, None, False, (), manual=manual_steps(config), identity=identity)
+    return Plan(path, old, text, False, tuple(changes), identity=identity)
 
 
 def backup_path(path: Path) -> Path:
@@ -213,20 +296,56 @@ def backup_path(path: Path) -> Path:
     return candidate
 
 
+def _unchanged(p: Plan) -> None:
+    """Raise ValueError unless the file is still the one `plan` read, and still safe to write."""
+    unsafe = _unsafe(p.path)
+    if unsafe is not None:
+        raise ValueError(unsafe)
+    if _identity(p.path) != p.identity or p.path.read_text() != p.old:
+        raise ValueError(f"{p.path} changed while it was being upgraded; run it again")
+
+
+def _write_new(path: Path, text: str, mode: int, *, prefix: str) -> Path:
+    """`text` in a new file beside `path` (never an existing one, never through a link),
+    synced to disk."""
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=prefix, suffix=".upgrading")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException:
+        os.unlink(name)
+        raise
+    return Path(name)
+
+
 def apply(p: Plan) -> Path:
     """Write `p.text` over its file, after copying the file as it is to `backup_path`; the
-    backup's path. Refuses (ValueError) when the file changed since `plan` read it."""
+    backup's path. Refuses (ValueError) a symbolic or hard-linked file, and one that changed
+    since `plan` read it: checked first, and again just before the new file takes its place."""
     if p.text is None:
         raise ValueError(f"{p.path} cannot be upgraded automatically: {p.manual}")
-    if p.path.read_text() != p.old:
-        raise ValueError(f"{p.path} changed while it was being upgraded; run it again")
-    backup = backup_path(p.path)
+    _unchanged(p)
     mode = p.path.stat().st_mode & 0o777
+    backup = backup_path(p.path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     with os.fdopen(os.open(backup, flags, mode), "w") as out:
         out.write(p.old)
-    tmp = p.path.with_name(f".{p.path.name}.upgrading")
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w") as out:
-        out.write(p.text)
-    os.replace(tmp, p.path)
+        out.flush()
+        os.fsync(out.fileno())
+    tmp = _write_new(p.path, p.text, mode, prefix=f".{p.path.name}.")
+    try:
+        _unchanged(p)
+        os.replace(tmp, p.path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    with contextlib.suppress(OSError):
+        directory = os.open(p.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     return backup

@@ -180,7 +180,8 @@ class MemorySettings(_Strict):
     `leasehold.admission`). A request counts the memory it declares (`hold --memory`, a
     `[[commands.rule]]` `memory`), or, declaring none, its weight times `assumed_per_slot`."""
 
-    #: `auto`: the machine's memory less `kept`; or a size such as `48g`.
+    #: `auto`: the machine's memory less `kept`; or a size such as `48g` (not 0, which would let
+    #: nothing that counts memory start).
     budget: str = "auto"
     #: With `budget = "auto"`, the memory kept back for you: a size, or a percentage of the
     #: machine's memory.
@@ -195,6 +196,13 @@ class MemorySettings(_Strict):
     def _auto_or_size(cls, value: str) -> str:
         if value != "auto":
             memory_to_bytes(value)
+        return value
+
+    @field_validator("budget")
+    @classmethod
+    def _some(cls, value: str) -> str:
+        if value != "auto" and memory_to_bytes(value) == 0:
+            raise ValueError("a budget of 0 lets nothing that counts memory start")
         return value
 
     _kept = field_validator("kept")(_share)
@@ -355,15 +363,30 @@ class MachineConfig(_Strict):
             elif pools[pool].reserved:
                 errors.append(f"pools.{pool}: a lend pool reserves nothing")
         errors += self._standing_errors(pools)
+        errors += self._memory_errors()
         errors += self._observe_errors()
         for n, rule in enumerate(self.commands.rule):
             if rule.pool is not None and rule.pool not in pools:
                 errors.append(f"commands.rule[{n}]: pool {rule.pool!r} is not under pools")
-            elif rule.pool == self.observed_pool:
+            elif rule.pool is not None and rule.pool == self.observed_pool:
                 errors.append(f"commands.rule[{n}]: only observed programs go in {rule.pool!r}")
         if errors:
             raise ValueError("; ".join(errors))
         return self
+
+    def _memory_errors(self) -> list[str]:
+        """A `[memory]` budget given as a size that `[[standing]]` memory already fills. (An
+        `auto` budget depends on the machine: `leasehold doctor` checks it.)"""
+        if self.memory is None or self.memory.budget == "auto":
+            return []
+        budget = memory_to_bytes(self.memory.budget)
+        standing = sum(self.standing_memory().values())
+        if standing < budget:
+            return []
+        return [
+            f"memory.budget: {self.memory.budget} is filled by the {standing / 2**30:.1f} GiB "
+            "that [[standing]] memory holds, so nothing that counts memory could start"
+        ]
 
     def _observe_errors(self) -> list[str]:
         errors = []
@@ -489,12 +512,14 @@ class MachineConfig(_Strict):
         memory_bytes: int | None = None,
         memory_free: int | None = None,
         memory_short: str | None = None,
+        memory_pressing: bool = False,
     ) -> AdmissionPolicy:
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
         `capped` every pool held to its reservation. With a `[memory]` table and the machine's
         `memory_bytes`, the memory budget too (with `[[standing]]` memory held), and
-        `memory_free` (why: `memory_short`) as the most one decision may admit."""
+        `memory_free` (why: `memory_short`) as the most one decision may admit, and with
+        `memory_pressing` nothing new admitted at all."""
         pool_set = self.pool_set()
         if max_overrides:
             pools = {
@@ -520,6 +545,7 @@ class MachineConfig(_Strict):
             standing_memory=self.standing_memory(),
             memory_free=memory_free,
             memory_short=memory_short,
+            memory_pressing=memory_pressing,
         )
 
     @property

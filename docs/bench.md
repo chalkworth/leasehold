@@ -142,9 +142,9 @@ They are not directly comparable with the tables above. Other people's work was 
 GiB of the machine's memory that day, so the benchmark's limit was lowered to 7 GiB (swap 2
 GiB) and the `mem` jobs to 2.5 GiB, which keeps the same shape: two overlapping `mem` jobs fit,
 three do not. `lh-enforced-v020` is the 0.2 config and weight 4, run in the same session for the
-comparison. The `budget 7g` row ran later, as its own invocation (53 jobs: the plan is sized by
-a calibration that came out slightly differently), with `[memory] budget = "7g"`, the memory
-the jobs actually had. Summaries: [`k8-full-d240-v030`](../bench/results/8cpu-16g/k8-full-d240-v030.md),
+comparison. The `budget 7g` row and the second greedy row ran later, in another and quieter
+session, each as its own invocation (53 jobs: the plan is sized by a calibration that came out
+slightly differently); the `7g` row set `[memory] budget = "7g"`, the memory the jobs had. Summaries: [`k8-full-d240-v030`](../bench/results/8cpu-16g/k8-full-d240-v030.md),
 [`k8-full-d240-v030-budget7g`](../bench/results/8cpu-16g/k8-full-d240-v030-budget7g.md),
 [`k8-memheavy-d240-v030`](../bench/results/8cpu-16g/k8-memheavy-d240-v030.md).
 
@@ -172,31 +172,38 @@ declare its size plus 512 MiB (`hold --memory`).
 
 What these say:
 
-- **When the budget matches the memory there is, two at a time is faster and still safe.** With
-  `budget = "7g"`, the 0.3 config finished the work in 638 s against 714 s for the 0.2 config
-  and 649 s unmanaged, job mean 39 s against 49 s for both, with no failures, no swap and no
-  memory pressure. The cost is latency: the wakeup p99 was 9.1 ms, against 4.5 ms with one job
-  at a time and 37 ms unmanaged. Two weight-3 jobs keep 6 of 8 CPUs busy, and with the
-  machine's own load that is close to the point where this guest's wakeup tail rises (the side
-  measurement above).
-- **The automatic budget does not see a limit below the machine's memory, or other people's
-  memory.** In the first 0.3 run the budget was the machine's 15.6 GiB less 25%, while the
-  benchmark had 7 GiB. Its own memory peaked at 5.0 GiB (two `mem` jobs), the same as in the
-  `7g` run, but the machine as a whole was under pressure from outside it: 3.4 GiB swapped
-  back in, pressure up to 23%. The guard then held new work (blocked items said "memory is
-  short"), which is where the longer waits and makespan came from; no job failed. The same
-  admission later that night, on a quieter machine, gave the `7g` row. Admission cannot tell these
-  apart from inside; the guard is what reacts to memory used by others.
-- **Assumed memory protects only jobs that stay near their share.** In the memory-heavy run a
-  `mem` job used 3 GiB but counted 2.3 GiB, so three could be admitted into 7 GiB, and 3 were
-  OOM-killed (against 19 unmanaged). Declaring the size (`hold --memory 3.5g`, or a rule's
-  `memory`) removed every failure and nearly all the swap, at a makespan 20% above unmanaged.
+- **In the one like-for-like comparison, the 0.3 defaults did worse than 0.2's on every
+  measure.** The `0.2 config` and `0.3 config` rows ran in the same session, minutes apart,
+  under the same outside load (about 1.9 before each). Against 0.2's one-at-a-time, the 0.3
+  defaults took 813 s against 714 s, a mean job of 63 s against 49 s, read 3.4 GiB back from
+  swap against 14 MiB, and had a `git status` p95 of 454 ms against 111 ms, a wakeup p99 of 19
+  ms against 4.5 ms and memory pressure up to 23% against 4%. No job failed in either. Two
+  2.5 GiB jobs at once doubled the benchmark's own memory (5.0 GiB at its peak, against 2.5),
+  and with what other people had in use the machine went into swap; the guard then held new
+  work back (blocked items said "memory is short"), which is where the waits and the makespan
+  came from. The run does not separate how much of the pressure was the benchmark's and how
+  much others'.
+- **The `budget 7g` and second greedy rows do not show what the defaults do.** They ran later,
+  in a quieter session (load 0.8 and 1.4 before them, against 1.9), with 53 jobs instead of 52,
+  so their 638 s and 604 s cannot be set against the 714 s of the 0.2 config. Nor is the 7g row
+  a test of the budget: with `assumed_per_slot = "auto"`, two weight-3 jobs count exactly the
+  budget whatever it is, so `7g` and `auto` admit the same work here. What the row does show is
+  that two at a time on a quiet machine ran without pressure, at a wakeup p99 of 9.1 ms.
+- **With nothing declared, the budget does not bind.** `assumed_per_slot = "auto"` counts a
+  request at its weight times the budget over the slots, which is never more than the budget
+  while the weights fit the slots. So for a default user config, memory admission holds back only
+  declared and `[[standing]]` memory; undeclared work is held back by its slots and, under
+  pressure, by the guard.
+- **Declared memory is what protects.** In the memory-heavy run a `mem` job used 3 GiB but was
+  assumed to use 2.3, so three could run at once in 7 GiB, and 3 were OOM-killed (against 19
+  unmanaged). Declaring the size (`hold --memory 3584m`, or a rule's `memory`) removed every
+  failure and nearly all the swap, at a makespan 20% above unmanaged.
 - **Greedy tools are still the CPU problem.** A tool that ignores the job count fills every CPU
   whatever its weight, so its wakeup tail is unmanaged's (19 ms) unless `hard_cpu` is on, as at
-  0.2. It is also the fastest leasehold row, as before.
+  0.2.
 
 The README's headline table still shows the 0.2 run: the 0.3 runs had a different memory limit
-and job size, and one run per condition is not enough to replace it.
+and job size, one run per condition, and did not show the new defaults to be better.
 
 ## Caveats
 

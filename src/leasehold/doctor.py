@@ -75,8 +75,8 @@ def check_config(explicit: str | None, env: Mapping[str, str]) -> tuple[Check, o
 
 
 def check_upgrade(explicit: str | None, env: Mapping[str, str], config) -> Check | None:
-    """A warning when a user's config lacks today's defaults (`leasehold.upgrade`), with the
-    command that adds them."""
+    """A warning when a user's own config (`mode = "user"`) lacks what today's config has
+    (`leasehold.upgrade`), with the command that adds it. Both are optional."""
     if config is None:
         return None
     lacks = upgrade.outdated(config)
@@ -90,11 +90,55 @@ def check_upgrade(explicit: str | None, env: Mapping[str, str], config) -> Check
     return Check(
         "defaults",
         "warn",
-        f"{path or 'the config'} has leasehold 0.2's defaults: " + "; ".join(lacks),
-        f"`leasehold setup --upgrade-config{flag} --dry-run` shows the change, and without "
-        f"--dry-run makes it (keeping the old file beside it); or by hand: "
+        f"{path or 'the config'} lacks what today's config has: " + "; ".join(lacks),
+        f"optional: `leasehold setup --upgrade-config{flag} --dry-run` shows the change, and "
+        f"without --dry-run makes it (keeping the old file beside it); or by hand: "
         f"{upgrade.manual_steps(config)}",
     )
+
+
+def check_memory(config, memory_bytes: int | None) -> Check | None:
+    """With `[memory]`, whether its budget, worked out for this machine, lets work start: a
+    failure when it is 0 or `[[standing]]` memory fills it, a warning when the built-in heavy
+    rules are cut to fit beside the standing memory, or when undeclared work counts nothing."""
+    if config is None or config.memory is None or not memory_bytes:
+        return None
+    budget = config.memory_budget(memory_bytes)
+    assert budget is not None
+    standing = sum(config.standing_memory().values())
+    if budget.budget <= standing:
+        held = f", all of it held by [[standing]] memory ({gib(standing)})" if standing else ""
+        return Check(
+            "memory",
+            "fail",
+            f"the memory budget is {gib(budget.budget)}{held}: nothing that counts memory can "
+            "start",
+            "lower [memory] kept, or set budget to a size above the standing memory",
+        )
+    pool = config.kinds.get("work", "work")
+    policy = config.policy(memory_bytes=memory_bytes)
+    if config.commands.defaults and pool in policy.pools:
+        heavy = min(config.commands.heavy_weight, policy.pools[pool].max)
+        most = policy.heaviest(pool)
+        if most < heavy:
+            return Check(
+                "memory",
+                "warn",
+                f"[[standing]] memory ({gib(standing)}) leaves room in the "
+                f"{gib(budget.budget)} budget for weight {most} at {gib(budget.assumed_per_slot)}"
+                f" a slot: the built-in build and test rules (weight {heavy}) are cut to it",
+                "lower the standing memory or [memory] assumed_per_slot, or raise the budget",
+            )
+    if budget.assumed_per_slot == 0:
+        return Check(
+            "memory",
+            "warn",
+            "[memory] assumed_per_slot is 0: work that declares no memory counts none, so the "
+            "budget limits only declared and standing memory",
+            "leave assumed_per_slot at auto, or declare memory in [[commands.rule]] and hold "
+            "--memory",
+        )
+    return None
 
 
 def check_guard_weights(config, memory_bytes: int | None) -> Check | None:
@@ -382,6 +426,7 @@ def run(
     memory_bytes = meminfo(roots.proc).get("MemTotal") if resolved is not None else None
     for extra in (
         check_upgrade(config, env, resolved),
+        check_memory(resolved, memory_bytes),
         check_guard_weights(resolved, memory_bytes),
         check_ledger(resolved),
     ):

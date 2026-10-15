@@ -20,6 +20,8 @@ memory above the floor for `settle_s`. The two thresholds and the settling time 
 flapping: work admitted when it goes off adds pressure of its own.
 
 Pure: the caller supplies the clock and the readings, and acts on the `Guard.on` it reports.
+`Reading.now` is on a clock that never steps (`time.monotonic`), so a wall-clock change neither
+ends nor stretches the settling; `Reading.at`, the wall time, is only reported (`since`).
 """
 
 from __future__ import annotations
@@ -31,11 +33,14 @@ from leasehold.machine import GuardSettings
 
 @dataclass(frozen=True)
 class Reading:
+    #: When, on a clock that never steps: what the settling is measured on.
     now: float
     #: Memory PSI `some avg10` (a percentage), or None without PSI.
     memory_pressure: float | None
     #: `MemAvailable` in bytes, or None when unknown.
     available: int | None
+    #: The wall time of the reading, for `since`; `now` when not given.
+    at: float | None = None
 
 
 class Guard:
@@ -72,7 +77,7 @@ class Guard:
         self.pressing = why is not None
         if why is not None:
             if not self.on:
-                self.since = r.now
+                self.since = r.now if r.at is None else r.at
             self.on, self.reason, self._clear_since = True, why, None
         elif self.on:
             if not self._clear(r):

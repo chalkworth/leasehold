@@ -104,6 +104,6 @@ def test_setup_says_when_the_config_has_0_2s_defaults_and_leaves_it(tmp_path):
     old = template.render_user_0_2(name="box", slots=6, cpus=6, memory="11g", about="x")
     path.write_text(old)
     out = setup_cli(env).stdout
-    assert "config: it has leasehold 0.2's defaults: memory is not counted" in out
+    assert "config: it lacks what today's config has: no [memory] table" in out
     assert "`leasehold setup --upgrade-config --dry-run` shows the change" in out
     assert path.read_text() == old

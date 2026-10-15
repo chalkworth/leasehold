@@ -431,3 +431,18 @@ def test_a_pool_max_below_a_waiting_weight_is_refused(tmp_path):
     assert agent.acquire(req("work", weight=2, lease_id="B"), user="bob")["status"] == "queued"
     with pytest.raises(ValueError, match="weight 2 waiting"):
         agent.set_pool_max("work", 1)
+
+
+def test_a_rule_without_a_pool_is_taken_when_there_is_no_observed_pool(tmp_path):
+    """A rule that names no pool goes in the work pool; with no observed pool configured, it
+    is not mistaken for one put in the observed pool."""
+    config = machine_config(
+        tmp_path,
+        ceiling={"slots": 4},
+        pools={"work": {"reserved": 4, "max": 4}},
+        kinds={"work": "work"},
+        lend={"pools": []},
+        commands={"rule": [{"programs": ["bigbuild"], "weight": 2}]},
+    )
+    assert config.observed_pool is None
+    assert config.commands.rule[0].pool is None

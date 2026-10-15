@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 import pytest
-from support import CHILD_ENV, FACTS, FakeLoad, machine_config, make_agent
+from support import CHILD_ENV, FACTS, Clock, FakeLoad, machine_config, make_agent
 
 from leasehold.agent import AcquireRequest, MachineAgent
 from leasehold.cli import main
@@ -112,8 +112,8 @@ def test_the_guard_limits_new_work_to_memory_free_not_to_reserved_slots(tmp_path
     held_back = ask(agent, "heavy", weight=3)  # 3 > work's 2 reserved; counts 9 GiB
     assert held_back["status"] == "queued"
     assert held_back["blocked"] == (
-        "memory is short (memory guard on: memory pressure 50% over 20%): 0.0 GiB may start "
-        "now; this counts 9.0 GiB (weight 3 at 3.0 GiB a slot, none declared)"
+        "memory is short (memory guard on: memory pressure 50% over 20%): nothing new starts "
+        "until the pressure eases"
     )
     assert agent.status()["guard"]["pressing"] is True
     load.set(memory=0.0)  # pressure gone, but only 8 GiB available: 7.2 GiB above the floor
@@ -131,6 +131,80 @@ def test_the_guard_limits_new_work_to_memory_free_not_to_reserved_slots(tmp_path
     assert agent.guard.on  # still settling: heavy started before the guard went off
     # What was just granted counts against what is free until it has had settle_s to grow.
     assert agent.memory_free() == 14 * G - 16 * G // 20 - 9 * G
+
+
+@pytest.mark.parametrize(
+    ("memory", "declared"), [({}, "0g"), ({}, "0b"), ({"assumed_per_slot": "0g"}, None)]
+)
+def test_under_pressure_nothing_starts_even_what_counts_no_memory(tmp_path, memory, declared):
+    agent, _, load = make_agent(tmp_path, memory=memory, **FOUR)
+    load.set(memory=50.0)
+    agent.tick()
+    answer = ask(agent, "heavy", weight=4, memory=declared)
+    assert answer["status"] == "queued"
+    assert "nothing new starts until the pressure eases" in answer["blocked"]
+
+
+def test_the_settling_is_measured_on_a_clock_that_never_steps(tmp_path):
+    """A wall-clock jump neither ends the guard's settling nor ages a grant out of the settle
+    window: both are measured on the monotonic clock."""
+    wall, mono, load = Clock(), Clock(50.0), FakeLoad()
+    config = machine_config(tmp_path, memory={}, guard={"settle_s": 30}, **FOUR)
+    agent = MachineAgent(config, facts=FACTS, load=load, clock=wall, monotonic=mono)
+    load.set(memory=50.0)
+    agent.tick()
+    load.set(memory=0.0)
+    load.available = 14 * G
+    mono.now += 1
+    agent.tick()
+    assert ask(agent, "a", weight=1)["status"] == "granted"
+    wall.now -= 3600  # the wall clock steps back an hour
+    agent.tick()
+    assert agent.guard.on
+    assert agent.memory_free() == 14 * G - 16 * G // 20 - 3 * G  # "a" is still recent
+    mono.now += 31
+    wall.now += 31
+    agent.tick()
+    assert not agent.guard.on  # settled after 30 s, though the wall clock is an hour behind
+    assert agent.memory_free() == 14 * G - 16 * G // 20  # "a" has had settle_s to grow
+
+
+def test_rules_are_served_at_a_weight_whose_assumed_memory_fits_beside_standing_memory(
+    tmp_path,
+):
+    """Standing memory (7 of 12 GiB) leaves room for weight 1 at 3 GiB a slot: the built-in
+    rules are served at that weight, so what a shim asks for is granted, not refused."""
+    standing = [{"name": "db", "pool": "background", "weight": 1, "memory": "7g"}]
+    agent, _, _ = make_agent(tmp_path, memory={}, standing=standing, **FOUR)
+    pytest_rule = next(r for r in agent.commands()["rules"] if "pytest" in r["programs"])
+    assert pytest_rule["weight"] == 1
+    assert ask(agent, "a", weight=pytest_rule["weight"])["status"] == "granted"
+    assert ask(agent, "b", weight=2)["status"] == "refused"
+
+
+def test_a_budget_of_0_or_one_standing_memory_fills_is_not_a_config(tmp_path):
+    with pytest.raises(ValueError, match="a budget of 0"):
+        machine_config(tmp_path, memory={"budget": "0g"}, **FOUR)
+    standing = [{"name": "db", "pool": "background", "weight": 1, "memory": "8g"}]
+    with pytest.raises(ValueError, match="filled by"):
+        machine_config(tmp_path, memory={"budget": "8g"}, standing=standing, **FOUR)
+
+
+def test_doctor_checks_the_budget_worked_out_for_the_machine(tmp_path):
+    from leasehold import doctor
+
+    nothing = machine_config(tmp_path, memory={"kept": "20g"}, **FOUR)
+    check = doctor.check_memory(nothing, 16 * G)
+    assert check.level == "fail" and "nothing that counts memory can start" in check.detail
+    standing = [{"name": "db", "pool": "background", "weight": 1, "memory": "7g"}]
+    cut = machine_config(tmp_path, memory={}, standing=standing, **FOUR)
+    check = doctor.check_memory(cut, 16 * G)
+    assert check.level == "warn" and "are cut to it" in check.detail
+    zero = machine_config(tmp_path, memory={"assumed_per_slot": "0g"}, **FOUR)
+    check = doctor.check_memory(zero, 16 * G)
+    assert check.level == "warn" and "assumed_per_slot is 0" in check.detail
+    assert doctor.check_memory(machine_config(tmp_path, memory={}, **FOUR), 16 * G) is None
+    assert doctor.check_memory(machine_config(tmp_path, **FOUR), 16 * G) is None
 
 
 def test_a_config_without_memory_keeps_the_old_guard(tmp_path):
@@ -206,3 +280,35 @@ def test_a_daemon_that_does_not_take_memory_is_asked_again_without_it(monkeypatc
         {"kind": "work", "weight": 1, "memory": "4g", "lease_id": "a"},
         {"kind": "work", "weight": 1, "lease_id": "a"},
     ]
+
+
+@pytest.mark.parametrize("memory", ["99999999999999999999g", "9223372036854775808b", "2000000t"])
+def test_a_size_too_large_for_any_machine_is_a_bad_request_without_a_memory_table(
+    tmp_path, sock_dir, memory
+):
+    """Over a real socket, with no [memory] table: a size past `MEMORY_MAX` is answered 400
+    `bad_request`, not a fault, and the daemon goes on answering."""
+    sock = sock_dir / "big.sock"
+    config = machine_config(tmp_path, socket=str(sock), **FOUR)
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    try:
+        client = Client(str(sock))
+        with pytest.raises(ApiError) as caught:
+            client.acquire(kind="work", lease_id="x", memory=memory)
+        assert caught.value.status == 400
+        assert caught.value.payload["error"] == "bad_request"
+        assert client.acquire(kind="work", lease_id="y", memory="1t")["status"] == "granted"
+    finally:
+        daemon.stop()
+
+
+def test_a_ledger_item_with_memory_out_of_range_is_a_value_error():
+    from leasehold.ledger import LedgerItem
+    from leasehold.units import MEMORY_MAX
+
+    item = {"scope": "s", "item_id": "i", "kind": "work", "user": None, "pool": "work"}
+    assert LedgerItem(**item, weight=1, memory=MEMORY_MAX).memory == MEMORY_MAX
+    for bad in (-1, MEMORY_MAX + 1, 2**63):
+        with pytest.raises(ValueError, match="not between 0"):
+            LedgerItem(**item, weight=1, memory=bad)

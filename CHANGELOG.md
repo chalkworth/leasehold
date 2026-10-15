@@ -25,33 +25,48 @@ exactly as it did before memory was counted.
   built-in build and test rules and of the JavaScript tooling rules.
 - `leasehold setup --upgrade-config` (with `--dry-run`, and `--config PATH` for another file):
   brings a user config from 0.2's defaults to today's, showing the diff and keeping the old
-  file as `<name>.0.2.bak`. An unedited 0.2 config is written afresh for the same machine; an
-  edited one gains only `heavy_weight`, `light_weight` and a `[memory]` table.
-- `leasehold doctor` warns (check `defaults`) when a user config has 0.2's defaults, and (check
-  `guard`) when no built-in build or test rule could start while the memory guard is on.
-  `leasehold setup` says when the config it leaves in place has 0.2's defaults.
+  file as `<name>.0.2.bak`. An unedited 0.2.0 or 0.2.1 config is written afresh for the same
+  machine; an edited one gains only the unset `heavy_weight`/`light_weight` and a `[memory]`
+  table. It exits 0 when it wrote the file, found nothing to change or (`--dry-run`) could
+  write it, and 1 when the config does not load, cannot be edited automatically (an inline
+  `[commands]`; a symbolic or hard-linked file; a `[[commands.rule]]` declaring more memory
+  than the new budget or `[ceiling] memory`), or changed while it worked. `--dry-run` without
+  `--upgrade-config` is refused (exit 1).
+- `leasehold doctor` warns (check `defaults`) when a config naming `mode = "user"` lacks a
+  `[memory]` table or leaves the built-in weights unset where today's config sets others for
+  its slots (both optional); (check `guard`) when no built-in build or test rule could start
+  while the memory guard is on; and (check `memory`) fails when the `[memory]` budget worked out
+  for the machine is 0 or filled by `[[standing]]` memory, and warns when standing memory cuts
+  the built-in rules' weight or `assumed_per_slot` is 0. `leasehold setup` says what the config
+  it leaves in place lacks.
 - Status (schema 2, additive): a `memory` object (`counted`, `machine_bytes`, `budget_bytes`,
   `kept_bytes`, `assumed_per_slot_bytes`, `held_bytes`, `free_now_bytes`); per pool
   `memory_bytes`; per lease and queued item `memory_bytes` (declared) and
   `memory_counted_bytes`; `guard.pressing`. `leasehold status` prints the budget, and
   `leasehold top` shows it in the header and what each waiting item counts.
 - Blockers say which limit holds an item back: "the memory budget is used: ...", "memory is
-  short (...): ... may start now; this counts ...", beside the slot reasons.
-- Library: `AdmissionPolicy` gains `memory`, `assumed_memory`, `standing_memory`, `memory_free`
-  and `memory_short` (all empty or None by default) and `counted()`; `from_pools` takes them as
-  keywords; `Held`, `Waiting` and `LedgerItem` gain `memory` (bytes, default None); `fits` and
+  short (...): nothing new starts until the pressure eases", "memory is short (...): ... may
+  start now; this counts ...", beside the slot reasons.
+- Library: `AdmissionPolicy` gains `memory`, `assumed_memory`, `standing_memory`, `memory_free`,
+  `memory_short` and `memory_pressing` (all empty or None by default) and `counted()`;
+  `from_pools` takes them as keywords (`memory_pressing` a bool); `AdmissionPolicy.heaviest`
+  takes a keyword `declared`; `Held`, `Waiting` and `LedgerItem` gain `memory` (bytes, default
+  None; `LedgerItem` raises ValueError outside 0 to `MEMORY_MAX`); `fits` and
   `AdmissionPolicy.refusal` take an optional `memory`. `leasehold.admission.gib`.
   `leasehold.machine.MemorySettings`, `MemoryBudget`, `MachineConfig.memory`,
   `MachineConfig.memory_budget()`, `MachineConfig.standing_memory()`, and `MachineConfig.policy`
-  keywords `memory_bytes`, `memory_free`, `memory_short`. `leasehold.commands.default_rules`,
-  `HEAVY_WEIGHT`, `LIGHT_WEIGHT`. `leasehold.guard.Guard.pressing`. `leasehold.upgrade`.
-  `leasehold.template.weights` and `render_user_0_2_0`.
+  keywords `memory_bytes`, `memory_free`, `memory_short`, `memory_pressing`.
+  `leasehold.commands.default_rules`, `HEAVY_WEIGHT`, `LIGHT_WEIGHT`.
+  `leasehold.guard.Guard.pressing` and `Reading.at`. `leasehold.agent.MachineAgent` takes
+  `monotonic`. `leasehold.upgrade`. `leasehold.units.MEMORY_MAX`. `leasehold.doctor.check_memory`.
+  `leasehold.template.weights`, `USER_0_2` and `render_user_0_2`.
 - The benchmark (`bench/run.py`): conditions `lh-enforced-declared` (memory jobs declare their
   size) and `lh-enforced-v020` (0.2.0's generated config and weights), `--memory-budget`, and
   `--weights` defaulting to the generated config's `heavy_weight`.
 
 - `AdmissionPolicy.heaviest(pool)`: the most weight one item could ever be admitted with in a
-  pool, with nothing held but the standing work.
+  pool, with nothing held but the standing work (and, with a memory budget and nothing
+  declared, whose assumed memory fits beside the standing memory).
 
 ### Changed
 
@@ -66,6 +81,17 @@ exactly as it did before memory was counted.
   longer held back until the guard goes off. Without `[memory]`, the guard is unchanged.
 - The ledger keeps each item's declared memory; a 0.2 ledger gains the column in place, so 0.2
   and 0.3 processes can share one file.
+- With `[memory]`, while a guard reading is over a threshold nothing new starts at all, whatever
+  it counts or declares (`AdmissionPolicy.memory_pressing`); while the guard settles, an item
+  whose turn it is that fails only the memory measured free no longer holds up its pool:
+  lighter items behind it that fit may start, its own session's later items still wait.
+- The guard's dwell and settling, and the settle window, are measured on a monotonic clock, not
+  the wall clock.
+- **May reject a config or request that was accepted.** A memory size over 1 EiB
+  (`leasehold.units.MEMORY_MAX`) is an error everywhere sizes are read: a config fails to load,
+  and `POST /v1/acquire` answers 400 `bad_request` (it used to fail with 500 `internal` past
+  2^63 bytes, with or without `[memory]`). A `[memory] budget` of 0, or one that `[[standing]]`
+  memory fills, fails to load.
 
 - **May reject a config that 0.2.1 accepted.** `[[standing]]` weight must leave every pool's
   reservation whole: each pool's standing weight or its `reserved`, whichever is more, must
@@ -81,6 +107,9 @@ exactly as it did before memory was counted.
   standing work and other pools' reservations included, not only to its `max` and the slots.
 
 ### Fixed
+
+- A `[[commands.rule]]` naming no pool no longer makes the config fail to load ("only observed
+  programs go in None") when there is no observed pool.
 
 - A request that could not fit its pool even on an idle machine because other pools reserve
   the slots (8 slots, pool `a` reserving 4, weight 6 in pool `b`) is refused with a reason

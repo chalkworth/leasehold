@@ -51,7 +51,9 @@ pools have room for it (and, where [memory is counted](#memory), the memory budg
 served longest ago. Within a user's turn, the user's **sessions** take turns the same way
 (`hold --session`, `LEASEHOLD_SESSION`, or the label `session`), so splitting work into
 sessions only divides that user's own share. There is no backfill: a small request does not
-jump a large one at the head of the queue, so a large one is never starved.
+jump a large one at the head of the queue, so a large one is never starved. The one exception
+is short-lived: while the [memory guard](#memory-guard) settles, a request held back only by
+the memory measured free lets lighter work behind it start.
 
 Each waiting item says why it waits (`blocked`), for example "pool work holds 6 of 6; this
 needs 1" or "2 of 12 slots are free; this needs 4", and, with memory counted, "the memory
@@ -77,8 +79,18 @@ declares none counts its weight times `assumed_per_slot`; `"auto"` is the budget
 slots, so a machine whose slots are all held has its budget all counted, and a request is
 assumed to need memory in proportion to the CPU share it asked for. That is the most cautious
 estimate that never refuses what the slots would admit: with nothing declared, memory and slots
-run out together, and a declared size, larger or smaller, replaces the estimate. Set it to a
-size to assume a fixed amount a slot, or `"0g"` to count only what is declared.
+run out together, and a declared size, larger or smaller, replaces the estimate. It also means
+that with nothing declared the budget never binds: a default config holds back only declared
+and `[[standing]]` memory with it, and undeclared work by its slots and the guard. Set it to a
+size to assume a fixed amount a slot, or `"0g"` to count only what is declared (`leasehold
+doctor` warns about that).
+
+A budget given as a size must be more than 0 and more than the `[[standing]]` memory, or the
+config does not load; an `"auto"` budget worked out as 0 (`kept` over the machine's memory), or
+one that standing memory fills, fails `leasehold doctor`'s `memory` check. When standing memory
+leaves room for less than a built-in rule's weight at `assumed_per_slot`, the rules are served
+to hooks and shims at the weight that fits (so what they ask for is granted, not refused), and
+`doctor` warns. A size anywhere (config, `--memory`, `POST /v1/acquire`) is at most 1 EiB.
 
 A declared size is also what a contained command is held to (`MemoryHigh`, see
 [Containment](#containment)), which throttles it past that size but never kills it: the budget
@@ -100,11 +112,16 @@ pressure passes `[guard] memory_pressure_on` (20%) or available memory drops und
 memory above the floor, for `settle_s` (30 s). While it is on, what runs keeps running, and
 what new work may start depends on whether memory is counted:
 
-- **With `[memory]`**, new work may count at most the memory measured free: none while a reading
-  is over a threshold, and while the guard settles, what is available above `min_available`
-  less what leases granted in the last `settle_s` count (they may not have grown to it yet).
-  A request heavier than its pool's reservation starts as soon as its memory fits; a large one
-  does not start while pressure is high. What waits says "memory is short".
+- **With `[memory]`**, nothing new starts while a reading is over a threshold, whatever it
+  counts or declares (what waits says "memory is short (...): nothing new starts until the
+  pressure eases"). While the guard settles, new work may count at most the memory measured
+  free: what is available above `min_available` less what leases granted in the last `settle_s`
+  count (they may not have grown to it yet). A request heavier than its pool's reservation
+  starts as soon as its memory fits. One whose turn it is but that does not fit what is free,
+  though its slots and the budget would take it, does not hold up its pool: lighter work behind
+  it that fits may start (its own session's later work keeps waiting behind it). What waits
+  says "memory is short". The settling and the settle window are measured on a clock that never
+  steps, so changing the system time does not end or stretch them.
 - **Without it** (a 0.2 config), every pool admits only its reserved slots, and the rest waits,
   saying "the machine is under pressure". A request heavier than its pool's reservation then
   waits until the guard goes off; `leasehold doctor` warns when that is every built-in build
@@ -212,8 +229,10 @@ builds or test runs run at once: on 8 CPUs, 6 slots and weight 3.
 #### Upgrading a 0.2 config
 
 `setup` never changes a config that is there, so one that leasehold 0.2 wrote keeps 0.2's
-defaults after an upgrade: no memory counted, and the built-in rules at weight 4, which on 6 or
-7 slots lets one build or test run at a time. `leasehold doctor` and `leasehold setup` say so.
+defaults after an upgrade: no memory counted, and the built-in rules at weights 4 and 2 where
+today's config sets them for the slots (on 6 or 7 slots, 4 lets one build or test run at a
+time). Both are optional. For a config that names `mode = "user"`, `leasehold doctor` (check
+`defaults`) and `leasehold setup` say what it lacks.
 
 ```sh
 leasehold setup --upgrade-config --dry-run   # what would change, as a diff
@@ -227,6 +246,12 @@ only `heavy_weight` and `light_weight` under `[commands]` and a `[memory]` table
 (and today's comment above `[guard]`, if 0.2's is there unchanged). A `[commands]` written as
 an inline table or dotted keys is not edited: the command says what to add by hand. `--config
 PATH` upgrades another file.
+
+It refuses (exit 1, saying what to do) a config that is a symbolic link or has other hard
+links, one with a `[[commands.rule]]` declaring more memory than the new budget or `[ceiling]
+memory` (with memory counted, such a rule's commands would be refused, not only held to it), and
+one that changes while it works: the file is checked again just before the new one, written to
+a new temporary file and synced to disk, takes its place.
 
 ### The machine's daemon
 
@@ -655,8 +680,9 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
   socket allows, a `socket_mode` that lets every user in) and its permissions, the daemon and
   its clock, PSI, cgroup v2 and the slices the config names, `/proc` visibility, the ledger,
   and whether commands are contained (`enforced (systemd)`, or `advisory:` and why). It warns
-  when your config has leasehold 0.2's defaults ([upgrading](#upgrading-a-02-config)), and when
-  no built-in build or test rule could start while the memory guard is on. It exits 1
+  when your own config lacks what today's has ([upgrading](#upgrading-a-02-config)), when no
+  built-in build or test rule could start while the memory guard is on, and checks that the
+  [memory budget](#memory) worked out for this machine lets work start. It exits 1
   on any failure and prints a fix for each problem. `--json` for scripts.
 - **`leasehold demo`** runs a made-up busy machine, a daemon with a scripted crowd, in a
   temporary directory, and shows it in `top` (`--ui` for the browser). It touches nothing real.

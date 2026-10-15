@@ -31,7 +31,7 @@ from pathlib import Path
 
 from leasehold import contain, doctor, machine, paths, shims, template, upgrade
 from leasehold.client import Client
-from leasehold.facts import probe
+from leasehold.facts import meminfo, probe
 
 Say = Callable[[str], None]
 UNIT = "leasehold.service"
@@ -101,10 +101,10 @@ def write_config(env: Mapping[str, str], say: Say) -> Path:
         except (OSError, ValueError):
             lacks = []  # `check` reports a config that does not load
         if lacks:
-            say(f"config: it has leasehold 0.2's defaults: {'; '.join(lacks)}")
+            say(f"config: it lacks what today's config has: {'; '.join(lacks)}")
             say(
-                "config: `leasehold setup --upgrade-config --dry-run` shows the change; "
-                "without --dry-run it makes it, keeping the old file beside it"
+                "config: both are optional; `leasehold setup --upgrade-config --dry-run` shows "
+                "the change, and without --dry-run makes it, keeping the old file beside it"
             )
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +197,8 @@ def upgrade_config(path: Path | None, env: Mapping[str, str], say: Say, *, dry_r
     except (OSError, ValueError) as exc:
         say(f"config: {exc}")
         return 1
-    found = upgrade.plan(path, config)
+    memory_bytes = meminfo(Path("/proc")).get("MemTotal")
+    found = upgrade.plan(path, config, memory_bytes)
     if found is None:
         say(f"config: {path} has today's defaults; nothing to change")
         return 0

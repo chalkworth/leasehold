@@ -52,6 +52,7 @@ from leasehold.admission import (
     positions,
 )
 from leasehold.process import pid_namespace, process_birth, process_matches
+from leasehold.units import MEMORY_MAX
 
 FILENAME = "ledger.sqlite3"
 #: How many sessions' last turns the ledger remembers (the most recently served).
@@ -199,8 +200,9 @@ class LedgerItem:
     `external`, `lend` and `observed`); both are stored as given. `session` is the user's
     session the item belongs to, for taking turns between one user's sessions (None: the
     user's shared session). `labels` are free-form (key, value) pairs, stored and listed but
-    never read by admission. `memory` is the memory, in bytes, the item declares (None: none);
-    admission counts it only where the policy sets a memory budget."""
+    never read by admission. `memory` is the memory, in bytes, the item declares (None: none),
+    from 0 to `leasehold.units.MEMORY_MAX` (outside that, a ValueError); admission counts it
+    only where the policy sets a memory budget."""
 
     scope: str
     item_id: str
@@ -211,6 +213,10 @@ class LedgerItem:
     labels: tuple[tuple[str, str], ...] = ()
     session: str | None = None
     memory: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.memory is not None and not 0 <= self.memory <= MEMORY_MAX:
+            raise ValueError(f"memory {self.memory} is not between 0 and {MEMORY_MAX} bytes")
 
     @property
     def key(self) -> ItemKey:
