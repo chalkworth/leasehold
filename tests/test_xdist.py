@@ -3,10 +3,13 @@ one, from `PYTEST_ADDOPTS`, and from the `addopts` of the config file pytest wou
 
 from __future__ import annotations
 
+import os
+import shlex
 from pathlib import Path
 
 import pytest
 
+from leasehold import xdist
 from leasehold.xdist import config_addopts, in_args, run_starts_workers
 
 
@@ -23,7 +26,7 @@ def test_arguments_that_start_workers(args):
 @pytest.mark.parametrize(
     "args",
     [[], ["-k", "-n 4"], ["-k-n4"], ["--", "-n", "4"], ["-n", "0"], ["-n", "2", "-n", "0"],
-     ["-p", "no:xdist"], ["--deselect", "-n4"], ["-m", "-n 4"], ["--no-header"], ["-kn", "4"]],
+     ["-p", "no:xdist"], ["-m", "-n 4"], ["--no-header"], ["-kn", "4"]],
 )  # fmt: skip
 def test_arguments_that_do_not(args):
     assert in_args(args) is not True
@@ -102,3 +105,213 @@ def test_a_config_that_cannot_be_read_counts_as_none(tmp_path, name, text):
     assert config_addopts([], tmp_path) == []
     assert not run_starts_workers([], {"PYTEST_ADDOPTS": '-n "2'}, tmp_path)
     assert run_starts_workers(["-n", "2"], {}, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--cov", "-n", "auto"], ["--cov", "-n", "4", "tests"], ["--pyargs", "-n", "4", "pkg"],
+     ["--cache-show", "-n", "2"], ["--tx", "4*popen"], ["--tx=popen"], ["-k", "x", "-n", "2"],
+     ["--maxfail", "-n", "2"]],
+)  # fmt: skip
+def test_options_take_no_word_that_looks_like_an_option(args):
+    assert in_args(args) is True
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["-p", "no:xdist", "-n", "4"], ["-n", "4", "-p", "no:xdist"], ["-pno:xdist", "--tx", "popen"],
+     ["-n", "9" * 5000], ["--numprocesses=" + "9" * 5000]],
+)  # fmt: skip
+def test_xdist_turned_off_or_a_count_too_long_to_read_starts_none(args):
+    assert in_args(args) is not True
+
+
+def test_a_count_too_long_to_read_leaves_the_earlier_setting():
+    assert in_args(["-n", "2", "-n", "9" * 5000]) is True
+
+
+#: Each case: the files to write (a value starting `->` makes a symbolic link to the rest),
+#: the directory pytest runs in, its arguments, and `PYTEST_ADDOPTS`.
+_SETUPS = {
+    "ini here": ({"pytest.ini": "[pytest]\naddopts = -x\n"}, ".", [], ""),
+    **{
+        f"the value of {option} is not a path": (
+            {"pytest.ini": "[pytest]\naddopts = -x\n", f"{value}/pytest.ini": "[pytest]\n"},
+            ".", [option, value], "",
+        )
+        for option, value in [("-k", "tests"), ("--basetemp", "tmp"), ("--rootdir", "r"),
+                              ("-m", "x"), ("-o", "k=v"), ("--override-ini", "a=b")]
+    },
+    "a path argument": (
+        {"pytest.ini": "[pytest]\naddopts = -x\n", "tests/pytest.ini": "[pytest]\naddopts = -v\n"},
+        ".", ["tests"], "",
+    ),
+    "a node id and a missing path": (
+        {"a/pytest.ini": "[pytest]\naddopts = -v\n", "a/test_x.py": ""},
+        ".", ["a/test_x.py::test_y", "missing"], "",
+    ),
+    "the common ancestor": (
+        {"pytest.ini": "[pytest]\naddopts = -x\n", "p/a/t.py": "", "p/b/t.py": "",
+         "p/a/pytest.ini": "[pytest]\naddopts = -v\n"},
+        ".", ["p/a/t.py", "p/b/t.py"], "",
+    ),
+    "the last -c wins": (
+        {"one.ini": "[pytest]\naddopts = -x\n", "two.ini": "[pytest]\naddopts = -v\n"},
+        ".", ["-c", "one.ini", "--config-file", "two.ini"], "",
+    ),
+    "-c in PYTEST_ADDOPTS, then the arguments'": (
+        {"one.ini": "[pytest]\naddopts = -x\n", "two.ini": "[pytest]\naddopts = -v\n"},
+        ".", ["-c", "two.ini"], "-c one.ini",
+    ),
+    "-c in PYTEST_ADDOPTS alone": (
+        {"one.ini": "[pytest]\naddopts = -x\n"}, ".", [], "-c one.ini",
+    ),
+    "-c of a TOML file is read as pyproject.toml": (
+        {"c.toml": '[tool.pytest.ini_options]\naddopts = "-x"\n'}, ".", ["-c", "c.toml"], "",
+    ),
+    "-c of a TOML file with a [pytest] table": (
+        {"c.toml": '[pytest]\naddopts = ["-x"]\n'}, ".", ["-c", "c.toml"], "",
+    ),
+    "-c of a cfg file": (
+        {"c.cfg": "[tool:pytest]\naddopts = -x\n"}, ".", ["-c", "c.cfg"], "",
+    ),
+    "-c of a file of another kind": (
+        {"c.txt": "[pytest]\naddopts = -x\n"}, ".", ["-c", "c.txt"], "",
+    ),
+    "-c of a missing file": ({}, ".", ["-c", "nothing.ini"], ""),
+    "-o addopts, the last winning": (
+        {"pytest.ini": "[pytest]\naddopts = -x\n"},
+        ".", ["-o", "addopts=-v", "--override-ini=addopts=-l"], "-o addopts=-q",
+    ),
+    "an empty pytest.toml stops the search": (
+        {"pytest.ini": "[pytest]\naddopts = -x\n", "s/pytest.toml": ""}, "s", [], "",
+    ),
+    "a pytest.toml without its table stops the search": (
+        {"pytest.ini": "[pytest]\naddopts = -x\n", "s/.pytest.toml": "[other]\na = 1\n"},
+        "s", [], "",
+    ),
+    "an empty [tool.pytest] is no configuration": (
+        {"pytest.ini": "[pytest]\naddopts = -x\n", "s/pyproject.toml": "[tool.pytest]\n"},
+        "s", [], "",
+    ),
+    "an empty [tool.pytest.ini_options] is": (
+        {"pytest.ini": "[pytest]\naddopts = -x\n",
+         "s/pyproject.toml": "[tool.pytest.ini_options]\n"},
+        "s", [], "",
+    ),
+    "a pyproject.toml without pytest's section": (
+        {"pyproject.toml": "[project]\nname = 'x'\n"}, ".", [], "",
+    ),
+    "native TOML addopts": (
+        {"pyproject.toml": '[tool.pytest]\naddopts = ["-x", "-v"]\n'}, ".", [], "",
+    ),
+    "both TOML tables": (
+        {"pyproject.toml": '[tool.pytest]\naddopts = ["-x"]\n[tool.pytest.ini_options]\n'},
+        ".", [], "",
+    ),
+    "malformed TOML": ({"pyproject.toml": "[tool.pytest\n"}, ".", [], ""),
+    "a sectionless pytest.ini": ({"pytest.ini": "addopts = -x\n"}, ".", [], ""),
+    "[pytest] in setup.cfg": ({"setup.cfg": "[pytest]\naddopts = -x\n"}, ".", [], ""),
+    "tox.ini and setup.cfg": (
+        {"tox.ini": "[tox]\n", "setup.cfg": "[tool:pytest]\naddopts = -x\n"}, ".", [], "",
+    ),
+    "a symbolic link is not resolved": (
+        {"real/sub/t.py": "", "real/pytest.ini": "[pytest]\naddopts = -v\n",
+         "here/pytest.ini": "[pytest]\naddopts = -x\n", "here/link": "->../real/sub"},
+        "here", ["link"], "",
+    ),
+}  # fmt: skip
+
+
+def _build(root: Path, files: dict[str, str]) -> None:
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if text.startswith("->"):
+            path.symlink_to(text[2:])
+        else:
+            path.write_text(text)
+
+
+def _pytests_view(words: list[str], cwd: Path) -> tuple[Path | None, list[str]] | None:
+    """The config file and `addopts` pytest itself finds; None when it fails."""
+    from _pytest.config import get_config
+    from _pytest.config.findpaths import determine_setup
+
+    ns = get_config()._parser.parse_known_args(words)
+    try:
+        _, path, cfg, _ = determine_setup(
+            inifile=ns.inifilename, override_ini=ns.override_ini, args=ns.file_or_dir,
+            rootdir_cmd_arg=ns.rootdir or None, invocation_dir=cwd,
+        )  # fmt: skip
+    except BaseException:  # noqa: BLE001 - pytest fails with UsageError, OSError or Failed
+        return None
+    value = cfg["addopts"].value if "addopts" in cfg else []
+    return path, shlex.split(value) if isinstance(value, str) else list(value)
+
+
+def _our_view(words: list[str], cwd: Path) -> tuple[Path | None, list[str]] | None:
+    read = xdist._read_words(words)
+    try:
+        path, addopts = xdist.locate(read.free, read.config, cwd, read.rootdir)
+    except xdist._Unreadable:
+        return None
+    overridden = xdist._overridden(read.overrides)
+    return path, addopts if overridden is None else overridden
+
+
+@pytest.mark.parametrize("case", list(_SETUPS))
+def test_the_config_is_found_as_pytest_finds_it(tmp_path, monkeypatch, case):
+    pytest.importorskip("_pytest.config.findpaths")
+    files, where, args, env = _SETUPS[case]
+    _build(tmp_path, files)
+    cwd = tmp_path / where
+    cwd.mkdir(exist_ok=True)
+    monkeypatch.chdir(cwd)  # pytest makes relative paths absolute from here
+    words = [*shlex.split(env), *args]
+    expected = _pytests_view(words, cwd)
+    assert _our_view(words, cwd) == expected
+    if not xdist._read_words(words).overrides:
+        assert config_addopts(words, cwd) == (expected[1] if expected else [])
+
+
+def test_an_unreadable_config_is_none_for_pytest_and_for_us(tmp_path):
+    pytest.importorskip("_pytest.config.findpaths")
+    if os.geteuid() == 0:
+        pytest.skip("root reads any file")
+    _build(tmp_path, {"pytest.ini": "[pytest]\naddopts = -n 2\n"})
+    (tmp_path / "pytest.ini").chmod(0)
+    assert _pytests_view([], tmp_path) is None
+    assert _our_view([], tmp_path) is None
+    assert not run_starts_workers([], {}, tmp_path)
+
+
+def test_an_addopts_override_replaces_the_configs(tmp_path):
+    _build(tmp_path, {"pytest.ini": "[pytest]\naddopts = -n 2\n"})
+    assert run_starts_workers([], {}, tmp_path)
+    assert not run_starts_workers(["-o", "addopts=-x"], {}, tmp_path)
+    assert run_starts_workers(["--override-ini=addopts=-n 3"], {}, tmp_path)
+    assert not run_starts_workers(["-o", "addopts=-n 3"], {"PYTEST_ADDOPTS": "-n 0"}, tmp_path)
+    assert not run_starts_workers([], {"PYTEST_ADDOPTS": "-o addopts=-x"}, tmp_path)
+
+
+@pytest.mark.parametrize("make", ["/dev/zero", "fifo", "large"])
+def test_only_regular_files_up_to_a_mib_are_read(tmp_path, make):
+    if make == "fifo":
+        target = tmp_path / "c.ini"
+        os.mkfifo(target)
+    elif make == "large":
+        target = tmp_path / "c.ini"
+        target.write_text("[pytest]\naddopts = -n 2\n" + "# padding\n" * 120_000)
+    else:
+        target = Path(make)
+    assert not run_starts_workers(["-c", str(target)], {}, tmp_path)
+    assert run_starts_workers(["-c", str(target), "-n", "2"], {}, tmp_path)
+
+
+def test_an_addopts_override_needs_no_working_directory():
+    def gone() -> Path:
+        raise FileNotFoundError("the working directory was removed")
+
+    assert run_starts_workers(["-o", "addopts=-n 2"], {}, gone)
+    assert not run_starts_workers([], {}, gone)

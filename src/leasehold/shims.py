@@ -13,9 +13,9 @@ A shim passes straight to the real program, with no lease, when one is held alre
 set; or an agent hook's lease for this program under this agent, `leasehold.hooknotes`), when
 `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. Under a lease that
 set the job variables (`jobs.LEASEHOLD_SET`), a program whose own rule gives fewer threads
-(`pytest -n 4` under `hold -- make test`) runs with that thread count (`within_lease`). A busy
-machine is
-`[commands] when_busy`'s: wait `wait_s`, then exit 75, or run without a lease. When the daemon
+(`pytest -n 4` under `hold -- make test`) runs with that thread count (`within_lease`). On a
+busy machine the shim does what `[commands] when_busy` says: wait `wait_s`, then exit 75, or
+run without a lease. When the daemon
 says no (a refusal, an error answer under 500, or a matching rule no lease could ever be
 granted for) the shim exits 77 without running the program; when it cannot answer (an error
 of 500 or more) the program runs without a lease, and the shim says why.
@@ -220,34 +220,38 @@ WITHIN_LEASE_TIMEOUT_S = 0.3
 def _threads(
     rules: Sequence[shell.Rule], program: str, args: list[str], env: Mapping[str, str]
 ) -> int | str | None:
-    """`program`'s thread count by the rules (`shell.threads`), its config and
-    `PYTEST_ADDOPTS` read from the directory it runs in."""
-    return shell.threads(rules, [(program, args)], env=env, cwd=Path.cwd())
+    """`program`'s thread count by the rules (`shell.threads`), reading a pytest run's config
+    and `PYTEST_ADDOPTS` from the directory it runs in; None when no rule matches or anything
+    fails, so the program still runs."""
+    try:
+        return shell.threads(rules, [(program, args)], env=env, cwd=Path.cwd)
+    except Exception:  # noqa: BLE001 - sizing threads must never stop the program running
+        return None
 
 
 def within_lease(program: str, args: list[str], env: Mapping[str, str]) -> dict[str, str]:
-    """The environment `program` runs with inside a lease already held: `env`, with the thread
-    count its own rule gives (`_threads`) in the variables the lease set (`jobs.resized`) when
-    that is fewer than the lease's. `env` as it is when the lease recorded no variables, its
-    thread count is 1 already, no rule matches, or the daemon does not answer with rules within
-    `WITHIN_LEASE_TIMEOUT_S`."""
-    held = env.get("LEASEHOLD_THREADS", "")
-    lease_jobs = env.get("LEASEHOLD_JOBS", "")
-    if not jobs.recorded(env) or not lease_jobs.isdigit() or "1" in (held, lease_jobs):
-        return dict(env)
+    """The environment `program` runs with inside a lease already held: `env`, with each thread
+    variable the lease set lowered to the count `program`'s own rule gives (`_threads`,
+    `jobs.resized`) where it is higher; never raised. `env` as it is when the lease recorded no
+    variables, its thread count is 1 already, no rule matches, the daemon does not answer with
+    rules within `WITHIN_LEASE_TIMEOUT_S`, or anything else fails."""
     try:
-        client = Client(discovery.find(None, None, env), timeout=WITHIN_LEASE_TIMEOUT_S)
-        rules = shell.served(client.commands()).rules
+        lease_jobs = jobs.count_of(env.get("LEASEHOLD_JOBS"))
+        if not jobs.recorded(env) or lease_jobs is None:
+            return dict(env)
+        if 1 in (lease_jobs, jobs.count_of(env.get("LEASEHOLD_THREADS"))):
+            return dict(env)
+        try:
+            client = Client(discovery.find(None, None, env), timeout=WITHIN_LEASE_TIMEOUT_S)
+            rules = shell.served(client.commands()).rules
+        except _ANY_FAULT:
+            return dict(env)
         wanted = _threads(rules, program, args, env)
-    except _ANY_FAULT:  # whatever goes wrong here, the program runs as it is
+        if wanted is None:
+            return dict(env)
+        return jobs.resized(env, wanted) or dict(env)
+    except Exception:  # noqa: BLE001 - whatever goes wrong here, the program runs as it is
         return dict(env)
-    if wanted is None:
-        return dict(env)
-    count = jobs.thread_count(wanted, int(lease_jobs))
-    current = int(held) if held.isdigit() else int(lease_jobs)
-    if count >= current:
-        return dict(env)
-    return jobs.resized(env, count) or dict(env)
 
 
 def _say(message: str) -> None:

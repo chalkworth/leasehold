@@ -297,13 +297,15 @@ def hold(
     given. `memory` is also declared with the request, so a daemon with a memory budget counts
     it. With no `weight`, the command is weighed as the daemon's `[commands]` rules weigh it
     (`auto_size`); with no `threads`, its thread count is the matching rule's `threads`, and
-    "jobs" when no rule matches.
+    "jobs" when no rule matches. Inside another lease, a thread count from the rules only
+    lowers the thread variables that lease set; a given `threads` sets them.
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`."""
     if not argv:
         _say("no command given (leasehold hold [options] -- cmd ...)")
         return 2
     request = None
+    explicit = threads is not None
     try:
         with _interruptible():
             # Rules are read for the weight, or for the threads the job variables use.
@@ -351,6 +353,7 @@ def hold(
                 jobserver=jobserver,
                 memory=memory,
                 threads=threads,
+                explicit_threads=explicit,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -434,11 +437,12 @@ def run_leased(
     jobserver: bool = False,
     memory: str | None = None,
     threads: jobs.Threads = "jobs",
+    explicit_threads: bool = False,
 ) -> int:
     """`hold` once `request` is granted (`answer`): run `argv` sized to the lease (its thread
-    pools to `threads`, `jobs.thread_count`), renewing it,
-    and release it when the command ends; the command's exit code (`_ended`). SIGINT, SIGTERM or
-    SIGHUP before the command runs gives the lease back and stops what was started of it."""
+    pools to `threads`, `jobs.thread_count`; `child_env`), renewing it, and release it when
+    the command ends; the command's exit code (`_ended`). SIGINT, SIGTERM or SIGHUP before
+    the command runs gives the lease back and stops what was started of it."""
     lease_id, kind = request["lease_id"], request["kind"]
     granted = answer["lease"]
     lease = _Lease(client, lease_id, kind, float(granted["ttl_s"]))
@@ -446,7 +450,14 @@ def run_leased(
     tty = terminal.owned()
     with contextlib.ExitStack() as stack:
         relay = stack.enter_context(_relayed())
-        env = child_env(lease_id, granted, count, job_env=job_env, threads=threads)
+        env = child_env(
+            lease_id,
+            granted,
+            count,
+            job_env=job_env,
+            threads=threads,
+            explicit_threads=explicit_threads,
+        )
         if jobserver:
             try:
                 fifo = stack.enter_context(jobs.jobserver(count))
@@ -599,12 +610,20 @@ def scope_prefix(request: dict, answer: dict, memory: str | None) -> list[str] |
 
 
 def child_env(
-    lease_id: str, granted: dict, count: int, *, job_env: bool, threads: jobs.Threads = "jobs"
+    lease_id: str,
+    granted: dict,
+    count: int,
+    *,
+    job_env: bool,
+    threads: jobs.Threads = "jobs",
+    explicit_threads: bool = False,
 ) -> dict[str, str]:
     """The command's environment: ours, the lease's `LEASEHOLD_*` variables, and with
-    `job_env` the job-count and thread-count variables (`jobs.sized_env`); without it, none of
-    an enclosing lease's sizing either (`jobs.unsized_env`), so no stale count reaches a shim
-    the command runs."""
+    `job_env` the job-count and thread-count variables (`jobs.sized_env`). Inside an enclosing
+    lease, a thread variable it set is only lowered, unless `explicit_threads` (`hold
+    --threads`) says to set it. Without `job_env`, the enclosing lease's sizing is removed
+    (`jobs.unsized_env`): every variable it set that still has the value it set, so a tool
+    reads its own default and no stale count reaches a shim the command runs."""
     env = {
         **os.environ,
         "LEASEHOLD_LEASE_ID": lease_id,
@@ -613,7 +632,7 @@ def child_env(
         "LEASEHOLD_WEIGHT": str(granted["weight"]),
     }
     if job_env:
-        return jobs.sized_env(env, count, threads)
+        return jobs.sized_env(env, count, threads, cap=not explicit_threads)
     return jobs.unsized_env(env)
 
 

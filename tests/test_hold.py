@@ -263,7 +263,7 @@ def test_thread_pools_get_the_rules_threads_or_the_flags_and_worker_counts_the_j
     assert sizes("--threads", "jobs", "--", pytest_, "-n", "2") == "2 2 2"
     assert sizes("--weight", "2", "--", other) == "2 2 2"  # no rule: the job count
     assert sizes("--weight", "2", "--threads", "1", "--", other) == "2 1 1"
-    assert sizes("--", pytest_, "-n2", OMP_NUM_THREADS="6") == "2 6 6"  # the user's wins
+    assert sizes("--", pytest_, "-n2", OMP_NUM_THREADS="6") == "2 6 1"  # the user's wins
     bad = hold(daemon.path, "--threads", "0", "--", other)
     assert bad.returncode == 2 and "count of at least 1" in bad.stderr.read()
 
@@ -321,8 +321,8 @@ def test_a_value_the_user_sets_inside_a_lease_survives_a_hold_inside_it(roomy, t
         return proc.stdout.read().strip()
 
     assert outer(inner) == "1 1 1"
-    assert outer(f"export OMP_NUM_THREADS=3; {inner}") == "3 3 3"
-    assert outer(f"OMP_NUM_THREADS=3 {inner}") == "3 3 3"
+    assert outer(f"export OMP_NUM_THREADS=3; {inner}") == "3 3 1"
+    assert outer(f"OMP_NUM_THREADS=3 {inner}") == "3 3 1"
     assert outer(f"unset OMP_NUM_THREADS; {inner}") == "1 1 1"  # unset: set again
 
 
@@ -330,17 +330,51 @@ def test_no_job_env_passes_on_no_sizing_from_an_enclosing_lease(roomy, tmp_path)
     probe = tmp_path / "probe"
     probe.write_text(
         '#!/bin/sh\necho "${LEASEHOLD_SET:-none} ${LEASEHOLD_JOBS:-none} '
-        '${LEASEHOLD_THREADS:-none} ${OMP_NUM_THREADS:-none}"\n'
+        "${LEASEHOLD_THREADS:-none} ${OMP_NUM_THREADS:-none} ${GOMAXPROCS:-none} "
+        '${CARGO_BUILD_JOBS:-none} ${RAYON_NUM_THREADS:-none}"\n'
     )
     probe.chmod(0o755)
     env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
     inner = [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold"]
-    proc = hold(
-        roomy.path, "--weight", "1", "--", *inner, "--weight", "1", "--no-job-env", "--",
-        str(probe), stdout=subprocess.PIPE, env=env,
-    )  # fmt: skip
-    assert proc.returncode == 0, proc.stderr.read()
-    assert proc.stdout.read().split()[:3] == ["none", "none", "none"]
+
+    def run(**extra: str) -> list[str]:
+        proc = hold(
+            roomy.path, "--weight", "1", "--", *inner, "--weight", "1", "--no-job-env", "--",
+            str(probe), stdout=subprocess.PIPE, env=env | extra,
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().split()
+
+    assert run() == ["none"] * 7  # every variable the enclosing lease set is gone
+    assert run(GOMAXPROCS="3") == ["none"] * 4 + ["3"] + ["none"] * 2  # the user's stays
+
+
+@pytest.mark.parametrize("omp", ["1", "6"])
+def test_a_hold_inside_a_lease_lowers_its_thread_variables_and_never_raises_them(
+    roomy, tmp_path, omp
+):
+    """An enclosing lease of one thread, with the user's OMP_NUM_THREADS below or above the
+    count: a hold inside it, sized by the rules, keeps one thread; `--threads` sets its own."""
+    probe = tmp_path / "probe"
+    probe.write_text(
+        '#!/bin/sh\necho "$GOMAXPROCS $RAYON_NUM_THREADS $LEASEHOLD_THREADS $OMP_NUM_THREADS"\n'
+    )
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold", "--weight",
+             "1"]  # fmt: skip
+
+    def outer(threads: str, *flags: str) -> str:
+        proc = hold(
+            roomy.path, "--weight", "1", "--threads", threads, "--", *inner, *flags, "--",
+            str(probe), stdout=subprocess.PIPE, env=env | {"OMP_NUM_THREADS": omp},
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().strip()
+
+    assert outer("1") == f"1 1 1 {omp}"
+    assert outer("2", "--threads", "1") == f"1 1 1 {omp}"
+    assert outer("1", "--threads", "3") == f"3 3 3 {omp}"  # asked for: set
 
 
 def test_auto_size_reads_the_command_line_as_the_hooks_do(daemon):

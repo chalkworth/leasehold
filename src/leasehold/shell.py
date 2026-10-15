@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,6 +66,8 @@ _UV_RUN_VALUES = frozenset(
 )  # fmt: skip
 #: For each runner, its options that take the next word as their value.
 _RUNNER_VALUES: dict[str, frozenset[str]] = {"uv": _UV_RUN_VALUES}
+#: Options of `uvx` (`uv tool run`) that take the next word as their value.
+_UVX_VALUES = _UV_RUN_VALUES | {"--from"}
 #: `<runner> <verb> program ...`: run a project's tool inside its environment.
 _RUNNERS = {
     "uv": "run",
@@ -271,24 +273,65 @@ def _unwrap(words: list[str], depth: int) -> Iterator[tuple[str, list[str]]]:
         yield from _unwrap(_after_options(program, rest), depth)
         return
     if _RUNNERS.get(program) and rest[:1] == [_RUNNERS[program]]:
-        rest = rest[1:]
-        takes = _RUNNER_VALUES.get(program, frozenset())
-        while rest and rest[0].startswith("-"):
-            if rest[0] == "--":
-                rest = rest[1:]
-                break
-            rest = rest[2:] if rest[0] in takes else rest[1:]
-        yield from _unwrap(rest, depth)
+        yield from _unwrap(_past_options(rest[1:], _RUNNER_VALUES.get(program, frozenset())), depth)
         return
-    if re.fullmatch(r"python(\d(\.\d+)?)?", program) and rest[:1] == ["-m"] and len(rest) > 1:
-        yield rest[1], rest[2:]
+    if program == "uvx" or (program == "uv" and rest[:2] == ["tool", "run"]):
+        rest = rest if program == "uvx" else rest[2:]
+        yield from _unwrap(_past_options(rest, _UVX_VALUES), depth)
         return
+    if re.fullmatch(r"python(\d(\.\d+)?)?", program):
+        module = _python_module(rest)
+        if module is not None:
+            yield module
+            return
     if program in _SHELLS and depth < 3:
         script = _shell_script(rest)
         if script is not None:
             yield from programs(script, depth=depth + 1)
             return
     yield program, rest
+
+
+def _past_options(words: list[str], takes: frozenset[str]) -> list[str]:
+    """`words` past a runner's options, skipping the value of each option in `takes`, and
+    past a `--` that ends them."""
+    while words and words[0].startswith("-"):
+        if words[0] == "--":
+            return words[1:]
+        words = words[2:] if words[0] in takes else words[1:]
+    return words
+
+
+#: Python's options that take the next word as their value (`python -X dev -m pytest`).
+_PYTHON_VALUES = frozenset("XW")
+
+
+def _python_module(words: list[str]) -> tuple[str, list[str]] | None:
+    """The module and its arguments when Python runs one (`-m`), past Python's own options;
+    None when it runs a script, a command (`-c`) or its input."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--check-hash-based-pycs":
+            i += 1
+            continue
+        if not word.startswith("-") or word in ("-", "--") or word.startswith("--"):
+            return None
+        letters = word[1:]
+        for at, letter in enumerate(letters):
+            rest = letters[at + 1 :]
+            if letter == "m":
+                if rest:
+                    return rest, words[i:]
+                return (words[i], words[i + 1 :]) if i < len(words) else None
+            if letter == "c":
+                return None
+            if letter in _PYTHON_VALUES:
+                if not rest:
+                    i += 1
+                break
+    return None
 
 
 def _after_options(wrapper: str, words: list[str]) -> list[str]:
@@ -349,14 +392,14 @@ def threads(
     found: Sequence[tuple[str, Sequence[str]]],
     *,
     env: Mapping[str, str] | None = None,
-    cwd: Path | None = None,
+    cwd: Path | Callable[[], Path] | None = None,
 ) -> int | str | None:
-    """The thread count for a command line running the programs `found`: each program's own
-    rule's `threads`, the largest of them ("jobs" when any is), so no program runs with fewer
-    threads than its rule gives it; None when no rule matches. With `env` and `cwd`, a pytest
-    run that its own rule (a built-in one) gives the job count, but that starts xdist workers
-    through `PYTEST_ADDOPTS` or its config's `addopts` (`xdist.run_starts_workers`), takes the
-    built-in xdist rule's `threads`."""
+    """The thread count for a command line running the programs `found`: the largest of
+    their own rules' `threads`, "jobs" when any rule has it, and None when no rule matches.
+    With `env` and `cwd` (a directory, or a function giving it, called only for pytest), a
+    pytest run that a built-in rule gives the job count takes the built-in xdist rule's
+    `threads` when `PYTEST_ADDOPTS` or its config's `addopts` start xdist workers
+    (`xdist.run_starts_workers`)."""
     rules = list(rules)
     chosen: list[int | str] = []
     for program, args in found:

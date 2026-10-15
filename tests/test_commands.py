@@ -140,7 +140,7 @@ def test_a_serial_run_and_tox_and_nox_get_the_job_count(command):
 
 @pytest.mark.parametrize(
     "command",
-    ["pytest -k '-n 4'", "pytest -- -n 4", "pytest -m '-n4'", "pytest -n 0 tests"],
+    ["pytest -k '-n 4'", "pytest -- -n 4", "pytest -n 0 tests"],
 )
 def test_xdist_options_are_read_as_arguments_not_as_text(command):
     assert match(DEFAULTS, command).rule.threads == "jobs"
@@ -150,6 +150,35 @@ def test_xdist_options_are_read_as_arguments_not_as_text(command):
 def test_combined_short_flags_and_runner_options_still_find_xdist(command):
     found = match(DEFAULTS, command)
     assert (found.program, found.rule.threads) == ("pytest", 1)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["uvx --with pytest-xdist pytest -n 2", "uvx --from pytest pytest -n2",
+     "uv tool run --with x pytest -n 2", "python -X dev -m pytest -n 2",
+     "python3 -W error -m pytest -n 2", "python -O -u -I -m pytest -n 2",
+     "python -uXdev -m pytest -n 2", "python -mpytest -n 2"],
+)  # fmt: skip
+def test_uvx_and_python_options_before_m_still_find_pytest(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.threads) == ("pytest", 1)
+
+
+@pytest.mark.parametrize(
+    "command", ["python -c 'import pytest' -m pytest -n 2", "python script.py -m pytest -n 2"]
+)
+def test_python_running_a_script_or_a_command_is_not_pytest(command):
+    found = match(DEFAULTS, command)
+    assert found is None or found.program != "pytest"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["pytest --cov -n auto", "pytest --cov -n 4 tests", "pytest --pyargs -n 4 pkg",
+     "pytest --tx 4*popen", "pytest --maxfail -n 2"],
+)  # fmt: skip
+def test_an_option_never_takes_a_following_option_as_its_value(command):
+    assert match(DEFAULTS, command).rule.threads == 1
 
 
 def test_uv_run_options_that_take_a_value_are_not_the_program():

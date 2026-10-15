@@ -30,7 +30,8 @@ variables that limit the parallelism inside each process, such as `OMP_NUM_THREA
 `GOMAXPROCS` and `RUST_TEST_THREADS` (`leasehold.jobs.THREAD_VARIABLES`), get the thread
 count: the job count, or 1 for a pytest run that starts xdist workers. A variable you set
 before `hold` starts is left alone. The count is the weight times the daemon's `[jobs]
-per_slot`, 1 by default. `--no-job-env` leaves these variables alone.
+per_slot`, 1 by default. `--no-job-env` sets none of these variables, and removes the ones an
+enclosing lease set, so each tool uses its own default.
 
 ## The three commands
 

@@ -43,23 +43,45 @@ def test_worker_counts_get_the_jobs_and_everything_inside_a_process_the_thread_c
 LEASED = {"LEASEHOLD_LEASE_ID": "abc"}
 
 
-def test_the_users_blas_value_is_given_to_the_siblings_they_left_unset():
+def test_the_users_omp_value_is_given_to_the_blas_variables_they_left_unset():
     """OpenBLAS reads OPENBLAS_NUM_THREADS before OMP_NUM_THREADS, and MKL_NUM_THREADS
-    overrides OMP_NUM_THREADS in PyTorch: siblings at another value would undo the user's."""
+    overrides OMP_NUM_THREADS in PyTorch: at another value they would undo the user's."""
     env = jobs.job_env(4, {"OMP_NUM_THREADS": "6"}, threads=1)
     assert "OMP_NUM_THREADS" not in env
-    assert env["OPENBLAS_NUM_THREADS"] == env["MKL_NUM_THREADS"] == env["LEASEHOLD_THREADS"] == "6"
+    assert env["OPENBLAS_NUM_THREADS"] == env["MKL_NUM_THREADS"] == "6"
     assert "OPENBLAS_NUM_THREADS=6" in env["LEASEHOLD_SET"].split(",")
     assert env["POLARS_MAX_THREADS"] == env["GOMAXPROCS"] == "1"
-    env = jobs.job_env(4, {"MKL_NUM_THREADS": "3", "OPENBLAS_NUM_THREADS": "2"})
+    assert env["LEASEHOLD_THREADS"] == "1"  # the count leasehold chose, never the user's
+
+
+@pytest.mark.parametrize("user", [{"OPENBLAS_NUM_THREADS": "3"}, {"MKL_NUM_THREADS": "3"}])
+def test_a_users_openblas_or_mkl_value_is_left_alone_and_copied_nowhere(user):
+    env = jobs.job_env(4, user, threads=2)
+    assert not set(user) & set(env)
     assert env["OMP_NUM_THREADS"] == env["LEASEHOLD_THREADS"] == "2"
-    assert "MKL_NUM_THREADS" not in env  # the user's own
+    other = ({"OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"} - set(user)).pop()
+    assert env[other] == "2"
 
 
-def test_a_user_blas_value_that_is_not_a_count_is_not_copied_nor_reported():
+@pytest.mark.parametrize("omp", ["1", "6"])
+def test_the_lease_thread_count_is_leaseholds_whatever_the_user_set(omp):
+    """Below and above the lease's count: LEASEHOLD_THREADS is what leasehold chose."""
+    assert jobs.job_env(4, {"OMP_NUM_THREADS": omp})["LEASEHOLD_THREADS"] == "4"
+    assert jobs.job_env(4, {"OMP_NUM_THREADS": omp}, threads=1)["LEASEHOLD_THREADS"] == "1"
+
+
+def test_a_user_omp_value_that_is_not_a_count_is_not_copied():
     env = jobs.job_env(4, {"OMP_NUM_THREADS": "4,2"}, threads=2)
     assert not {"OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"} & set(env)
     assert env["LEASEHOLD_THREADS"] == "2"  # always a count: the lease's
+
+
+def test_a_user_omp_list_keeps_blas_values_the_lease_set_as_counts():
+    outer = jobs.sized_env(LEASED, 4, threads=2)
+    inner = jobs.sized_env(outer | {"OMP_NUM_THREADS": "4,2"}, 4, threads=1)
+    assert inner["OMP_NUM_THREADS"] == "4,2"
+    assert inner["OPENBLAS_NUM_THREADS"] == inner["MKL_NUM_THREADS"] == "2"
+    assert "MKL_NUM_THREADS=2" in inner["LEASEHOLD_SET"].split(",")
 
 
 def test_a_nested_lease_overwrites_the_enclosing_leases_values_and_never_the_users():
@@ -78,10 +100,43 @@ def test_a_value_the_user_set_inside_a_lease_is_theirs():
     inner = jobs.sized_env(outer | {"OMP_NUM_THREADS": "3"}, 2, threads=1)
     assert inner["OMP_NUM_THREADS"] == "3"
     assert inner["OPENBLAS_NUM_THREADS"] == inner["MKL_NUM_THREADS"] == "3"
-    assert inner["LEASEHOLD_THREADS"] == "3" and inner["RAYON_NUM_THREADS"] == "1"
+    assert inner["LEASEHOLD_THREADS"] == "1" and inner["RAYON_NUM_THREADS"] == "1"
     # A lease's value the user unset is set again, as any unset variable is.
     gone = {k: v for k, v in outer.items() if k != "GOMAXPROCS"}
     assert jobs.sized_env(gone, 2)["GOMAXPROCS"] == "2"
+
+
+@pytest.mark.parametrize("omp", ["1", "6"])
+def test_resizing_lowers_each_leases_thread_variable_and_never_raises_one(omp):
+    """A user OMP value below and above the lease's 4: GOMAXPROCS, LOKY and RAYON still
+    follow the lease, each to the lower of its value and the new count."""
+    outer = jobs.sized_env(LEASED | {"OMP_NUM_THREADS": omp}, 4)
+    assert outer["LEASEHOLD_THREADS"] == "4"
+    inside = jobs.resized(outer, 1)
+    assert inside["GOMAXPROCS"] == inside["LOKY_MAX_CPU_COUNT"] == "1"
+    assert inside["RAYON_NUM_THREADS"] == inside["LEASEHOLD_THREADS"] == "1"
+    assert inside["OMP_NUM_THREADS"] == omp
+    serial = jobs.sized_env(LEASED | {"OMP_NUM_THREADS": omp}, 4, threads=1)
+    assert serial["LEASEHOLD_THREADS"] == "1"
+    again = jobs.resized(serial, "jobs")  # a serial run inside `--threads 1`
+    assert again["GOMAXPROCS"] == again["RAYON_NUM_THREADS"] == again["LEASEHOLD_THREADS"] == "1"
+
+
+def test_resizing_keeps_a_lower_value_per_variable():
+    outer = jobs.sized_env(LEASED, 4, threads=2)
+    record = outer["LEASEHOLD_SET"].replace("GOMAXPROCS=2", "GOMAXPROCS=1")
+    inside = jobs.resized(outer | {"GOMAXPROCS": "1", "LEASEHOLD_SET": record}, 3)
+    assert inside["GOMAXPROCS"] == "1" and inside["RAYON_NUM_THREADS"] == "2"
+
+
+def test_a_count_too_long_to_be_one_is_never_converted():
+    huge = "9" * 5000
+    assert jobs.count_of(huge) is None
+    env = LEASED | {"LEASEHOLD_JOBS": huge, "LEASEHOLD_SET": "GOMAXPROCS=4", "GOMAXPROCS": "4"}
+    assert jobs.resized(env, 1) is None
+    spoof = LEASED | {"LEASEHOLD_SET": f"GOMAXPROCS={huge}", "GOMAXPROCS": huge}
+    assert jobs.recorded(spoof) == {}
+    assert "OPENBLAS_NUM_THREADS" not in jobs.job_env(2, {"OMP_NUM_THREADS": huge})
 
 
 @pytest.mark.parametrize(
@@ -103,10 +158,12 @@ def test_a_leasehold_set_without_a_lease_or_stale_is_not_believed():
 
 
 def test_without_job_variables_no_sizing_is_passed_on():
-    outer = jobs.sized_env(LEASED | {"PATH": "/bin"}, 4)
-    bare = jobs.unsized_env(outer)
+    outer = jobs.sized_env(LEASED | {"PATH": "/bin", "GOMAXPROCS": "8"}, 4)
+    bare = jobs.unsized_env(outer | {"RAYON_NUM_THREADS": "3"})
     assert not {"LEASEHOLD_SET", "LEASEHOLD_JOBS", "LEASEHOLD_THREADS"} & set(bare)
-    assert bare["PATH"] == "/bin"
+    assert not {"OMP_NUM_THREADS", "CARGO_BUILD_JOBS", "PYTHON_CPU_COUNT"} & set(bare)
+    assert bare["PATH"] == "/bin" and bare["GOMAXPROCS"] == "8"  # the user's
+    assert bare["RAYON_NUM_THREADS"] == "3"  # changed since: the user's
 
 
 def test_resized_gives_the_leases_variables_a_thread_count_and_keeps_its_jobs():
@@ -114,8 +171,8 @@ def test_resized_gives_the_leases_variables_a_thread_count_and_keeps_its_jobs():
     inside = jobs.resized(outer, 1)
     assert inside["RAYON_NUM_THREADS"] == inside["PYTHON_CPU_COUNT"] == "1"
     assert inside["PYTEST_XDIST_AUTO_NUM_WORKERS"] == inside["LEASEHOLD_JOBS"] == "4"
-    assert inside["OPENBLAS_NUM_THREADS"] == inside["LEASEHOLD_THREADS"] == "3"
-    assert inside["OMP_NUM_THREADS"] == "3"
+    assert inside["OPENBLAS_NUM_THREADS"] == "3"
+    assert inside["OMP_NUM_THREADS"] == inside["LEASEHOLD_THREADS"] == "1"
     assert jobs.resized({"OMP_NUM_THREADS": "2"}, 1) is None  # no lease set anything
 
 
