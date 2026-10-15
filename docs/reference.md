@@ -119,7 +119,7 @@ pressure passes `[guard] memory_pressure_on` (20%) or available memory drops und
 memory above the floor, for `settle_s` (30 s). While it is on, what runs keeps running, and
 what new work may start depends on whether memory is counted:
 
-- **With `[memory]`**, nothing new starts while a reading is over a threshold, whatever it
+- With `[memory]`, nothing new starts while a reading is over a threshold, whatever it
   counts or declares (what waits says "memory is short (...): nothing new starts until the
   pressure eases"). While the guard settles, new work may count at most the memory measured
   free: what is available above `min_available` less what leases granted in the last `settle_s`
@@ -134,7 +134,7 @@ what new work may start depends on whether memory is counted:
   available). What waits
   says "memory is short". The settling and the settle window are measured on a clock that never
   steps, so changing the system time does not end or stretch them.
-- **Without it** (a 0.2 config), every pool admits only its reserved slots, and the rest waits,
+- Without it (a 0.2 config), every pool admits only its reserved slots, and the rest waits,
   saying "the machine is under pressure". A request heavier than its pool's reservation then
   waits until the guard goes off; `leasehold doctor` warns when that is every built-in build
   and test rule.
@@ -187,8 +187,7 @@ never observed: it already holds a lease, or is waiting for one. A command the C
 leases is not under leasehold, so a rule that also matches it counts it twice; aim `[[observe]]`
 at programs started some other way.
 
-Observing is accounting, not control. The program has already started, so its weight is held
-even past its pool's max or the machine's slots, and `status` marks the machine and the pool
+Observing only counts a program. It has already started, so its weight is held even past its pool's max or the machine's slots, and `status` marks the machine and the pool
 `overcommitted`. New work waits until enough of it ends. A program is seen within one tick (2 s
 by default). `leasehold observe` shows what the rules match right now.
 
@@ -242,9 +241,9 @@ The two kept CPUs are kept only from commands that run as many jobs as their lea
 ignores the job count can still fill every CPU. `[contain] hard_cpu = true` caps each contained
 command at its weight in CPUs; it is off by default, and `leasehold doctor` warns while it is.
 
-**Two at once (opt-in).** `[commands] heavy_weight = 3` and `light_weight = 2` (on 6 slots; the
-generated config shows the values for its slots, commented out) let two builds or test runs
-run at once, each with fewer jobs. A command that declares no memory is then counted at its
+Running two builds or test runs at once is opt-in: `[commands] heavy_weight = 3` and
+`light_weight = 2` (on 6 slots; the generated config shows the values for its slots, commented
+out) let two run at once, each with fewer jobs. A command that declares no memory is then counted at its
 weight times the budget over the slots, which may be less than it uses: declare memory for
 memory-heavy work (a rule's `memory`, or `hold --memory`), or two large builds can overlap.
 [Measured](bench.md#two-heavy-jobs-at-once-opt-in).
@@ -637,11 +636,10 @@ command, in that session's turn, and waits up to `wait_s`; a light one goes stra
 The command is never rewritten, so Claude Code's permission rules apply to what the agent
 wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the lease back.
 
-- **Sub-agents** run in their parent's session, so a session's agents share its turns.
-- **The lease outlives nothing.** A renewer keeps it while the command runs, watches the Claude
-  Code process, and stops at the Bash call's own timeout plus a minute, so an interrupted call
-  cannot hold slots.
-- **A busy machine.** The command waits in line, keeping its place, for up to `wait_s` (300 s
+- Sub-agents run in their parent's session, so a session's agents share its turns.
+- A renewer keeps the lease while the command runs, watches the Claude Code process, and
+  stops at the Bash call's own timeout plus a minute, so an interrupted call cannot hold slots.
+- On a busy machine the command waits in line, keeping its place, for up to `wait_s` (300 s
   by default). One that waited at least 5 s says so as it starts (`leasehold: pytest waited
   42s in line for its lease`), so a slow start is not taken for a slow command. Still waiting
   after `wait_s`, it is refused with a message that says the command did not run and tells
@@ -650,17 +648,16 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
   pool, by its command and session, and the command's place in line: `machine busy for 300s:
   cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds 14 of 14;
   this needs 4; queued #1`. `leasehold doctor` warns when `wait_s` is under 120 s.
-- **The daemon says no.** A `refused` answer (a request that could never be granted, a
-  per-user limit), an error answer under 500 (such as 403 `forbidden`), or a matching rule
-  that `leasehold commands` marks as never granted: the command is denied with the daemon's
-  text, whatever `when_busy` says. A command matching a never-granted rule is never run under
-  a lighter rule's lease instead.
-- **The daemon cannot answer.** No daemon is reached, or it answers with an error of 500 or
-  more (such as 503 `ledger_unavailable` on a full disk): the command runs without a lease,
-  and the agent is told why. The same rule holds for listing the rules and for asking for the
-  lease.
-- **Passes through** for a command run in the background and inside a lease already held
-  (`LEASEHOLD_LEASE_ID` set).
+- When the daemon says no, with a `refused` answer (a request that could never be granted, a
+  per-user limit) or an error answer under 500 (such as 403 `forbidden`), or the command
+  matches a rule that `leasehold commands` marks as never granted, the command is denied with
+  the daemon's text, whatever `when_busy` says. A command matching a never-granted rule is
+  never run under a lighter rule's lease instead.
+- When no daemon is reached, or it answers with an error of 500 or more (such as 503
+  `ledger_unavailable` on a full disk), the command runs without a lease, and the agent is told
+  why. The same rule holds for listing the rules and for asking for the lease.
+- A command run in the background, and one inside a lease already held (`LEASEHOLD_LEASE_ID`
+  set), pass straight through.
 
 The hooks go through a pre-filter, `hooks/prefilter.sh`, so that an ordinary Bash command
 starts no Python (about 10 ms instead of a tenth of a second or more). It reads the command
@@ -727,9 +724,9 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
 
 ## Seeing the machine
 
-- **`leasehold status`** prints the machine: pools, load, lending, leases and the queue.
+- `leasehold status` prints the machine: pools, load, lending, leases and the queue.
   `--json` prints the [status object](#the-status-object).
-- **`leasehold top`** is the machine live in the terminal: the slots as numbered bays, each
+- `leasehold top` is the machine live in the terminal: the slots as numbered bays, each
   lease spanning as many as it weighs and each waiting one in a second lane; PSI pressure with a
   sparkline; the pools; the leases; the queue with why each waits and, with memory counted,
   what each counts; the memory budget in the header (`mem 5.9/11.7 GiB`); lending; recent
@@ -737,17 +734,17 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
   Keys: `q` quits, `p` pauses, `s` changes the order of the leases, `?` shows help. It follows
   `NO_COLOR` and draws in ASCII outside a UTF-8 locale. Off a terminal, on one smaller than
   80x20, or with `--once`, it prints one plain view and exits.
-- **`leasehold ui`** serves the same view to a browser on `127.0.0.1`, at a link that carries a
+- `leasehold ui` serves the same view to a browser on `127.0.0.1`, at a link that carries a
   random token, and opens it (`--no-open` to only print it). The page is read-only; requests
   without the token, or for another `Host`, are refused.
-- **`leasehold metrics`** prints the status in the Prometheus text format;
+- `leasehold metrics` prints the status in the Prometheus text format;
   `--textfile DIR` writes `DIR/leasehold.prom` for node_exporter's textfile collector.
   `leasehold ui` serves the same at `/metrics?token=...`.
-- **`leasehold report --url URL`** POSTs the status object to a URL every `--interval` seconds
+- `leasehold report --url URL` POSTs the status object to a URL every `--interval` seconds
   (30), with `--token-file` as a bearer token and `--header`s of your own: https unless the URL
   is on loopback, the token file not world-readable, redirects not followed.
   `deploy/leasehold-report.service` runs it.
-- **`leasehold doctor`** checks the config, the socket (its path within the 107 bytes a unix
+- `leasehold doctor` checks the config, the socket (its path within the 107 bytes a unix
   socket allows, a `socket_mode` that lets every user in) and its permissions, the daemon and
   its clock, PSI, cgroup v2 and the slices the config names, `/proc` visibility, the ledger,
   and whether commands are contained (`enforced (systemd)`, or `advisory:` and why). It warns
@@ -756,7 +753,7 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
   [memory budget](#memory) worked out for this machine lets work start, and fails a
   `[commands]` rule no lease could ever be granted for (its commands are refused). It exits 1
   on any failure and prints a fix for each problem. `--json` for scripts.
-- **`leasehold demo`** runs a made-up busy machine, a daemon with a scripted crowd, in a
+- `leasehold demo` runs a made-up busy machine, a daemon with a scripted crowd, in a
   temporary directory, and shows it in `top` (`--ui` for the browser). It touches nothing real.
 
 ## The HTTP API
