@@ -110,8 +110,8 @@ def _busy(when_busy: str) -> str:
 def _rule_line(rule: shell.Rule) -> str:
     args = f" with arguments matching {rule.args!r}" if rule.args else ""
     never = f"; never granted, so refused: {rule.never}" if rule.never else ""
-    threads = f", {rule.threads} threads per process" if rule.threads != "jobs" else ""
-    return f"weight {rule.weight} in pool {rule.pool}{threads}{args}{never}"
+    threads = "the job count" if rule.threads == "jobs" else str(rule.threads)
+    return f"weight {rule.weight} in pool {rule.pool}{args}; threads per process: {threads}{never}"
 
 
 def _describe(found: shell.Match) -> dict:

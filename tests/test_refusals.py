@@ -117,6 +117,7 @@ def test_a_rule_never_granted_is_refused_everywhere_alike(tmp_path, sock_dir, ca
             r
             for r in client.commands()["rules"]
             if "pytest" in r["programs"]
+            and r["args"] is None  # the plain pytest rule, not the xdist one
             and r["source"] == ("default" if case == "no work pool" else "config")
         ]
         assert said in served["never"]

@@ -22,13 +22,15 @@ import time
 from pathlib import Path
 
 import pytest
-from support import CHILD_ENV, until
+from support import CHILD_ENV, FACTS, FakeLoad, machine_config, until
 
 from leasehold import hold as hold_module
 from leasehold import jobs
+from leasehold.agent import MachineAgent
 from leasehold.client import ApiError, Client
 from leasehold.exits import EXIT_BUSY, EXIT_REFUSED, EXIT_REVOKED, EXIT_UNAVAILABLE
 from leasehold.hold import waiting_line
+from leasehold.server import Daemon
 
 
 def hold(sock: Path, *args: str, wait: bool = True, **kw) -> subprocess.Popen:
@@ -240,8 +242,8 @@ def test_with_no_weight_hold_weighs_the_command_as_the_commands_rules_do(daemon,
 def test_thread_pools_get_the_rules_threads_or_the_flags_and_worker_counts_the_jobs(
     daemon, tmp_path
 ):
-    """The built-in pytest rule gives each worker one thread; `--threads` overrides it; a
-    variable already set is left alone."""
+    """The built-in xdist rule gives each worker one thread, a serial pytest the job count;
+    `--threads` overrides it; a variable the user set is left alone, with its family."""
     probe = '#!/bin/sh\necho "$PYTEST_XDIST_AUTO_NUM_WORKERS $OMP_NUM_THREADS $LEASEHOLD_THREADS"\n'
     for name in ("pytest", "other"):
         (tmp_path / name).write_text(probe)
@@ -255,13 +257,79 @@ def test_thread_pools_get_the_rules_threads_or_the_flags_and_worker_counts_the_j
 
     pytest_, other = str(tmp_path / "pytest"), str(tmp_path / "other")
     assert sizes("--", pytest_, "-n", "auto") == "2 1 1"  # weight 4, cut to 2 jobs
-    assert sizes("--weight", "2", "--", pytest_) == "2 1 1"  # the rule's threads still
-    assert sizes("--threads", "jobs", "--", pytest_) == "2 2 2"
+    assert sizes("--weight", "2", "--", pytest_, "-n4") == "2 1 1"  # the rule's still
+    assert sizes("--", pytest_) == "2 2 2"  # serial
+    assert sizes("--threads", "jobs", "--", pytest_, "-n", "2") == "2 2 2"
     assert sizes("--weight", "2", "--", other) == "2 2 2"  # no rule: the job count
     assert sizes("--weight", "2", "--threads", "1", "--", other) == "2 1 1"
-    assert sizes("--", pytest_, OMP_NUM_THREADS="6") == "2 6 1"  # the user's own wins
+    assert sizes("--", pytest_, "-n2", OMP_NUM_THREADS="6") == "2 6 6"  # the user's wins
     bad = hold(daemon.path, "--threads", "0", "--", other)
     assert bad.returncode == 2 and "count of at least 1" in bad.stderr.read()
+
+
+@pytest.fixture
+def roomy(tmp_path, sock_dir):
+    """A daemon on the small machine with 4 jobs per slot, so leases of weight 1 nest."""
+    config = machine_config(tmp_path, socket=str(sock_dir / "r.sock"), jobs={"per_slot": 4})
+    d = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    d.start()
+    try:
+        yield d
+    finally:
+        d.stop()
+
+
+def test_a_hold_inside_a_hold_sizes_to_its_own_lease_but_never_over_the_user(roomy, tmp_path):
+    probe = tmp_path / "probe"
+    probe.write_text('#!/bin/sh\necho "$CARGO_BUILD_JOBS $OMP_NUM_THREADS $MKL_NUM_THREADS"\n')
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold"]
+
+    def nested(outer: str, inside: str, **extra: str) -> str:
+        proc = hold(
+            roomy.path, "--weight", "1", "--threads", outer, "--",
+            *inner, "--weight", "1", "--threads", inside, "--", str(probe),
+            stdout=subprocess.PIPE, env=env | extra,
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().strip()
+
+    assert nested("2", "1") == "4 1 1"
+    assert nested("1", "3") == "4 3 3"
+    assert nested("2", "1", OMP_NUM_THREADS="6") == "4 6"  # the user's, and no MKL beside it
+    assert nested("2", "1", CARGO_BUILD_JOBS="9") == "9 1 1"
+
+
+def test_auto_size_reads_the_command_line_as_the_hooks_do(daemon):
+    client = Client(daemon.path)
+    for argv in (["uv", "run", "pytest", "-n", "auto"], ["python3", "-m", "pytest", "-n4"]):
+        rule = hold_module.auto_size(client, argv)
+        assert (rule.weight, rule.threads) == (2, 1), argv
+    assert hold_module.auto_size(client, ["python3", "-m", "pytest"]).threads == "jobs"
+    assert hold_module.auto_size(client, ["true"]).weight == 1
+
+
+class _Rules:
+    """A client that only counts how often its rules are asked for."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    def commands(self) -> dict:
+        self.asked += 1
+        return {"rules": [], "wait_s": 1, "when_busy": "deny"}
+
+
+def test_a_weight_without_job_variables_never_asks_for_the_rules(monkeypatch):
+    monkeypatch.setattr(hold_module, "wait_for_grant", lambda *a, **k: (EXIT_REFUSED, {}))
+    client = _Rules()
+    assert hold_module.hold(client, ["true"], weight=2, job_env=False) == EXIT_REFUSED
+    assert client.asked == 0
+    assert hold_module.hold(client, ["true"], weight=2) == EXIT_REFUSED
+    assert client.asked == 1  # for the rule's threads
+    assert hold_module.hold(client, ["true"], job_env=False) == EXIT_REFUSED
+    assert client.asked == 2  # for the weight
 
 
 def on_a_terminal(script: str) -> tuple[int, str]:

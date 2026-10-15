@@ -13,6 +13,7 @@ from support import CHILD_ENV, FACTS, FakeLoad, cli, machine_config
 
 from leasehold import shims
 from leasehold.agent import MachineAgent
+from leasehold.client import Client
 from leasehold.server import Daemon
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,46 @@ def test_a_matching_run_gets_a_lease_sized_to_its_rule(setup):
     assert done.returncode == 0, done.stderr
     assert "weight=2 jobs=2 omp=1 args=build --release" in done.stdout  # the rule's threads
     assert "lease=none" not in done.stdout
+
+
+def test_a_pytest_shim_under_a_lease_gives_its_xdist_workers_one_thread(tmp_path, sock_dir):
+    """`hold -- make test` running `pytest -n 2`: no second lease, the lease's job count, and
+    the xdist rule's one thread; a value the user set survives."""
+    config = machine_config(tmp_path, socket=str(sock_dir / "p.sock"))
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    real, shim_dir = tmp_path / "bin", tmp_path / "shims"
+    real.mkdir()
+    (real / "pytest").write_text(
+        '#!/bin/sh\necho "$LEASEHOLD_LEASE_ID $PYTEST_XDIST_AUTO_NUM_WORKERS $OMP_NUM_THREADS '
+        '$LEASEHOLD_THREADS"\n'
+    )
+    (real / "pytest").chmod(0o755)
+    shims.install(shim_dir, ["pytest"], python=sys.executable)
+    env = {
+        "PATH": f"{shim_dir}:{real}:/usr/bin:/bin",
+        "PYTHONPATH": str(ROOT / "src"),
+        "HOME": str(tmp_path),
+        "LEASEHOLD_SOCKET": str(daemon.path),
+    }
+
+    def under_lease(script: str, **extra: str) -> list[str]:
+        argv = [sys.executable, "-m", "leasehold", "--socket", str(daemon.path), "hold",
+                "--weight", "2", "--threads", "jobs", "--", "sh", "-c", script]  # fmt: skip
+        done = subprocess.run(
+            argv, env=env | extra, capture_output=True, text=True, timeout=30, check=False
+        )
+        assert done.returncode == 0, done.stderr
+        return done.stdout.split()
+
+    try:
+        lease, workers, omp, threads = under_lease("pytest -n 2")
+        assert lease != "" and (workers, omp, threads) == ("2", "1", "1")
+        assert under_lease("pytest")[1:] == ["2", "2", "2"]  # serial: the lease's own
+        assert under_lease("pytest -n 2", OMP_NUM_THREADS="6")[1:] == ["2", "6", "6"]
+        assert len(Client(daemon.path).leases()["leases"]) == 0
+    finally:
+        daemon.stop()
 
 
 def test_it_passes_through_when_it_should(setup):

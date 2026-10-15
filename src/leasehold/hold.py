@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -303,12 +304,14 @@ def hold(
     request = None
     try:
         with _interruptible():
-            if weight is None or threads is None:
+            # Rules are read for the weight, or for the threads the job variables use.
+            if weight is None or (threads is None and job_env):
                 rule = auto_size(client, argv) if client is not None else _UNSIZED
                 if weight is None:
                     weight, memory = rule.weight, memory or rule.memory
                 if threads is None:
                     threads = rule.threads
+            threads = "jobs" if threads is None else threads
             request = lease_request(
                 kind=kind,
                 pool=pool,
@@ -359,14 +362,15 @@ _UNSIZED = shell.Rule(programs=frozenset(), weight=1)
 
 
 def auto_size(client: Client, argv: Sequence[str]) -> shell.Rule:
-    """The rule of the daemon's `[commands]` that `argv`'s program and arguments match, as the
-    shims would match it, for its weight, memory and threads; `_UNSIZED` when no rule matches
+    """The rule of the daemon's `[commands]` that `argv`, read as a command line, matches, as
+    the agent hooks and `leasehold commands --test` match it (`uv run pytest` and `python -m
+    pytest` are pytest), for its weight, memory and threads; `_UNSIZED` when no rule matches
     or the rules cannot be read."""
     try:
         rules = shell.served(client.commands()).rules
     except (Unavailable, ApiError, KeyError, ValueError, TypeError):
         return _UNSIZED
-    found = shell.match_programs(rules, [(argv[0], list(argv[1:]))])
+    found = shell.match(rules, shlex.join(argv))
     return _UNSIZED if found is None else found.rule
 
 
@@ -573,8 +577,7 @@ def child_env(
     lease_id: str, granted: dict, count: int, *, job_env: bool, threads: jobs.Threads = "jobs"
 ) -> dict[str, str]:
     """The command's environment: ours, the lease's `LEASEHOLD_*` variables, and (with
-    `job_env`) the job-count and thread-count variables the environment leaves unset
-    (`jobs.job_env`)."""
+    `job_env`) the job-count and thread-count variables (`jobs.sized_env`)."""
     env = {
         **os.environ,
         "LEASEHOLD_LEASE_ID": lease_id,
@@ -583,7 +586,7 @@ def child_env(
         "LEASEHOLD_WEIGHT": str(granted["weight"]),
     }
     if job_env:
-        env |= jobs.job_env(count, os.environ, threads)
+        env = jobs.sized_env(env, count, threads)
     return env
 
 

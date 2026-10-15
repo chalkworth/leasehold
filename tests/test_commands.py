@@ -118,10 +118,29 @@ def test_a_rule_gives_its_processes_jobs_threads_or_a_count():
             threads(bad)
 
 
-def test_pytest_workers_get_one_thread_each_and_builds_the_job_count():
-    rules = {r.programs[0]: r for _src, r in CommandSettings().rules()}
-    assert rules["pytest"].threads == 1
-    assert rules["cargo"].threads == rules["make"].threads == "jobs"
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -n 4", "pytest -n4", "pytest -n=4", "pytest -nauto", "pytest --numprocesses=auto",
+     "pytest -x --numprocesses 3 tests", "py.test -n logical", "uv run pytest -n auto",
+     "python -m pytest -n 2"],
+)  # fmt: skip
+def test_an_xdist_run_gets_one_thread_per_worker(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.threads, found.rule.weight) in {
+        ("pytest", 1, 4), ("py.test", 1, 4),
+    }  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "command", ["pytest", "pytest -n 0", "pytest -k n", "pytest --no-header", "tox", "nox"]
+)
+def test_a_serial_run_and_tox_and_nox_get_the_job_count(command):
+    assert match(DEFAULTS, command).rule.threads == "jobs"
+
+
+def test_builds_get_the_job_count():
+    rules = [r for _src, r in CommandSettings().rules()]
+    assert all(r.threads == "jobs" for r in rules if r.programs[0] != "pytest" or not r.args)
 
 
 def test_a_rule_served_without_threads_gives_the_job_count():
@@ -139,7 +158,8 @@ def test_the_daemon_serves_rules_its_pools_can_grant(daemon):
     assert all(r["pool"] == "work" and 1 <= r["weight"] <= 2 for r in answer["rules"])
     served = shell.served(answer)
     assert shell.match(served.rules, "uv run pytest").rule.weight == 2
-    assert shell.match(served.rules, "uv run pytest").rule.threads == 1
+    assert shell.match(served.rules, "uv run pytest -n 2").rule.threads == 1
+    assert shell.match(served.rules, "uv run pytest").rule.threads == "jobs"
     assert shell.match(served.rules, "cargo build").rule.threads == "jobs"
     assert all("threads" in r for r in answer["rules"])
 

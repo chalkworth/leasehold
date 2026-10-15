@@ -19,20 +19,58 @@ def test_job_variables_are_set_only_where_unset():
     env = jobs.job_env(3, {"GOMAXPROCS": "8", "CARGO_BUILD_JOBS": ""})
     assert env["CARGO_BUILD_JOBS"] == "3" and env["LEASEHOLD_JOBS"] == "3"
     assert "GOMAXPROCS" not in env  # the user's own choice wins
-    assert set(env) == set(jobs.JOB_VARIABLES) - {"GOMAXPROCS"}
+    assert set(env) == set(jobs.JOB_VARIABLES) - {"GOMAXPROCS"} | {"LEASEHOLD_SET"}
 
 
-def test_worker_counts_get_the_jobs_and_thread_pools_the_thread_count():
-    assert not set(jobs.WORKER_VARIABLES) & set(jobs.THREAD_VARIABLES)
+def test_worker_counts_get_the_jobs_and_everything_inside_a_process_the_thread_count():
+    assert set(jobs.WORKER_VARIABLES) == {
+        "LEASEHOLD_JOBS", "CARGO_BUILD_JOBS", "CMAKE_BUILD_PARALLEL_LEVEL",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    }  # fmt: skip
+    assert {"RUST_TEST_THREADS", "GOMAXPROCS", "DASK_NUM_WORKERS", "LOKY_MAX_CPU_COUNT",
+            "PYTHON_CPU_COUNT", "OMP_NUM_THREADS"} <= set(jobs.THREAD_VARIABLES)  # fmt: skip
+    assert "NUMBA_NUM_THREADS" not in jobs.JOB_VARIABLES  # a ceiling, not a default
     assert jobs.JOB_VARIABLES == jobs.WORKER_VARIABLES | jobs.THREAD_VARIABLES
-    env = jobs.job_env(4, {"MKL_NUM_THREADS": "3"}, threads=1)
-    assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == env["PYTHON_CPU_COUNT"] == "4"
-    assert env["OMP_NUM_THREADS"] == env["OPENBLAS_NUM_THREADS"] == "1"
-    assert env["POLARS_MAX_THREADS"] == env["LEASEHOLD_THREADS"] == "1"
-    assert "MKL_NUM_THREADS" not in env  # the user's own choice wins
-    ones = {name for name, value in env.items() if value == "1"}
-    assert ones == set(jobs.THREAD_VARIABLES) - {"MKL_NUM_THREADS"}
-    assert set(jobs.job_env(4, {}).values()) == {"4"}  # "jobs", the default
+    env = jobs.job_env(4, {}, threads=1)
+    assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == env["CARGO_BUILD_JOBS"] == "4"
+    assert {n for n, v in env.items() if v == "1"} == set(jobs.THREAD_VARIABLES)
+    every = set(jobs.JOB_VARIABLES) - {"LEASEHOLD_SET"}
+    assert {jobs.job_env(4, {})[n] for n in every} == {"4"}  # "jobs", the default
+
+
+def test_the_user_setting_one_of_the_blas_family_leaves_the_whole_family_alone():
+    """OpenBLAS reads OPENBLAS_NUM_THREADS before OMP_NUM_THREADS, and MKL_NUM_THREADS
+    overrides OMP_NUM_THREADS in PyTorch: setting them beside the user's OMP would undo it."""
+    env = jobs.job_env(4, {"OMP_NUM_THREADS": "6"}, threads=1)
+    assert not {"OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"} & set(env)
+    assert env["LEASEHOLD_THREADS"] == "6"  # the count in effect
+    assert env["POLARS_MAX_THREADS"] == env["GOMAXPROCS"] == "1"
+    env = jobs.job_env(4, {"MKL_NUM_THREADS": "3", "OPENBLAS_NUM_THREADS": "2"})
+    assert env["LEASEHOLD_THREADS"] == "2" and "OMP_NUM_THREADS" not in env
+
+
+def test_a_nested_lease_overwrites_the_enclosing_leases_values_and_never_the_users():
+    outer = jobs.sized_env({"PATH": "/bin", "GOMAXPROCS": "8"}, 4)
+    assert outer["LEASEHOLD_SET"] and "GOMAXPROCS" not in jobs.leasehold_set(outer)
+    inner = jobs.sized_env(outer, 2, threads=1)
+    assert inner["OMP_NUM_THREADS"] == inner["LEASEHOLD_THREADS"] == "1"
+    assert inner["CARGO_BUILD_JOBS"] == inner["LEASEHOLD_JOBS"] == "2"
+    assert inner["GOMAXPROCS"] == "8"  # the user's, through both
+    # The user's OMP beside an enclosing lease's OPENBLAS and MKL: the lease's go.
+    mixed = {"OMP_NUM_THREADS": "6", "OPENBLAS_NUM_THREADS": "4", "MKL_NUM_THREADS": "4"}
+    inner = jobs.sized_env(mixed | {"LEASEHOLD_SET": "OPENBLAS_NUM_THREADS,MKL_NUM_THREADS"}, 2)
+    assert inner["OMP_NUM_THREADS"] == inner["LEASEHOLD_THREADS"] == "6"
+    assert "OPENBLAS_NUM_THREADS" not in inner and "MKL_NUM_THREADS" not in inner
+    assert "OMP_NUM_THREADS" not in jobs.leasehold_set(inner)
+
+
+def test_resized_gives_the_leases_variables_a_thread_count_and_keeps_its_jobs():
+    outer = jobs.sized_env({"OPENBLAS_NUM_THREADS": "3"}, 4)
+    inside = jobs.resized(outer, 1)
+    assert inside["RAYON_NUM_THREADS"] == inside["PYTHON_CPU_COUNT"] == "1"
+    assert inside["PYTEST_XDIST_AUTO_NUM_WORKERS"] == inside["LEASEHOLD_JOBS"] == "4"
+    assert inside["OPENBLAS_NUM_THREADS"] == inside["LEASEHOLD_THREADS"] == "3"
+    assert jobs.resized({"OMP_NUM_THREADS": "2"}, 1) is None  # no lease set anything
 
 
 def test_the_thread_count_is_the_jobs_or_fewer():

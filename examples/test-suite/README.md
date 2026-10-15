@@ -24,13 +24,13 @@ running at that moment, so `run.sh` can print the most that ran together.
 ## The job count
 
 `hold` runs its command with the lease's job count in `LEASEHOLD_JOBS`, and in the variables
-other tools read for how many jobs or workers to run, wherever the environment leaves them
-unset: `PYTEST_XDIST_AUTO_NUM_WORKERS`, `CARGO_BUILD_JOBS`, `CMAKE_BUILD_PARALLEL_LEVEL`,
-`GOMAXPROCS`, `RUST_TEST_THREADS` and others (`leasehold.jobs.WORKER_VARIABLES`). Thread-pool
-variables such as `OMP_NUM_THREADS` get the thread count (`leasehold.jobs.THREAD_VARIABLES`):
-the job count, or 1 for pytest, whose workers are processes of their own. The count is the
-weight times the daemon's `[jobs] per_slot`, 1 by default. `--no-job-env` leaves these
-variables alone.
+other tools read for how many jobs or workers to fan out to: `PYTEST_XDIST_AUTO_NUM_WORKERS`,
+`CARGO_BUILD_JOBS` and `CMAKE_BUILD_PARALLEL_LEVEL` (`leasehold.jobs.WORKER_VARIABLES`). The
+variables that limit the parallelism inside each process, such as `OMP_NUM_THREADS`,
+`GOMAXPROCS` and `RUST_TEST_THREADS` (`leasehold.jobs.THREAD_VARIABLES`), get the thread
+count: the job count, or 1 for a `pytest -n` run, whose workers are processes of their own. A
+variable you set is left alone. The count is the weight times the daemon's `[jobs] per_slot`, 1
+by default. `--no-job-env` leaves these variables alone.
 
 ## The three commands
 

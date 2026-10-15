@@ -11,7 +11,10 @@ those.
 A shim passes straight to the real program, with no lease, when one is held already (a
 `make` under a leased `cargo`, any command under `leasehold hold`: `LEASEHOLD_LEASE_ID` is
 set; or an agent hook's lease for this program under this agent, `leasehold.hooknotes`), when
-`LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. A busy machine is
+`LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. Under a lease that
+set the job variables (`jobs.LEASEHOLD_SET`), a program whose own rule gives fewer threads
+(`pytest -n 4` under `hold -- make test`) runs with that thread count (`within_lease`). A busy
+machine is
 `[commands] when_busy`'s: wait `wait_s`, then exit 75, or run without a lease. When the daemon
 says no (a refusal, an error answer under 500, or a matching rule no lease could ever be
 granted for) the shim exits 77 without running the program; when it cannot answer (an error
@@ -27,7 +30,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from leasehold import busy, discovery, hooknotes, shell
+from leasehold import busy, discovery, hooknotes, jobs, shell
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, run_leased, wait_for_grant
@@ -149,8 +152,10 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         return EXIT_NOT_STARTED
     argv = command(target, args)
     target = argv[0]
-    if env.get("LEASEHOLD_LEASE_ID") or env.get("LEASEHOLD_SHIMS") == "off":
+    if env.get("LEASEHOLD_SHIMS") == "off":
         os.execv(target, argv)
+    if env.get("LEASEHOLD_LEASE_ID"):  # no second lease, but perhaps fewer threads
+        os.execve(target, argv, within_lease(program, args, env))
     covered = hooknotes.covering(env, program, os.getpid())
     if covered is not None:  # an agent hook holds this command's lease already
         os.execve(target, argv, {**env, "LEASEHOLD_LEASE_ID": covered})
@@ -198,6 +203,29 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         _say(f"not running {program}: refused: {why}")
         return EXIT_REFUSED
     os.execv(target, argv)
+
+
+def within_lease(program: str, args: list[str], env: Mapping[str, str]) -> dict[str, str]:
+    """The environment `program` runs with inside a lease already held: `env`, with the thread
+    count its own rule gives in the variables the lease set (`jobs.resized`) when that is fewer
+    than the lease's. A lease that set no variables, no matching rule, or no daemon to read the
+    rules from leaves `env` as it is."""
+    if jobs.LEASEHOLD_SET not in env:
+        return dict(env)
+    try:
+        lease_jobs = int(env.get("LEASEHOLD_JOBS", ""))
+        rules = shell.served(Client(discovery.find(None, None, env)).commands()).rules
+    except (discovery.DiscoveryError, Unavailable, ApiError, OSError, LookupError, ValueError):
+        return dict(env)
+    found = shell.match_programs(rules, [(program, args)])
+    if found is None or lease_jobs < 1:
+        return dict(env)
+    held = env.get("LEASEHOLD_THREADS", "")
+    current = int(held) if held.isdigit() else lease_jobs
+    wanted = jobs.thread_count(found.rule.threads, lease_jobs)
+    if wanted >= current:
+        return dict(env)
+    return jobs.resized(env, wanted) or dict(env)
 
 
 def _say(message: str) -> None:

@@ -62,6 +62,10 @@ def _rule(
     return CommandRule(programs=programs.split(), weight=weight, args=args, threads=threads)
 
 
+#: pytest arguments that start xdist workers: `-n N`, `-nN`, `-n=N`, `--numprocesses N`,
+#: `--numprocesses=N`, N a count, `auto` or `logical` (`-n 0` runs no workers).
+XDIST_ARGS = r"(^|\s)(-n\s*=?\s*|--numprocesses(=|\s+))(auto|logical|[1-9][0-9]*)(\s|$)"
+
 #: The weights of the built-in rules when `[commands]` sets none.
 HEAVY_WEIGHT = 4
 LIGHT_WEIGHT = 2
@@ -69,10 +73,13 @@ LIGHT_WEIGHT = 2
 
 def default_rules(heavy: int = HEAVY_WEIGHT, light: int = LIGHT_WEIGHT) -> tuple[CommandRule, ...]:
     """The built-in rules: builds and test runs that use every core they are given, at weight
-    `heavy`, and JavaScript tooling at weight `light`. pytest's jobs are worker processes
-    (pytest-xdist), each of which may run a BLAS or OpenMP pool, so each gets one thread."""
+    `heavy`, and JavaScript tooling at weight `light`. A pytest run with xdist workers
+    (`XDIST_ARGS`) runs its jobs as worker processes, each of which may run a BLAS or OpenMP
+    pool, so each gets one thread; it comes before the plain pytest rule of the same weight,
+    so it is the one an xdist run matches."""
     return (
-        _rule("pytest py.test tox nox", heavy, threads=1),
+        _rule("pytest py.test", heavy, XDIST_ARGS, threads=1),
+        _rule("pytest py.test tox nox", heavy),
         _rule(
             "cargo", heavy, r"^(build|b|test|t|check|c|clippy|bench|run|r|nextest|doc|install)\b"
         ),
