@@ -5,7 +5,7 @@ and versions follow [Semantic Versioning](https://semver.org/) as described unde
 the README: before 1.0, a minor release may break the public API, and every break is listed
 here.
 
-## [Unreleased]
+## [0.3.0]
 
 Memory-aware admission, a memory guard that no longer caps pools to their reservations, and an
 upgrade path for configs leasehold 0.2 wrote. Without the new `[memory]` table, slot admission
