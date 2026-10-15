@@ -16,8 +16,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-from leasehold import contain, discovery, machine, paths
+from leasehold import contain, discovery, machine, paths, upgrade
+from leasehold.admission import gib
 from leasehold.client import ApiError, Client, Unavailable
+from leasehold.facts import meminfo
 
 Level = Literal["ok", "warn", "fail"]
 
@@ -70,6 +72,129 @@ def check_config(explicit: str | None, env: Mapping[str, str]) -> tuple[Check, o
         return Check("config", "fail", f"{path}: {exc}", "correct it; see docs/reference.md"), None
     detail = f"{path} ({config.mode} daemon, {config.ceiling.slots} slots)"
     return Check("config", "ok", detail), config
+
+
+def check_upgrade(explicit: str | None, env: Mapping[str, str], config) -> Check | None:
+    """When a user's own config lacks what today's config has (`leasehold.upgrade`), the
+    command that adds it: a warning for a config exactly as 0.2's `init` wrote it (it has
+    0.2's defaults, not chosen ones), information (ok) for one edited since. Both optional."""
+    if config is None:
+        return None
+    lacks = upgrade.outdated(config)
+    if not lacks:
+        return None
+    try:
+        path = paths.find_config(explicit, env)
+    except FileNotFoundError:
+        path = None
+    flag = "" if path is None or path == paths.user_config(env) else f" --config {path}"
+    pristine = path is not None and upgrade.pristine(path, config)
+    return Check(
+        "defaults",
+        "warn" if pristine else "ok",
+        f"{path or 'the config'} lacks what today's config has: "
+        + "; ".join(lacks)
+        + ("" if pristine else " (it was edited, so this is for information)"),
+        f"optional: `leasehold setup --upgrade-config{flag} --dry-run` shows the change, and "
+        f"without --dry-run makes it (keeping the old file beside it); or by hand: "
+        f"{upgrade.manual_steps(config)}",
+    )
+
+
+def check_memory(config, memory_bytes: int | None) -> Check | None:
+    """With `[memory]`, whether its budget, worked out for this machine, lets work start
+    (`MachineConfig.memory_problems`): the worst problem, the others after it."""
+    if config is None or config.memory is None or not memory_bytes:
+        return None
+    problems = config.memory_problems(memory_bytes)
+    if not problems:
+        return None
+    problems.sort(key=lambda p: p[0] != "fail")
+    level = problems[0][0]
+    return Check(
+        "memory",
+        level,
+        "; ".join(detail for _, detail, _ in problems),
+        "; ".join(dict.fromkeys(fix for _, _, fix in problems)),
+    )
+
+
+def check_rules(config, memory_bytes: int | None) -> Check | None:
+    """A failure naming each `[commands]` rule no lease could ever be granted for on this
+    machine (`MachineConfig.never_rules`): a command it matches is refused, not run."""
+    if config is None:
+        return None
+    never = config.never_rules(memory_bytes)
+    if not never:
+        return None
+    return Check(
+        "rules",
+        "fail",
+        "; ".join(f"{name} is never granted: {why}" for name, why in never)
+        + ". A command matching it is refused (the agent hook denies it, a shim exits 77), "
+        "not run",
+        "change that rule (its memory, weight or pool), or the standing work, budget or pools "
+        "that leave it no room",
+    )
+
+
+def check_hard_cpu(config) -> Check | None:
+    """A warning, for a user's own daemon, that without `[contain] hard_cpu` the CPUs kept for
+    the person are kept only from commands that run as many jobs as they are given."""
+    if config is None or not config.for_user or config.contain.hard_cpu:
+        return None
+    return Check(
+        "hard_cpu",
+        "warn",
+        "the CPUs kept for you are kept only from tools that respect the job count a lease "
+        "gives them (MAKEFLAGS, CARGO_BUILD_JOBS and the like); a tool that ignores it can still "
+        "fill every CPU while it holds a lease",
+        "to cap each contained command at its weight in CPUs, set `hard_cpu = true` under "
+        "[contain] (it then cannot use idle CPUs either); see docs/reference.md, Containment",
+    )
+
+
+def check_guard_weights(config, memory_bytes: int | None) -> Check | None:
+    """A warning when no built-in build or test rule could start while the memory guard is on:
+    without `[memory]`, one heavier than its pool's reservation; with it, one that counts more
+    memory than the guard could ever find free, or than the budget."""
+    if config is None or not config.guarded or not config.commands.defaults:
+        return None
+    pool = config.kinds.get("work", "work")
+    pools = config.pool_set().pools
+    if pool not in pools:
+        return None
+    heavy = min(config.commands.heavy_weight, pools[pool].max)
+    try:
+        budget = config.memory_budget(memory_bytes) if memory_bytes else None
+    except ValueError:
+        return None  # no budget at all: `check_memory` fails it
+    if config.memory is None:
+        reserved = pools[pool].reserved
+        if heavy <= reserved:
+            return None
+        return Check(
+            "guard",
+            "warn",
+            f"while the memory guard is on, pool {pool} admits only its {reserved} reserved "
+            f"slots, and every built-in build and test rule weighs {heavy}: none of them can "
+            "start until the guard goes off",
+            "count memory instead ([memory]: `leasehold setup --upgrade-config`), or set "
+            f"[commands] heavy_weight to at most {reserved}",
+        )
+    if budget is None or memory_bytes is None:
+        return None
+    counted = heavy * budget.assumed_per_slot
+    most = min(budget.budget, max(0, memory_bytes - config.guard.floor(memory_bytes)))
+    if counted <= most:
+        return None
+    return Check(
+        "guard",
+        "warn",
+        f"a built-in build or test rule (weight {heavy}) counts {gib(counted)}, more than the "
+        f"{gib(most)} the memory budget and the guard's floor ever let start",
+        "lower [memory] assumed_per_slot or [commands] heavy_weight, or raise the budget",
+    )
 
 
 def check_socket(
@@ -314,9 +439,17 @@ def run(
     roots = roots or Roots()
     config_check, resolved = check_config(config, env)
     checks = [config_check]
-    ledger = check_ledger(resolved)
-    if ledger is not None:
-        checks.append(ledger)
+    memory_bytes = meminfo(roots.proc).get("MemTotal") if resolved is not None else None
+    for extra in (
+        check_upgrade(config, env, resolved),
+        check_memory(resolved, memory_bytes),
+        check_rules(resolved, memory_bytes),
+        check_hard_cpu(resolved),
+        check_guard_weights(resolved, memory_bytes),
+        check_ledger(resolved),
+    ):
+        if extra is not None:
+            checks.append(extra)
     socket_check, chosen = check_socket(socket, config, env)
     checks.append(socket_check)
     named = [Path(resolved.socket)] if resolved is not None else []

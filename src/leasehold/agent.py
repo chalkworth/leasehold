@@ -35,6 +35,7 @@ from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, some_avg10
 from leasehold.machine import MachineConfig
 from leasehold.proctable import Proc
+from leasehold.units import declared_to_bytes, memory_to_bytes
 
 #: The ledger scope observed processes' leases are filed under; no client may name it.
 OBSERVED_SCOPE = "leasehold.observed"
@@ -65,6 +66,16 @@ class AcquireRequest(BaseModel):
     wait_s: float = Field(0.0, ge=0, le=300)
     #: The lease's TTL; the machine's `lease_ttl_s` by default.
     ttl_s: float | None = Field(None, gt=0, le=3600)
+    #: The memory the work will use, a size such as `4g`: counted against the machine's memory
+    #: budget when it has one. None: the machine assumes some per slot of weight.
+    memory: str | None = None
+
+    @field_validator("memory")
+    @classmethod
+    def _memory(cls, value: str | None) -> str | None:
+        if value is not None:
+            declared_to_bytes(value)
+        return value
 
     @field_validator("lease_id", "session")
     @classmethod
@@ -76,6 +87,11 @@ class AcquireRequest(BaseModel):
     def session_name(self) -> str | None:
         session = self.session or self.labels.get("session")
         return session if session is not None and _ID.match(session) else None
+
+
+def _grant_key(row: dict) -> tuple:
+    """One grant of a lease: asked again and granted again is another."""
+    return (row["scope"], row["item_id"], row["acquired_at"])
 
 
 def _minute(now: float) -> int:
@@ -103,6 +119,7 @@ class MachineAgent:
         facts: dict | None = None,
         load: LoadReader | None = None,
         clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] | None = None,
         minute: Callable[[float], int] = _minute,
         processes: Callable[[], Mapping[int, Proc]] = proctable.scan,
         user_name: Callable[[int], str] | None = None,
@@ -123,9 +140,15 @@ class MachineAgent:
         slices = list(dict.fromkeys(config.load.slices))
         self.loader = load if load is not None else LoadReader(slices)
         self._clock = clock
+        #: The clock the guard's dwell and settling, and the settle window, are measured on:
+        #: one that never steps. A fake `clock` (in tests and the demo) stands in for it too.
+        self._monotonic = monotonic or (time.monotonic if clock is time.time else clock)
         self._minute = minute
         self.gate = LendGate(config.lend)
         memory = self.facts.get("memory_bytes") or self.limits.memory_bytes
+        #: The machine's memory, which `[memory]` budgets.
+        self.memory_bytes = memory
+        self.budget = config.memory_budget(memory)
         self.guard = Guard(config.guard, min_available=config.guard.floor(memory))
         self.verdict = Verdict(False, None, "not measured yet", None)
         self.last_load: dict | None = None
@@ -143,17 +166,85 @@ class MachineAgent:
         self._released: set[tuple[str, str]] = set()
         #: Observed leases given back because their process stopped matching, since then.
         self._unmatched: set[tuple[str, str]] = set()
+        #: When each live lease was first seen granted, on `_monotonic`: the settle window.
+        #: A lease from before this daemon started is placed by its wall-clock `acquired_at`
+        #: (no later than now), so one granted within `settle_s` of a restart is still recent.
+        wall, mono = self._clock(), self._monotonic()
+        self._granted_at: dict[tuple, float] = {
+            _grant_key(r): mono - max(0.0, wall - r["acquired_at"]) for r in self.ledger.leases()
+        }
+        #: When each waiting item was first seen in line, on `_monotonic` (`_overdue`).
+        self._queued_at: dict[tuple[str, str], float] = {}
         self._seen = self._snapshot()
 
     # --- decisions -----------------------------------------------------------------------------
 
     def policy(self) -> AdmissionPolicy:
         closed = frozenset() if self.verdict.eligible and not self._lend_off else self.lend_pools
+        guarding = self.config.guarded and self.guard.on
+        counting = self.budget is not None
+        free = self.memory_free() if guarding and counting else None
         return self.config.policy(
             closed=closed,
             max_overrides=self._max_overrides,
-            capped=self.config.guarded and self.guard.on,
+            capped=guarding and not counting,
+            memory_bytes=self.memory_bytes,
+            memory_free=free,
+            memory_short=self._memory_short() if free is not None else None,
+            memory_pressing=guarding and counting and self.guard.pressing,
+            memory_overdue=self._overdue() if free is not None else frozenset(),
         )
+
+    def memory_free(self) -> int:
+        """While the guard is on, the most memory new work may count: none while a reading is
+        over a threshold, else what is available above the floor less what leases granted
+        within `settle_s` count (they may not have grown to it yet). A lease not yet seen
+        granted counts as recent. Observed leases are not counted: they record processes
+        already running, whose memory `MemAvailable` already leaves out."""
+        available = (self.last_load or {}).get("mem_available_bytes")
+        if self.guard.pressing or available is None or self.budget is None:
+            return 0
+        since = self._monotonic() - self.config.guard.settle_s
+        recent = sum(
+            row["memory"]
+            if row["memory"] is not None
+            else row["weight"] * self.budget.assumed_per_slot
+            for row in self.ledger.leases()
+            if row["scope"] != OBSERVED_SCOPE
+            and self._granted_at.get(_grant_key(row), since) >= since
+        )
+        return max(0, available - self.guard.min_available - recent)
+
+    def _overdue(self) -> frozenset[tuple[str, str]]:
+        """The waiting items that have waited longer than `settle_s`, measured on `_monotonic`:
+        short only of the memory free, they stop letting the items behind them start. Each is
+        stamped when first seen waiting, at its wall-clock `queued_at` taken back from now (no
+        later than now), so a step of the wall clock after that moves nothing. Under the lock:
+        `policy()` runs from threads that do not hold it."""
+        with self._lock:
+            wall, mono = self._clock(), self._monotonic()
+            live = {(r["scope"], r["item_id"]): r["queued_at"] for r in self.ledger.queued()}
+            for key, queued_at in live.items():
+                if key not in self._queued_at:
+                    self._queued_at[key] = mono - max(0.0, wall - queued_at)
+            for key in self._queued_at.keys() - live.keys():
+                del self._queued_at[key]
+            since = mono - self.config.guard.settle_s
+            return frozenset(k for k, at in self._queued_at.items() if at < since)
+
+    def _note_grants(self) -> None:
+        """Note when each lease granted since the last call was first seen; forget ended ones."""
+        now = self._monotonic()
+        live = {_grant_key(r) for r in self.ledger.leases()}
+        for key in live - self._granted_at.keys():
+            self._granted_at[key] = now
+        for key in self._granted_at.keys() - live:
+            del self._granted_at[key]
+
+    def _memory_short(self) -> str:
+        if self.guard.pressing:
+            return f"memory guard on: {self.guard.reason}"
+        return f"memory guard settling after {self.guard.reason}"
 
     def set_lend(self, enabled: bool) -> dict:
         """Whether lend leases may be granted. Off closes the lend pools now and revokes
@@ -265,7 +356,8 @@ class MachineAgent:
             if self.config.guarded:
                 self.guard.observe(
                     Reading(
-                        now=self._clock(),
+                        now=self._monotonic(),
+                        at=self._clock(),
                         memory_pressure=some_avg10(load["pressure"]["memory"]),
                         available=load.get("mem_available_bytes"),
                     )
@@ -356,6 +448,7 @@ class MachineAgent:
                 unmatched=frozenset(self._unmatched),
             )
             self._seen = seen
+            self._note_grants()
             self._released.clear()
             self._unmatched.clear()
             self.events.emit([*extra, *found], now=now)
@@ -391,6 +484,14 @@ class MachineAgent:
         if refused is not None:
             return {"status": "refused", "reason": refused}
         lease_id = req.lease_id or uuid.uuid4().hex
+        memory = None if req.memory is None else memory_to_bytes(req.memory)
+        if self.budget is not None and memory is not None and memory > self.limits.memory_bytes:
+            return {
+                "status": "refused",
+                "lease_id": lease_id,
+                "reason": f"memory {req.memory} is more than the {self.limits.memory} one lease "
+                "may be given ([ceiling] memory)",
+            }
         item = LedgerItem(
             scope=SCOPE,
             item_id=lease_id,
@@ -400,6 +501,7 @@ class MachineAgent:
             weight=req.weight,
             labels=tuple(sorted(req.labels.items())),
             session=req.session_name(),
+            memory=memory,
         )
         ttl = req.ttl_s or self.config.lease_ttl_s
         with self._lock:
@@ -561,16 +663,23 @@ class MachineAgent:
 
     def commands(self) -> dict:
         """Which commands take a lease, for agent hooks and shims to match against: each rule
-        with its pool named and its weight cut to the most one lease could ever be admitted
-        with in that pool (`AdmissionPolicy.heaviest`), so what it asks for can be granted."""
+        with its pool named and its weight cut to the most one lease declaring its memory could
+        ever be admitted with in that pool (`AdmissionPolicy.heaviest`), so what it asks for can
+        be granted. A rule no lease could ever be granted for (`MachineConfig.never_reason`)
+        is served at its own weight with `never`, the reason: it still matches its commands,
+        and hooks and shims refuse them rather than take a lighter rule's lease."""
         settings = self.config.commands
         policy = self.policy()
         rules = []
         for src, rule in settings.rules():
-            pool = rule.pool or self.config.kinds.get("work", "work")
-            top = policy.heaviest(pool) if pool in policy.pools else rule.weight
-            weight = max(1, min(rule.weight, top, self.config.ceiling.slots))
-            rules.append(rule.model_dump() | {"pool": pool, "weight": weight, "source": src})
+            served = rule.model_dump() | {"pool": self.config.rule_pool(rule), "source": src}
+            reason = self.config.never_reason(rule, policy, self.memory_bytes)
+            if reason is not None:
+                rules.append(served | {"weight": rule.weight, "never": reason})
+                continue
+            memory = None if rule.memory is None else memory_to_bytes(rule.memory)
+            top = policy.heaviest(served["pool"], memory)
+            rules.append(served | {"weight": min(rule.weight, top, self.config.ceiling.slots)})
         return {
             "rules": rules,
             "wait_s": settings.wait_s,
@@ -589,6 +698,7 @@ class MachineAgent:
             load=self.last_load,
             lend=self._lend_status(),
             guard=self.guard.status() | {"enabled": self.config.guarded},
+            budget=self.budget,
             leases=listing["leases"],
             queue=listing["queue"],
             now=self._clock(),

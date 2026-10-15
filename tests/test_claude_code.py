@@ -247,3 +247,29 @@ def test_pre_keeps_the_prefilters_word_list_in_step(daemon, tmp_path):
     claude_code.pre(event("git status"), Client(daemon.path), env=env, watch_pid=None)
     words = (tmp_path / "cache" / "leasehold" / "programs").read_text().split()
     assert "pytest" in words and "cargo" in words and words == sorted(words)
+
+
+def test_a_refused_command_is_denied_not_run_without_a_lease(tmp_path, sock_dir):
+    """A refusal means a working daemon said no (here: the user's submit rate in the pool), so
+    the command is denied with the reason, even with `when_busy = "run"`."""
+    config = machine_config(
+        tmp_path,
+        socket=str(sock_dir / "r.sock"),
+        pools={"work": {"reserved": 2, "max": 2, "create_rate_per_min": 1}},
+        kinds={"work": "work"},
+        lend={"pools": []},
+        commands={"when_busy": "run"},
+    )
+    d = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    d.start()
+    try:
+        client = Client(d.path)
+        client.acquire(kind="work", weight=1, lease_id="first")
+        reply = claude_code.pre(event("pytest"), client, env={}, watch_pid=None, spawn=Spawned())
+        decision = reply.output["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "pytest refused" in decision["permissionDecisionReason"]
+        assert "per-user limit" in decision["permissionDecisionReason"]
+        assert [lease["lease_id"] for lease in leases(d.path)] == ["first"]
+    finally:
+        d.stop()

@@ -73,7 +73,9 @@ leasehold decides **when** a command starts and **how much** of the machine it m
 runs. It never decides what runs, and it only touches the processes it started itself.
 
 - **Leases.** A heavy command takes a lease on slots (one slot per CPU, a few kept back for you)
-  before it starts and gives it back when it ends; a holder that crashes gives it back within
+  before it starts and gives it back when it ends. The kept CPUs are kept from commands that
+  run the job count they are given; one that ignores it can still fill every CPU unless
+  `[contain] hard_cpu = true` caps it (`leasehold doctor` warns while it is off); a holder that crashes gives it back within
   seconds. Turns go round fairly by user, then by agent session, so one busy agent cannot starve
   the others.
 - **Sized commands.** The lease's size reaches the command as the job-count variables that
@@ -84,8 +86,13 @@ runs. It never decides what runs, and it only touches the processes it started i
   and, when a rule says so, a `MemoryHigh`. `leasehold doctor` says whether this machine is
   `enforced (systemd)` or `advisory`, and why. Advisory means the lease and sizing still apply,
   but a command that ignores its job count is not held back.
-- **Memory guard.** When memory pressure rises, new work is admitted only up to each pool's
-  reserved slots until it eases, so a burst of builds does not push the machine into swap.
+- **Memory.** A command can declare the memory it will use (`hold --memory`, or its rule's
+  `memory`), and declared sizes are counted against a budget: the machine's memory less a share
+  kept for you. A command that declares nothing counts a share in proportion to its weight, which
+  never holds back more than the slots already do, so the budget only binds declared and
+  standing memory. When memory pressure rises, nothing new starts until it eases, and then only
+  within the memory measured free. Other programs' memory is not counted: the guard reacts to
+  it once it shows as pressure ([measured](docs/bench.md#the-03-defaults)).
 - **Clean ends.** `leasehold run` puts the agent's session in a slice of its own and stops what
   it leaves behind (a stray test server, a hung build) when the agent exits.
 

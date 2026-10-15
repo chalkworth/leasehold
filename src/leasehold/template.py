@@ -14,8 +14,13 @@ import socket
 from importlib.resources import files
 from string import Template
 
+from leasehold.commands import HEAVY_WEIGHT
 from leasehold.machine import default_pools
 from leasehold.paths import SYSTEM_LEDGER_DIR, SYSTEM_SOCKET, Mode
+
+#: What 0.2's `init` wrote for a user's own daemon, by release, to know such a config when it
+#: is found unedited (`leasehold.upgrade`).
+USER_0_2 = {"0.2.0": "user-0.2.0.toml", "0.2.1": "user-0.2.1.toml"}
 
 #: What `deploy/machine.toml` is rendered from.
 EXAMPLE = {
@@ -28,6 +33,16 @@ EXAMPLE = {
 }
 
 
+def weights(slots: int) -> tuple[int, int]:
+    """The (heavy, light) weights that let two builds or test runs run at once on `slots`
+    slots: half the slots from 4 up, all of them below (one at a time, at full width, rather
+    than two of one job each). Light is half of heavy, rounded up. A user's config offers them
+    as an opt-in (`[commands] heavy_weight`, `light_weight`) where the built-in 4 lets only one
+    run at a time."""
+    heavy = slots // 2 if slots >= 4 else max(1, slots)
+    return heavy, max(1, (heavy + 1) // 2)
+
+
 def kept_for_you(cpus: int) -> int:
     """How many CPUs a user's own config leaves out of the slots, for the person at the
     machine: 2 from 8 CPUs up, 1 from 3, none below."""
@@ -37,7 +52,8 @@ def kept_for_you(cpus: int) -> int:
 def sized(mode: Mode, facts: dict) -> str:
     """The config `init` (and `setup`) writes for a machine of these `facts` (`facts.probe`):
     one slot per CPU, less `kept_for_you` for a user's own daemon, and at most three quarters of
-    the memory to any one lease."""
+    the memory to any one lease. A user's own also counts memory (`[memory]`), and offers the
+    `weights` that run two builds at once as an opt-in."""
     cpus = facts.get("cpus_logical") or os.cpu_count() or 1
     memory = facts.get("memory_bytes") or 0
     kept = kept_for_you(cpus) if mode == "user" else 0
@@ -67,6 +83,20 @@ def _paths(mode: Mode) -> str:
     )
 
 
+def _opt_in(slots: int) -> str:
+    heavy, light = weights(slots)
+    if heavy >= min(HEAVY_WEIGHT, slots):
+        return ""
+    return (
+        f"# To run two at once instead, each with fewer jobs (opt-in):\n"
+        f"# heavy_weight = {heavy}\n"
+        f"# light_weight = {light}\n"
+        "# A command that declares no memory then counts its weight times the budget over the\n"
+        "# slots, which may be less than it uses: declare memory for memory-heavy work (a rule's\n"
+        "# `memory`, or `hold --memory`).\n"
+    )
+
+
 def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about: str) -> str:
     """The config text for a machine with `slots` slots, `cpus` CPUs and `memory` to lend one
     lease (a size such as `48g`)."""
@@ -74,6 +104,7 @@ def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about
     if mode == "user":
         reserved = pools["work"].reserved
         text = (files("leasehold") / "templates" / "user.toml").read_text()
+        at_once = slots // min(HEAVY_WEIGHT, slots)
         return Template(text).substitute(
             name=name,
             about=about,
@@ -82,7 +113,13 @@ def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about
             memory=memory,
             work_reserved=reserved,
             background_max=max(1, slots - reserved),
+            heavy_note=f"On {slots} slots, "
+            + (
+                "one of them runs at a time." if at_once == 1 else f"{at_once} of them run at once."
+            ),
+            opt_in=_opt_in(slots) if at_once == 1 else "",
         )
+
     text = (files("leasehold") / "templates" / "machine.toml").read_text()
     return Template(Template(text).safe_substitute(paths=_paths(mode))).substitute(
         name=name,
@@ -95,4 +132,22 @@ def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about
         work_max=pools["work"].max,
         external_max=pools["external"].max,
         lend_max=pools["lend"].max,
+    )
+
+
+def render_user_0_2(
+    *, name: str, slots: int, cpus: float, memory: str, about: str, release: str = "0.2.1"
+) -> str:
+    """The config `release` (0.2.0 or 0.2.1)'s `init` wrote for a user's own daemon with these
+    values."""
+    reserved = default_pools(slots)["work"].reserved
+    text = (files("leasehold") / "templates" / USER_0_2[release]).read_text()
+    return Template(text).substitute(
+        name=name,
+        about=about,
+        slots=slots,
+        cpus=f"{cpus:g}",
+        memory=memory,
+        work_reserved=reserved,
+        background_max=max(1, slots - reserved),
     )

@@ -1,0 +1,13 @@
+{
+ "before": {
+  "load1": 1.85,
+  "cpu_some": 2.96,
+  "mem_some": 0.0,
+  "quiet": true
+ },
+ "inner_rc": 0,
+ "wall_s": 706.7683870960027,
+ "pswpin": 73185,
+ "pswpout": 21002,
+ "oom_kill_machine": 0
+}

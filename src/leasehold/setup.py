@@ -3,7 +3,9 @@
 Each step says what it did, and each is safe to repeat:
 
 1. **Config.** `~/.config/leasehold/machine.toml` (`leasehold init`'s, sized for the machine),
-   unless one is there already; an existing config is never touched.
+   unless one is there already; an existing config is never touched, only checked for
+   leasehold 0.2's defaults (`leasehold.upgrade`), which `setup --upgrade-config` replaces
+   when asked.
 2. **Daemon.** A systemd user unit, `~/.config/systemd/user/leasehold.service`, running this
    installation's `leasehold serve --user`, enabled and started. Without a user manager, it
    says how to start a daemon by hand.
@@ -13,6 +15,7 @@ Each step says what it did, and each is safe to repeat:
 5. **Check.** Whether commands are contained here, and what `leasehold doctor` finds wrong.
 
 `remove` stops and deletes the unit and the shims, and leaves the config and the ledger.
+`upgrade_config` brings a config from 0.2's defaults to today's, the old file kept beside it.
 """
 
 from __future__ import annotations
@@ -26,9 +29,9 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from leasehold import contain, doctor, machine, paths, shims, template
+from leasehold import contain, doctor, machine, paths, shims, template, upgrade
 from leasehold.client import Client
-from leasehold.facts import probe
+from leasehold.facts import meminfo, probe
 
 Say = Callable[[str], None]
 UNIT = "leasehold.service"
@@ -93,6 +96,16 @@ def write_config(env: Mapping[str, str], say: Say) -> Path:
     path = paths.user_config(env)
     if path.exists():
         say(f"config: {path} is there already; left as it is")
+        try:
+            lacks = upgrade.outdated(machine.load(path))
+        except (OSError, ValueError):
+            lacks = []  # `check` reports a config that does not load
+        if lacks:
+            say(f"config: it lacks what today's config has: {'; '.join(lacks)}")
+            say(
+                "config: both are optional; `leasehold setup --upgrade-config --dry-run` shows "
+                "the change, and without --dry-run makes it, keeping the old file beside it"
+            )
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -171,6 +184,42 @@ def setup(env: Mapping[str, str], say: Say) -> int:
     code = check(env, say)
     say("undo with `leasehold setup --remove`")
     return code
+
+
+def upgrade_config(path: Path | None, env: Mapping[str, str], say: Say, *, dry_run: bool) -> int:
+    """Bring the config at `path` (default: the user's) to today's defaults: say what changes
+    and show the diff, then, unless `dry_run`, write it with the old file kept beside it. 0
+    when it was written, lacked nothing or (`dry_run`) could be; 1 when it cannot be edited
+    automatically or does not load."""
+    path = path or paths.user_config(env)
+    try:
+        config = machine.load(path)
+    except (OSError, ValueError) as exc:
+        say(f"config: {exc}")
+        return 1
+    memory_bytes = meminfo(Path("/proc")).get("MemTotal")
+    found = upgrade.plan(path, config, memory_bytes)
+    if found is None:
+        say(f"config: {path} has today's defaults; nothing to change")
+        return 0
+    if found.text is None:
+        say(f"config: {path} cannot be changed automatically: {found.manual}")
+        return 1
+    for change in found.changes:
+        say(f"config: {change}")
+    for line in found.diff().splitlines():
+        say(line)
+    if dry_run:
+        say("config: nothing written (--dry-run)")
+        return 0
+    try:
+        backup = upgrade.apply(found)
+    except (OSError, ValueError) as exc:
+        say(f"config: not written: {exc}")
+        return 1
+    say(f"config: {path} upgraded; the old file is {backup}")
+    say(f"config: restart your daemon to use it (`systemctl --user restart {UNIT}`)")
+    return 0
 
 
 def remove(env: Mapping[str, str], say: Say) -> int:

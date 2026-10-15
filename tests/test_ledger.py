@@ -597,3 +597,43 @@ def test_a_weight_below_one_is_never_admitted_or_queued(ledger, weight):
     assert ledger.leases() == [] and ledger.queued() == []
     with pytest.raises(ValueError, match="below 1"):
         ledger.enqueue(item("neg", weight=weight))
+
+
+# --- declared memory -----------------------------------------------------------------------------
+
+
+def test_declared_memory_is_kept_and_counted_where_the_policy_has_a_budget(ledger):
+    budget = AdmissionPolicy(slots=POLICY.slots, pools=POLICY.pools, memory={MACHINE: 10 << 30})
+    big = LedgerItem("ci", "big", "work", "ann", "ci", 1, memory=8 << 30)
+    assert isinstance(ledger.try_admit(big, budget), Admitted)
+    second = LedgerItem("ci", "more", "work", "bob", "ci", 1, memory=4 << 30)
+    assert position(ledger.try_admit(second, budget)) == 1
+    assert [r["memory"] for r in ledger.leases()] == [8 << 30]
+    assert [r["memory"] for r in ledger.queued()] == [4 << 30]
+    assert ledger.settle(POLICY) == [("ci", "more")]  # no budget: memory is not counted
+    refused = ledger.try_admit(
+        LedgerItem("ci", "x", "work", "ann", "ci", 1, memory=11 << 30), budget
+    )
+    assert isinstance(refused, Refused) and "memory budget" in refused.reason
+
+
+def test_a_0_2_ledger_gains_the_memory_columns_and_keeps_its_rows(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    old_schema = ledger_module._SCHEMA.replace("    memory INTEGER,\n", "").replace(
+        "    -- The memory the item declared, in bytes; NULL: none.\n", ""
+    )
+    assert "memory INTEGER" not in old_schema
+    conn = sqlite3.connect(path)
+    conn.executescript(old_schema)
+    conn.execute(
+        "INSERT INTO queue (scope, item_id, kind, user, session, pool, weight, holder_pid, "
+        "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at) "
+        "VALUES ('ci', 'old', 'work', 'ann', NULL, 'ci', 1, 1, NULL, NULL, 0, 0, NULL, 1e12, 1e12)"
+    )
+    conn.commit()
+    conn.close()
+    ledger = Ledger(path)
+    [row] = ledger.queued()
+    assert row["item_id"] == "old" and row["memory"] is None
+    assert ledger.settle(POLICY) == [("ci", "old")]
+    assert ledger.leases()[0]["memory"] is None

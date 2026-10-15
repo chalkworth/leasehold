@@ -68,7 +68,15 @@ class Client:
         return self.request("GET", "/v1/commands")
 
     def acquire(self, **body) -> dict:
+        """Ask for a lease (`POST /v1/acquire`); fields that are None are left out. A daemon
+        older than 0.3 does not take `memory`: the request is then made again without it."""
         body = {k: v for k, v in body.items() if v is not None}
+        try:
+            return self.request("POST", "/v1/acquire", body, extra_timeout=body.get("wait_s", 0))
+        except ApiError as exc:
+            if "memory" not in body or not _unknown_field(exc, "memory"):
+                raise
+        body.pop("memory")
         return self.request("POST", "/v1/acquire", body, extra_timeout=body.get("wait_s", 0))
 
     def renew(self, lease_id: str, ttl_s: float | None = None) -> dict:
@@ -84,3 +92,14 @@ class Client:
     def set_pool_max(self, pool: str, maximum: int | None) -> dict:
         """Override `pool`'s `max` until the daemon restarts; None resets it."""
         return self.request("POST", f"/v1/pools/{quote(pool, safe='')}", {"max": maximum})
+
+
+def _unknown_field(exc: ApiError, name: str) -> bool:
+    """Whether the daemon refused a request only for not knowing the field `name`."""
+    detail = exc.payload.get("detail")
+    if exc.status != 400 or not isinstance(detail, list) or not detail:
+        return False
+    return all(
+        isinstance(e, dict) and e.get("type") == "extra_forbidden" and e.get("loc") == [name]
+        for e in detail
+    )

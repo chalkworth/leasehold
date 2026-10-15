@@ -8,7 +8,8 @@ a field is not a change). `docs/reference.md` lists every field.
 from __future__ import annotations
 
 from leasehold.admission import AdmissionPolicy
-from leasehold.machine import MachineConfig, MachineLimits
+from leasehold.machine import MachineConfig, MachineLimits, MemoryBudget
+from leasehold.model import MACHINE
 from leasehold.units import memory_to_bytes
 
 #: The version of the shape.
@@ -27,6 +28,7 @@ def public(row: dict) -> dict:
         "labels": row["labels"],
         "ttl_s": row["ttl_s"],
         "expires_at": row["expires_at"],
+        "memory_bytes": row.get("memory"),
     }
     if "acquired_at" in row:
         out |= {
@@ -77,12 +79,53 @@ def observing(config: MachineConfig, leases: list[dict]) -> list[dict]:
     ]
 
 
+def counted(policy: AdmissionPolicy, item: dict) -> int:
+    """The memory, in bytes, admission counts for a lease or queued item (0 without a budget)."""
+    shaped = policy.pools.get(item["pool"])
+    host = shaped.host if shaped is not None else MACHINE
+    return policy.counted(host, item["weight"], item.get("memory_bytes"))
+
+
+def with_counted(policy: AdmissionPolicy, items: list[dict]) -> list[dict]:
+    """`items` (already `public`), each with the memory admission counts for it."""
+    return [x | {"memory_counted_bytes": counted(policy, x)} for x in items]
+
+
+def memory(
+    budget: MemoryBudget | None, policy: AdmissionPolicy, leases: list[dict], machine_bytes: int
+) -> dict:
+    """The memory budget as status reports it: `counted` false (and the rest None) when the
+    config has no `[memory]` table."""
+    if budget is None:
+        return {
+            "counted": False,
+            "machine_bytes": machine_bytes,
+            "budget_bytes": None,
+            "kept_bytes": None,
+            "assumed_per_slot_bytes": None,
+            "held_bytes": None,
+            "free_now_bytes": None,
+        }
+    standing = sum(policy.standing_memory.values())
+    return {
+        "counted": True,
+        "machine_bytes": machine_bytes,
+        "budget_bytes": budget.budget,
+        "kept_bytes": budget.kept,
+        "assumed_per_slot_bytes": budget.assumed_per_slot,
+        "held_bytes": standing + sum(counted(policy, x) for x in leases),
+        "free_now_bytes": policy.memory_free.get(MACHINE),
+    }
+
+
 def pools(
     config: MachineConfig, policy: AdmissionPolicy, leases: list[dict], queue: list[dict]
 ) -> dict[str, dict]:
     """Per pool: its shape (with any override applied) and what it holds and has waiting.
-    `held_weight` includes standing weight; `running`, `revoked` and `queued` count leases."""
+    `held_weight` includes standing weight; `running`, `revoked` and `queued` count leases;
+    `memory_counted_bytes` is the memory admission counts there (standing memory included)."""
     held_standing = config.standing_held()
+    standing_memory = policy.standing_memory
     lend = set(config.lend.pools)
     out = {}
     for name, pool in config.pool_set().pools.items():
@@ -101,6 +144,8 @@ def pools(
             "running": len(held),
             "revoked": sum(1 for x in held if x["revoked"]),
             "queued": sum(1 for x in queue if x["pool"] == name),
+            "memory_counted_bytes": sum(counted(policy, x) for x in held)
+            + (standing_memory.get(name, 0) if policy.memory else 0),
         }
     return out
 
@@ -115,11 +160,14 @@ def report(
     lend: dict,
     leases: list[dict],
     guard: dict | None = None,
+    budget: MemoryBudget | None = None,
     queue: list[dict],
     now: float,
     version: str,
 ) -> dict:
     """The whole status object. `leases` and `queue` are already `public`."""
+    leases = with_counted(policy, leases)
+    queue = with_counted(policy, queue)
     by_pool = pools(config, policy, leases, queue)
     # Leases left in a pool the config no longer has still hold their slots.
     stray = sum(lease["weight"] for lease in leases if lease["pool"] not in by_pool)
@@ -144,6 +192,7 @@ def report(
         "load": load,
         "lend": lend,
         "guard": guard,
+        "memory": memory(budget, policy, leases, facts.get("memory_bytes") or limits.memory_bytes),
         "contain": config.contain.model_dump(),
         "standing": standing(config),
         "observe": observing(config, leases),

@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable
 
 from leasehold.client import ApiError, Client, Unavailable
-from leasehold.exits import EXIT_NOT_STARTED, EXIT_UNAVAILABLE
+from leasehold.exits import EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
 from leasehold.hold import wait_for_grant
 from leasehold.process import process_birth, process_matches
 
@@ -54,8 +54,10 @@ def acquire(
     session: str | None = None,
     timeout_s: float | None = None,
     ttl_s: float | None = None,
+    memory: str | None = None,
 ) -> tuple[int, dict | None]:
-    """Wait for the lease `lease_id`: `(0, lease)` once granted, else `(exit code, None)`."""
+    """Wait for the lease `lease_id`: `(0, lease)` once granted, else `(exit code, None)`.
+    `memory` (a size such as `4g`) is the memory the work declares."""
     request = {
         "kind": kind,
         "pool": pool,
@@ -64,8 +66,9 @@ def acquire(
         "lease_id": lease_id,
         "session": session,
         "ttl_s": ttl_s,
+        "memory": memory,
     }
-    code, answer = wait_for_grant(client, request, timeout_s, _say)
+    code, answer = wait_for_grant(client, request, timeout_s, _say, fault=EXIT_REFUSED)
     if code is not None:
         return code, None
     return 0, answer["lease"]
@@ -158,6 +161,7 @@ def acquire_main(client: Client, socket: str, args) -> int:
         session=args.session,
         timeout_s=args.timeout,
         ttl_s=args.ttl,
+        memory=getattr(args, "memory", None),
     )
     if lease is None:
         return code

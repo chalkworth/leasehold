@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from leasehold import handoff
 from leasehold.hold import hold
 from leasehold.kinds import GRANTED, KINDS
-from leasehold.units import memory_to_bytes
+from leasehold.units import declared_to_bytes
 
 ENV_SESSION = "LEASEHOLD_SESSION"
 ENV_IF_UNAVAILABLE = "LEASEHOLD_IF_UNAVAILABLE"
@@ -63,6 +63,13 @@ def _lease_options(s: argparse.ArgumentParser) -> None:
     )
     s.add_argument("--timeout", type=float, help="give up waiting after S seconds (exit 75)")
     s.add_argument("--ttl", type=float, help="the lease's TTL (default: the machine's)")
+    s.add_argument(
+        "--memory",
+        type=_memory,
+        help="the memory the work will use, e.g. 4g: counted against the machine's memory "
+        "budget, and hold holds a contained command to it (MemoryHigh). hold's default: the "
+        "matching [commands] rule's memory",
+    )
 
 
 def _keep_limits(s: argparse.ArgumentParser) -> None:
@@ -89,11 +96,6 @@ def register(sub) -> None:
         dest="job_env",
         action="store_false",
         help="leave CARGO_BUILD_JOBS, GOMAXPROCS and the other job-count variables alone",
-    )
-    s.add_argument(
-        "--memory",
-        type=_memory,
-        help="when contained, hold the command to this much memory (MemoryHigh), e.g. 4g",
     )
     s.add_argument(
         "--if-unavailable",
@@ -158,7 +160,7 @@ def _hold(args, ctx) -> int:
 
 def _memory(value: str) -> str:
     try:
-        memory_to_bytes(value)
+        declared_to_bytes(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
     return value

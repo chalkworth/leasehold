@@ -101,11 +101,16 @@ def wait_for_grant(
     say=_say,
     *,
     quiet_unavailable: bool = False,
+    fault: int = EXIT_UNAVAILABLE,
 ) -> tuple[int | None, dict]:
     """Ask for `request`'s lease, waiting in line (each ask keeps the place) until it is granted
     or `timeout_s` is up. `(None, answer)` on a grant, else `(exit code, answer)`: `EXIT_BUSY`
-    with the place in line given back, `EXIT_REFUSED` or `EXIT_UNAVAILABLE` (said, unless
-    `quiet_unavailable`). While it waits it says its place and why whenever they change, and
+    with the place in line given back; `EXIT_REFUSED` when the daemon said no (a `refused`
+    answer, or an error answer under 500); `EXIT_UNAVAILABLE` when no daemon answers (said,
+    unless `quiet_unavailable`); `fault` when the daemon answers with an error of 500 or more,
+    a fault of its own rather than an answer to the request (`EXIT_UNAVAILABLE` unless given).
+    For an error answer, `answer["reason"]` is the daemon's error text. While it waits it
+    says its place and why whenever they change, and
     at least every `PROGRESS_S` with the time waited so far. Anything raised while waiting (an
     interrupt) gives the place back before it goes on."""
     start = time.monotonic()
@@ -146,7 +151,11 @@ def wait_for_grant(
         return EXIT_UNAVAILABLE, answer
     except ApiError as exc:
         say(str(exc))
-        return EXIT_REFUSED, answer
+        if exc.status >= 500:
+            with contextlib.suppress(Unavailable, ApiError):
+                client.release(request["lease_id"])
+            return fault, {"reason": str(exc), "status": exc.status}
+        return EXIT_REFUSED, {"reason": str(exc), "status": exc.status}
     except BaseException:
         with contextlib.suppress(Unavailable, ApiError):
             client.release(request["lease_id"])
@@ -280,7 +289,8 @@ def hold(
 ) -> int:
     """Run `argv` under a lease, sized to it (`leasehold.jobs`): the job-count variables unless
     `job_env` is false, a make jobserver when `jobserver` is true, and when contained a scope
-    weighted to the lease and held to `memory` (a size such as `4g`) when given. With no
+    weighted to the lease and held to `memory` (a size such as `4g`) when given. `memory` is
+    also declared with the request, so a daemon with a memory budget counts it. With no
     `weight`, the command is weighed as the daemon's `[commands]` rules weigh it (`auto_size`).
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`."""
@@ -294,13 +304,26 @@ def hold(
                 weight, sized = auto_size(client, argv) if client is not None else (1, None)
                 memory = memory or sized
             request = lease_request(
-                kind=kind, pool=pool, weight=weight, labels=labels, session=session, ttl_s=ttl_s
+                kind=kind,
+                pool=pool,
+                weight=weight,
+                labels=labels,
+                session=session,
+                ttl_s=ttl_s,
+                memory=memory,
             )
             if client is None:
                 code, answer = EXIT_UNAVAILABLE, {}
             else:
+                # A fault in the daemon (500 and over) is no answer to run unleased on: `hold`
+                # refuses then, whatever `if_unavailable` says.
                 code, answer = wait_for_grant(
-                    client, request, timeout_s, _say, quiet_unavailable=if_unavailable == "run"
+                    client,
+                    request,
+                    timeout_s,
+                    _say,
+                    quiet_unavailable=if_unavailable == "run",
+                    fault=EXIT_REFUSED,
                 )
             if code == EXIT_UNAVAILABLE and if_unavailable == "run":
                 _say("no daemon answers; running without a lease")
@@ -346,8 +369,10 @@ def lease_request(
     labels: dict[str, str] | None = None,
     session: str | None = None,
     ttl_s: float | None = None,
+    memory: str | None = None,
 ) -> dict:
-    """An acquire request for a new lease of its own id, as `hold` sends it."""
+    """An acquire request for a new lease of its own id, as `hold` sends it. `memory` (a size
+    such as `4g`) is the memory the work declares; None declares none."""
     return {
         "kind": kind,
         "pool": pool,
@@ -356,6 +381,7 @@ def lease_request(
         "lease_id": uuid.uuid4().hex,
         "session": session,
         "ttl_s": ttl_s,
+        "memory": memory,
     }
 
 
