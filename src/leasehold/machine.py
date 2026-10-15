@@ -29,7 +29,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from leasehold.admission import AdmissionPolicy
-from leasehold.commands import CommandSettings
+from leasehold.commands import CommandRule, CommandSettings
 from leasehold.kinds import KINDS, PREEMPTIBLE
 from leasehold.ledger import FILENAME
 from leasehold.model import Name, Pool, PoolSet
@@ -373,6 +373,21 @@ class MachineConfig(_Strict):
         errors += self._memory_errors()
         errors += self._observe_errors()
         for n, rule in enumerate(self.commands.rule):
+            if rule.pool is None and self.rule_pool(rule) not in pools:
+                errors.append(
+                    f"commands.rule[{n}]: it names no pool, and its kind's pool "
+                    f"{self.rule_pool(rule)!r} is not under pools"
+                )
+            elif (
+                self.memory is not None
+                and rule.memory is not None
+                and self.ceiling.memory is not None
+                and memory_to_bytes(rule.memory) > memory_to_bytes(self.ceiling.memory)
+            ):
+                errors.append(
+                    f"commands.rule[{n}]: memory {rule.memory} is more than [ceiling] memory "
+                    f"({self.ceiling.memory}), so with memory counted it is always refused"
+                )
             if rule.pool is not None and rule.pool not in pools:
                 errors.append(f"commands.rule[{n}]: pool {rule.pool!r} is not under pools")
             elif rule.pool is not None and rule.pool == self.observed_pool:
@@ -401,6 +416,57 @@ class MachineConfig(_Strict):
             if rule.memory is not None and standing + memory_to_bytes(rule.memory) > budget
         ]
 
+    def rule_pool(self, rule: CommandRule) -> str:
+        """The pool a `[commands]` rule's leases go in: its own, else the `work` kind's."""
+        return rule.pool or self.kinds.get("work", "work")
+
+    def never_reason(
+        self, rule: CommandRule, policy: AdmissionPolicy, memory_bytes: int | None
+    ) -> str | None:
+        """Why no lease for `rule` could ever be granted under `policy` on a machine of
+        `memory_bytes` (None: unknown), or None when one can: its pool is not there; with
+        `[memory]`, its declared memory is more than one lease may be given (`[ceiling]
+        memory`, else the machine's); or no weight of it fits (`AdmissionPolicy.heaviest`:
+        the slots, the reservations and standing work, the budget beside standing memory).
+        Every limit a request meets when it is asked for that does not change while the
+        daemon runs. A hook denies a command matching such a rule, and a shim refuses it."""
+        pool = self.rule_pool(rule)
+        if pool not in policy.pools:
+            return f"there is no pool {pool!r}"
+        memory = None if rule.memory is None else memory_to_bytes(rule.memory)
+        if memory is not None and self.memory is not None:
+            ceiling = self.ceiling.memory
+            limit = memory_to_bytes(ceiling) if ceiling is not None else memory_bytes
+            if limit is not None and memory > limit:
+                what = ceiling or f"{limit / 2**30:.1f} GiB"
+                return f"memory {rule.memory} is more than the {what} one lease may be given"
+        if policy.heaviest(pool, memory) >= 1:
+            return None
+        asked = max(1, min(rule.weight, self.ceiling.slots))
+        return policy.refusal(pool, asked, memory) or (
+            f"no lease in pool {pool!r} could ever be granted"
+        )
+
+    def never_rules(self, memory_bytes: int | None) -> list[tuple[str, str]]:
+        """Each `[commands]` rule, config or built-in, that no lease could ever be granted for
+        on a machine of `memory_bytes` (`never_reason`), as (which rule, why)."""
+        try:
+            policy = self.policy(memory_bytes=memory_bytes)
+        except ValueError:
+            policy = self.policy()  # no budget at all: `memory_problems` says so
+        out = []
+        mine = 0
+        for source, rule in self.commands.rules():
+            if source == "config":
+                name = f"commands.rule[{mine}] ({', '.join(rule.programs)})"
+                mine += 1
+            else:
+                name = f"the built-in rule for {', '.join(sorted(rule.programs))}"
+            reason = self.never_reason(rule, policy, memory_bytes)
+            if reason is not None:
+                out.append((name, reason))
+        return out
+
     @property
     def for_user(self) -> bool:
         """Whether this is a user's own daemon's config: `mode = "user"`, or no mode named,
@@ -410,9 +476,9 @@ class MachineConfig(_Strict):
     def memory_problems(self, memory_bytes: int) -> list[tuple[str, str, str]]:
         """What keeps `[memory]`, worked out for a machine of `memory_bytes`, from letting work
         start as it should, as (`fail` or `warn`, what, what to do); empty without `[memory]`
-        or when nothing does. Fails: a budget of nothing, or one `[[standing]]` memory fills; a
-        `[[commands.rule]]` whose declared memory never fits beside the standing memory (it is
-        never served). Warns: the built-in heavy rules cut to a lighter weight because their
+        or when nothing does. Fails: a budget of nothing, or one `[[standing]]` memory fills
+        (`never_rules` names the rules no lease could be granted for). Warns: the built-in
+        heavy rules cut to a lighter weight because their
         assumed memory does not fit beside the standing memory; `assumed_per_slot` of 0."""
         if self.memory is None:
             return []
@@ -435,21 +501,6 @@ class MachineConfig(_Strict):
         policy = self.policy(memory_bytes=memory_bytes)
         by_slots = self.policy()
         work = self.kinds.get("work", "work")
-        for n, rule in enumerate(self.commands.rule):
-            pool = rule.pool or work
-            if rule.memory is None or pool not in policy.pools:
-                continue
-            if policy.heaviest(pool, memory_to_bytes(rule.memory)) == 0 < by_slots.heaviest(pool):
-                problems.append(
-                    (
-                        "fail",
-                        f"commands.rule[{n}] ({', '.join(rule.programs)}) declares "
-                        f"{rule.memory}, which never fits the {gib(budget.budget)} memory "
-                        f"budget beside {gib(standing)} of [[standing]] memory: it is never "
-                        "served, so its commands take no lease",
-                        "lower that rule's memory or the standing memory, or raise the budget",
-                    )
-                )
         if self.commands.defaults and work in policy.pools:
             heavy = min(self.commands.heavy_weight, policy.pools[work].max)
             most, slots_most = policy.heaviest(work), by_slots.heaviest(work)
@@ -602,14 +653,14 @@ class MachineConfig(_Strict):
         memory_free: int | None = None,
         memory_short: str | None = None,
         memory_pressing: bool = False,
-        memory_backfill_since: float | None = None,
+        memory_overdue: frozenset[tuple[str, str]] = frozenset(),
     ) -> AdmissionPolicy:
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
         `capped` every pool held to its reservation. With a `[memory]` table and the machine's
         `memory_bytes`, the memory budget too (with `[[standing]]` memory held), and
         `memory_free` (why: `memory_short`) as the most one decision may admit (an item short
-        of it lets others by only if queued at or after `memory_backfill_since`), and with
+        of it lets others by unless it is in `memory_overdue`), and with
         `memory_pressing` nothing new admitted at all."""
         pool_set = self.pool_set()
         if max_overrides:
@@ -637,7 +688,7 @@ class MachineConfig(_Strict):
             memory_free=memory_free,
             memory_short=memory_short,
             memory_pressing=memory_pressing,
-            memory_backfill_since=memory_backfill_since,
+            memory_overdue=memory_overdue,
         )
 
     @property

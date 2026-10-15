@@ -119,6 +119,25 @@ def check_memory(config, memory_bytes: int | None) -> Check | None:
     )
 
 
+def check_rules(config, memory_bytes: int | None) -> Check | None:
+    """A failure naming each `[commands]` rule no lease could ever be granted for on this
+    machine (`MachineConfig.never_rules`): a command it matches is refused, not run."""
+    if config is None:
+        return None
+    never = config.never_rules(memory_bytes)
+    if not never:
+        return None
+    return Check(
+        "rules",
+        "fail",
+        "; ".join(f"{name} is never granted: {why}" for name, why in never)
+        + ". A command matching it is refused (the agent hook denies it, a shim exits 77), "
+        "not run",
+        "change that rule (its memory, weight or pool), or the standing work, budget or pools "
+        "that leave it no room",
+    )
+
+
 def check_hard_cpu(config) -> Check | None:
     """A warning, for a user's own daemon, that without `[contain] hard_cpu` the CPUs kept for
     the person are kept only from commands that run as many jobs as they are given."""
@@ -424,6 +443,7 @@ def run(
     for extra in (
         check_upgrade(config, env, resolved),
         check_memory(resolved, memory_bytes),
+        check_rules(resolved, memory_bytes),
         check_hard_cpu(resolved),
         check_guard_weights(resolved, memory_bytes),
         check_ledger(resolved),

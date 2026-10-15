@@ -42,9 +42,9 @@ never as running, so per-user limits and whose turn it is stay a matter of real 
   may together count at most that much more. An item whose turn it is but which fails only
   this allowance (its slots and the budget would take it) waits without blocking its pool:
   the items behind it that fit the allowance may start, while its own session's later items
-  keep waiting behind it. Where `memory_backfill_since` names the host, only an item queued
-  at or after that time lets others by; one queued before it blocks its pool as any item
-  whose turn it is does, so a stream of small items cannot keep it waiting for ever.
+  keep waiting behind it. An item in `memory_overdue` (one that has waited long enough) does
+  not: it blocks its pool as any item whose turn it is does, so a stream of small items cannot
+  keep it waiting for ever.
 
 A host with no budget counts no memory at all: with none given anywhere, every rule above is
 the slots' alone, exactly as before memory was counted.
@@ -110,10 +110,9 @@ class AdmissionPolicy:
     #: Hosts where nothing new starts now, whatever it counts: memory is under real pressure
     #: there (a machine agent's guard, while a reading is over a threshold).
     memory_pressing: frozenset[str] = frozenset()
-    #: Host to the time (as `Waiting.order`'s) before which an item queued, short only of
-    #: `memory_free`, no longer lets the items behind it start. A host not named here has no
-    #: such bound.
-    memory_backfill_since: Mapping[str, float] = field(default_factory=dict, hash=False)
+    #: Waiting items that, short only of `memory_free`, no longer let the items behind them
+    #: start: they have waited long enough (a machine agent's settle window).
+    memory_overdue: frozenset[ItemKey] = frozenset()
 
     @classmethod
     def from_pools(
@@ -129,14 +128,14 @@ class AdmissionPolicy:
         memory_free: int | None = None,
         memory_short: str | None = None,
         memory_pressing: bool = False,
-        memory_backfill_since: float | None = None,
+        memory_overdue: frozenset[ItemKey] = frozenset(),
     ) -> AdmissionPolicy:
         """The policy for one machine's `PoolSet`, every pool on host `MACHINE`. `memory` is
         the machine's memory budget in bytes (None: no memory is counted), `assumed_memory`
         what one slot of weight counts as when an item declares none, and `memory_free` the
         most one decision may admit while memory is short (None: no such limit).
-        `memory_pressing` stops every new start on the machine. `memory_backfill_since`
-        bounds which short items let others by (None: no bound)."""
+        `memory_pressing` stops every new start on the machine. `memory_overdue` are
+        the items that no longer let others by when short."""
         return cls(
             slots={MACHINE: pool_set.slots},
             pools={
@@ -158,9 +157,7 @@ class AdmissionPolicy:
             memory_free={} if memory_free is None else {MACHINE: memory_free},
             memory_short=memory_short,
             memory_pressing=frozenset({MACHINE}) if memory_pressing else frozenset(),
-            memory_backfill_since=(
-                {} if memory_backfill_since is None else {MACHINE: memory_backfill_since}
-            ),
+            memory_overdue=memory_overdue,
         )
 
     def counted(self, host: str, weight: int, memory: int | None) -> int:
@@ -391,10 +388,9 @@ def _only_short(
 
 
 def _lets_by(policy: AdmissionPolicy, pool: str, head: Waiting) -> bool:
-    """Whether `head`, short only of the allowance, lets the items behind it start: it was
-    queued no earlier than its host's `memory_backfill_since`."""
-    since = policy.memory_backfill_since.get(policy.pools[pool].host)
-    return since is None or head.order[0] >= since
+    """Whether `head`, short only of the allowance, lets the items behind it start: it is not
+    `memory_overdue`."""
+    return head.key not in policy.memory_overdue
 
 
 def _slots_fit(tally: _Tally, policy: AdmissionPolicy, pool: str, weight: int) -> bool:

@@ -49,13 +49,17 @@ listed under "May reject" applies with or without it. The built-in rules keep th
   for you are kept only from tools that respect the job count; check `guard` warns when no
   built-in build or test rule could start while the memory guard is on; check `memory` fails
   when the `[memory]` budget worked out for the machine is 0 or filled by `[[standing]]`
-  memory, or a `[[commands.rule]]` declares memory that never fits beside the standing memory,
-  and warns when standing memory cuts the built-in rules' weight or `assumed_per_slot` is 0.
+  memory, and warns when standing memory cuts the built-in rules' weight or `assumed_per_slot`
+  is 0; check `rules` fails for each `[commands]` rule, config or built-in, that no lease could
+  ever be granted for on this machine, saying that a command matching it is refused.
   `leasehold setup` says what the config it leaves in place lacks.
-- `GET /v1/commands` gains `never`: the rules no lease could ever be granted for (declared or
-  assumed memory that never fits beside the standing memory, say), each with a `reason`. They
-  are not served under `rules`, so hooks and shims never ask for them; `leasehold commands`
-  lists them as "never served".
+- `GET /v1/commands`: a rule no lease could ever be granted for carries `never`, the reason:
+  its pool is not there; with `[memory]`, its declared memory is more than one lease may be
+  given (`[ceiling] memory`, else the machine's); or no weight of it fits the slots,
+  reservations, standing work and the budget beside standing memory. It is served at its own
+  weight and still matches its commands; the Claude Code hook denies such a command with the
+  reason and a shim exits 77 without running it, rather than taking a lighter rule's lease.
+  `leasehold commands` shows the reason.
 - Status (schema 2, additive): a `memory` object (`counted`, `machine_bytes`, `budget_bytes`,
   `kept_bytes`, `assumed_per_slot_bytes`, `held_bytes`, `free_now_bytes`); per pool
   `memory_counted_bytes`; per lease and queued item `memory_bytes` (declared) and
@@ -65,21 +69,23 @@ listed under "May reject" applies with or without it. The built-in rules keep th
   short (...): nothing new starts until the pressure eases", "memory is short (...): ... may
   start now; this counts ...", beside the slot reasons.
 - Library: `AdmissionPolicy` gains `memory`, `assumed_memory`, `standing_memory`, `memory_free`,
-  `memory_short`, `memory_pressing` and `memory_backfill_since` (all empty or None by default)
-  and `counted()`; `from_pools` takes them as keywords (`memory_pressing` a bool,
-  `memory_backfill_since` a time); `Held`, `Waiting` and `LedgerItem` gain `memory` (bytes,
+  `memory_short`, `memory_pressing` and `memory_overdue` (all empty or None by default) and
+  `counted()`; `from_pools` takes them as keywords (`memory_pressing` a bool,
+  `memory_overdue` a frozenset of item keys); `Held`, `Waiting` and `LedgerItem` gain `memory` (bytes,
   default None; `LedgerItem` raises ValueError outside 0 to `MEMORY_MAX`); `fits` and
   `AdmissionPolicy.refusal` take an optional `memory`. `AdmissionPolicy.heaviest(pool,
   memory=None)`: the most weight one item declaring `memory` bytes could ever be admitted with
   in a pool, with nothing held but the standing work (0 when never). `leasehold.admission.gib`.
   `leasehold.machine.MemorySettings`, `MemoryBudget`, `MachineConfig.memory`,
   `MachineConfig.memory_budget()`, `MachineConfig.standing_memory()`,
-  `MachineConfig.memory_problems()`, `MachineConfig.for_user`, and `MachineConfig.policy`
+  `MachineConfig.memory_problems()`, `MachineConfig.for_user`, `MachineConfig.rule_pool()`,
+  `MachineConfig.never_reason()`, `MachineConfig.never_rules()`, and `MachineConfig.policy`
   keywords `memory_bytes`, `memory_free`, `memory_short`, `memory_pressing`,
-  `memory_backfill_since`. `leasehold.commands.default_rules`, `HEAVY_WEIGHT`, `LIGHT_WEIGHT`.
+  `memory_overdue`. `leasehold.shell.Rule.never`. `leasehold.hold.wait_for_grant` takes
+  `fault`, the exit code for an error answer of 500 or more. `leasehold.commands.default_rules`, `HEAVY_WEIGHT`, `LIGHT_WEIGHT`.
   `leasehold.guard.Guard.pressing` and `Reading.at`. `leasehold.agent.MachineAgent` takes
   `monotonic`. `leasehold.upgrade`. `leasehold.units.MEMORY_MAX` and `declared_to_bytes`.
-  `leasehold.doctor.check_upgrade`, `check_memory`, `check_hard_cpu` and
+  `leasehold.doctor.check_upgrade`, `check_memory`, `check_rules`, `check_hard_cpu` and
   `check_guard_weights`. `leasehold.status.counted`, `with_counted` and `memory`.
   `leasehold.template.weights` (the opt-in weights that run two at once), `USER_0_2` and
   `render_user_0_2`.
@@ -104,26 +110,35 @@ listed under "May reject" applies with or without it. The built-in rules keep th
   whose turn it is that fails only the memory measured free no longer holds up its pool:
   lighter items behind it that fit may start, its own session's later items still wait, but
   only until it has waited `settle_s`: after that it holds up its pool like any other item
-  whose turn it is, so a stream of small items cannot keep it waiting.
+  whose turn it is, so a stream of small items cannot keep it waiting. How long it has waited
+  is measured on the monotonic clock from when the daemon first saw it in line (its
+  wall-clock `queued_at` taken back from that moment), so a step of the wall clock changes
+  nothing.
 - The guard's dwell and settling, and the settle window, are measured on a monotonic clock, not
   the wall clock. A daemon started again counts a lease it finds as granted at its wall-clock
   `acquired_at`, so one granted within `settle_s` of the restart is still recent. Observed
   leases are not counted in the settle window: `MemAvailable` already leaves out their memory.
-- The Claude Code hook and the PATH shims no longer run a command without a lease when the
-  daemon refuses its request (one that could never be granted, a per-user limit, an error
-  answer): the hook denies it with the reason, as with `when_busy = "deny"`, and a shim exits
-  77 without running the program. Only a daemon that cannot be reached still lets the command
-  run unleased. This changes what the refusal of requests that could never fit (under Fixed)
-  did to them on `main`: run unleased. In 0.2.1 such a request waited in line for `wait_s`
-  and was then handled as busy.
+- The Claude Code hook and the PATH shims follow one rule, for listing the rules and for
+  asking for the lease alike. When the daemon says no (a `refused` answer, such as a request
+  that could never be granted or a per-user limit; an error answer under 500, such as 403
+  `forbidden`; a matching rule with `never`), the hook denies the command with the daemon's
+  text, as with `when_busy = "deny"`, and a shim exits 77 without running the program. When
+  the daemon cannot answer (none is reached, or an error answer of 500 or more, such as 503
+  `ledger_unavailable` on a full disk), the command runs without a lease, and the hook or shim
+  says why with the daemon's text. This changes what the refusal of requests that could never
+  fit (under Fixed) did to them on `main`: run unleased. In 0.2.1 such a request waited in
+  line for `wait_s` and was then handled as busy. `hold` and `acquire` still exit 77 on an
+  error answer of 500 or more, and never run the command unleased on it.
 - `GET /v1/commands` no longer serves a rule at weight 1 when no weight of it could ever be
-  granted; it lists it under `never` instead.
+  granted; it serves it at its own weight with `never`.
 - **May reject a config or request that was accepted.** A memory size over 1 EiB
   (`leasehold.units.MEMORY_MAX`) is an error everywhere sizes are read: a config fails to load,
   and `POST /v1/acquire` answers 400 `bad_request` (it used to fail with 500 `internal` past
   2^63 bytes, with or without `[memory]`). A `[memory] budget` of 0, or one that `[[standing]]`
   memory fills, fails to load; so does a fixed budget beside which `[[standing]]` memory leaves
-  no room for a `[[commands.rule]]`'s declared memory. An `auto` budget that comes to 0 (`kept`
+  no room for a `[[commands.rule]]`'s declared memory. With `[memory]`, a `[[commands.rule]]`
+  declaring more than `[ceiling] memory` fails to load; with or without it, so does one naming
+  no pool when its kind's pool (`work`) is not under `pools`. An `auto` budget that comes to 0 (`kept`
   at or over the machine's memory) stops the daemon starting. A declared size of 0 is refused:
   `hold --memory 0g` exits 2, a rule with `memory = "0g"` fails to load, and `POST
   /v1/acquire` with `"memory": "0g"` answers 400 (`assumed_per_slot = "0g"` is still allowed).

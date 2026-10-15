@@ -142,8 +142,9 @@ def pre(
     spawn: Callable[[list[str]], int] = handoff.spawn_keeper,
 ) -> Reply:
     """Before a Bash command: wait for its lease, or let it run, or refuse it: when busy and
-    `when_busy = "deny"`, and always when the daemon refuses the request. Only when no daemon
-    answers does a matched command run without a lease."""
+    `when_busy = "deny"`, and always when the daemon says no (a refusal, an error answer under
+    500, a rule no lease could ever be granted for). When the daemon cannot answer (none is
+    reached, or it answers 500 or more) a matched command runs without a lease, and says so."""
     reply = Reply()
     command = (event.get("tool_input") or {}).get("command")
     lid = lease_id(event)
@@ -156,12 +157,22 @@ def pre(
         return reply
     try:
         settings = shell.served(client.commands())
-    except (Unavailable, ApiError) as exc:
+    except Unavailable as exc:
         reply.log.append(f"no lease taken: {exc}")
+        return reply
+    except ApiError as exc:
+        if exc.status >= 500:  # the daemon cannot answer: as if there were none
+            reply.log.append(f"no lease taken: {exc}")
+            reply.output = _message(f"the daemon cannot answer ({exc}); running without a lease")
+        else:  # it answered no
+            reply.output = _deny(f"leasehold: the daemon refused to list its rules: {exc}")
         return reply
     _refresh_programs(settings, env)
     found = shell.match(settings.rules, command)
     if found is None:
+        return reply
+    if found.rule.never is not None:
+        reply.output = _deny(f"leasehold: {found.program} refused: {found.rule.never}")
         return reply
     directory = hooknotes.state_dir(env)
     if directory is None:
@@ -207,11 +218,12 @@ def pre(
             reply.output = _message(f"{why}; running {found.program} without a lease")
         return reply
     if code == EXIT_UNAVAILABLE:
-        reply.output = _message(f"no daemon answers; running {found.program} without a lease")
+        why = answer.get("reason") or "no daemon answers"
+        reply.output = _message(f"{why}; running {found.program} without a lease")
         return reply
-    # Refused (it could never be granted, or the daemon answered with an error): a working
-    # daemon said no, so the command does not run unleased, whatever `when_busy` says.
-    why = answer.get("reason") or "the daemon answered the request with an error"
+    # Refused, or an error answer under 500: the daemon said no, so the command does not run
+    # unleased, whatever `when_busy` says.
+    why = answer.get("reason") or "the daemon refused the request"
     reply.output = _deny(f"leasehold: {found.program} refused: {why}")
     return reply
 

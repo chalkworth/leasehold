@@ -12,8 +12,10 @@ A shim passes straight to the real program, with no lease, when one is held alre
 `make` under a leased `cargo`, any command under `leasehold hold`: `LEASEHOLD_LEASE_ID` is
 set; or an agent hook's lease for this program under this agent, `leasehold.hooknotes`), when
 `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. A busy machine is
-`[commands] when_busy`'s: wait `wait_s`, then exit 75, or run without a lease. A request the
-daemon refuses (one that could never be granted) exits 77 without running the program.
+`[commands] when_busy`'s: wait `wait_s`, then exit 75, or run without a lease. When the daemon
+says no (a refusal, an error answer under 500, or a matching rule no lease could ever be
+granted for) the shim exits 77 without running the program; when it cannot answer (an error
+of 500 or more) the program runs without a lease, and the shim says why.
 
 A shim costs a Python start (about 0.1 s) on every run of its program, `--version` included.
 """
@@ -155,12 +157,21 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     try:
         client = Client(discovery.find(None, None, env))
         settings = shell.served(client.commands())
-    except (discovery.DiscoveryError, Unavailable, ApiError, OSError):
+    except (discovery.DiscoveryError, Unavailable, OSError):
         os.execv(target, argv)  # no daemon: as if the shim were not there
+    except ApiError as exc:
+        if exc.status < 500:  # the daemon answered no
+            _say(f"not running {program}: the daemon refused to list its rules: {exc}")
+            return EXIT_REFUSED
+        _say(f"the daemon cannot answer ({exc}); running {program} without a lease")
+        os.execv(target, argv)
     found = shell.match_programs(settings.rules, [(program, args)])
     if found is None:
         os.execv(target, argv)
     rule = found.rule
+    if rule.never is not None:
+        _say(f"not running {program}: refused: {rule.never}")
+        return EXIT_REFUSED
     request = lease_request(
         pool=rule.pool,
         weight=rule.weight,
@@ -179,10 +190,11 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
         _say(f"{why}; running {program} without a lease")
     elif code == EXIT_UNAVAILABLE:
-        _say(f"no daemon answers; running {program} without a lease")
+        why = answer.get("reason") or "no daemon answers"
+        _say(f"{why}; running {program} without a lease")
     else:
-        # Refused, or answered with an error: a working daemon said no.
-        why = answer.get("reason") or "the daemon answered the request with an error"
+        # Refused, or an error answer under 500: the daemon said no.
+        why = answer.get("reason") or "the daemon refused the request"
         _say(f"not running {program}: refused: {why}")
         return EXIT_REFUSED
     os.execv(target, argv)

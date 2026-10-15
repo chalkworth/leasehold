@@ -74,9 +74,6 @@ def _commands(args, ctx) -> int:
     print(f"agents wait up to {answer['wait_s']:g}s, then {_busy(answer['when_busy'])}")
     for rule in settings.rules:
         print(f"  {rule.source:7}  {', '.join(sorted(rule.programs))}: {_rule_line(rule)}")
-    for rule in answer.get("never", []):
-        names = ", ".join(sorted(rule["programs"]))
-        print(f"  {rule['source']:7}  {names}: never served: {rule['reason']}")
     return 0
 
 
@@ -112,7 +109,8 @@ def _busy(when_busy: str) -> str:
 
 def _rule_line(rule: shell.Rule) -> str:
     args = f" with arguments matching {rule.args!r}" if rule.args else ""
-    return f"weight {rule.weight} in pool {rule.pool}{args}"
+    never = f"; never granted, so refused: {rule.never}" if rule.never else ""
+    return f"weight {rule.weight} in pool {rule.pool}{args}{never}"
 
 
 def _describe(found: shell.Match) -> dict:
@@ -124,6 +122,7 @@ def _describe(found: shell.Match) -> dict:
         "weight": rule.weight,
         "pool": rule.pool,
         "source": rule.source,
+        "never": rule.never,
     }
 
 

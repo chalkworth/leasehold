@@ -248,7 +248,7 @@ def test_crlf_line_endings_are_kept_and_the_backup_is_byte_for_byte(tmp_path):
             16 << 30,
             '\n[[standing]]\nname = "db"\npool = "background"\nweight = 1\nmemory = "7g"\n'
             '\n[[commands.rule]]\nprograms = ["bigbuild"]\nweight = 2\nmemory = "6g"\n',
-            "commands.rule[0] (bigbuild) declares 6g, which never fits",
+            "commands.rule[0] (bigbuild) would never be granted",
         ),
         (
             16 << 30,

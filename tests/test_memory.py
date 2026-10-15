@@ -390,20 +390,21 @@ def test_the_generated_config_runs_one_heavy_job_and_offers_two_as_an_opt_in(tmp
 
 
 def _rules(agent) -> tuple[dict, dict]:
-    served = agent.commands()
+    """The served rules by first program: (grantable, never)."""
+    served = agent.commands()["rules"]
     return (
-        {r["programs"][0]: r for r in served["rules"]},
-        {r["programs"][0]: r for r in served["never"]},
+        {r["programs"][0]: r for r in served if not r.get("never")},
+        {r["programs"][0]: r for r in served if r.get("never")},
     )
 
 
 STANDING_7G = [{"name": "db", "pool": "background", "weight": 1, "memory": "7g"}]
 
 
-def test_commands_never_serves_a_rule_whose_declared_memory_cannot_fit(tmp_path):
+def test_commands_marks_a_rule_whose_declared_memory_cannot_fit_as_never(tmp_path):
     """A declared size above the budget, or above the room beside the standing memory, could
-    never be granted: such a rule is not served (and not forced to weight 1); it is listed
-    under `never` with the refusal's reason. One that fits keeps its weight."""
+    never be granted: such a rule is served at its own weight with `never`, the reason (not
+    cut to weight 1). One that fits keeps its weight."""
     rules = {
         "defaults": False,
         "rule": [
@@ -416,15 +417,15 @@ def test_commands_never_serves_a_rule_whose_declared_memory_cannot_fit(tmp_path)
     agent = MachineAgent(config, facts=FACTS, load=FakeLoad())
     served, never = _rules(agent)
     assert set(served) == {"fits"} and served["fits"]["weight"] == 2
-    assert set(never) == {"huge", "big"}
-    assert "13.0 GiB" in never["huge"]["reason"]
-    assert "7.0 GiB is held by standing work" in never["big"]["reason"]
+    assert set(never) == {"huge", "big"} and never["big"]["weight"] == 2
+    assert "13.0 GiB" in never["huge"]["never"]
+    assert "7.0 GiB is held by standing work" in never["big"]["never"]
     assert ask(agent, "x", weight=2, memory="6g")["status"] == "refused"  # what it would get
 
 
-def test_commands_never_serves_a_rule_whose_assumed_memory_has_no_room(tmp_path):
+def test_commands_marks_a_rule_whose_assumed_memory_has_no_room_as_never(tmp_path):
     """Undeclared, a rule counts its weight at 3 GiB a slot; beside 10 GiB of standing memory
-    in a 12 GiB budget not even weight 1 fits, so it is not served rather than served at 1."""
+    in a 12 GiB budget not even weight 1 fits, so it is never, not served at 1."""
     standing = [{"name": "db", "pool": "background", "weight": 1, "memory": "10g"}]
     rules = {"defaults": False, "rule": [{"programs": ["build"], "weight": 2}]}
     config = machine_config(tmp_path, memory={}, standing=standing, commands=rules, **FOUR)
@@ -447,9 +448,10 @@ def test_doctor_fails_a_rule_that_cannot_fit_beside_the_standing_memory(tmp_path
 
     rules = {"rule": [{"programs": ["big"], "weight": 2, "memory": "6g"}]}
     config = machine_config(tmp_path, memory={}, standing=STANDING_7G, commands=rules, **FOUR)
-    check = doctor.check_memory(config, 16 * G)
+    check = doctor.check_rules(config, 16 * G)
     assert check.level == "fail"
-    assert "commands.rule[0] (big) declares 6g, which never fits" in check.detail
+    assert "commands.rule[0] (big) is never granted" in check.detail
+    assert "is refused" in check.detail
 
 
 @pytest.mark.parametrize("size", ["0g", "0b", "0m"])
@@ -574,3 +576,37 @@ def test_doctor_blames_memory_only_when_memory_cut_the_heavy_rules(tmp_path):
     config = machine_config(tmp_path, memory={}, standing=by_memory, **FOUR)
     check = doctor.check_memory(config, 16 * G)
     assert check.level == "warn" and "[[standing]] memory (5.0 GiB)" in check.detail
+
+
+@pytest.mark.parametrize("step", ["forward", "back"])
+def test_how_long_a_short_head_has_waited_is_measured_on_the_monotonic_clock(tmp_path, step):
+    """A step of the wall clock does not change whether a short head lets small items by:
+    an hour forward, after 1 s, it still does; an hour back, after 35 s, it no longer does."""
+    wall, mono, load = Clock(), Clock(50.0), FakeLoad()
+    config = machine_config(tmp_path, memory={}, guard={"settle_s": 30}, lease_ttl_s=100000, **FOUR)
+    agent = MachineAgent(config, facts=FACTS, load=load, clock=wall, monotonic=mono)
+    load.set(memory=50.0)
+    agent.tick()
+    load.set(memory=10.0)  # the guard stays on, not pressing
+    load.available = 16 * G // 20 + 7 * G
+
+    def advance(seconds: float) -> None:
+        wall.now += seconds
+        mono.now += seconds
+        agent.tick()
+
+    advance(1)
+    assert ask(agent, "small-0", user="bob")["status"] == "granted"  # 4 GiB free left
+    advance(1)
+    assert ask(agent, "head", weight=2)["status"] == "queued"  # needs 6 GiB
+    if step == "forward":
+        wall.now += 3600
+        advance(1)
+        assert ask(agent, "small-1", user="bob")["status"] == "granted"  # it still lets by
+    else:
+        advance(20)
+        assert ask(agent, "small-1", user="bob")["status"] == "granted"  # 20 s: lets by
+        advance(15)  # head has waited 35 s; small-0 has aged out, small-1 not: 4 GiB free
+        wall.now -= 3600
+        agent.tick()
+        assert ask(agent, "small-2", user="bob")["status"] == "queued"  # it holds the pool

@@ -173,6 +173,8 @@ class MachineAgent:
         self._granted_at: dict[tuple, float] = {
             _grant_key(r): mono - max(0.0, wall - r["acquired_at"]) for r in self.ledger.leases()
         }
+        #: When each waiting item was first seen in line, on `_monotonic` (`_overdue`).
+        self._queued_at: dict[tuple[str, str], float] = {}
         self._seen = self._snapshot()
 
     # --- decisions -----------------------------------------------------------------------------
@@ -190,10 +192,7 @@ class MachineAgent:
             memory_free=free,
             memory_short=self._memory_short() if free is not None else None,
             memory_pressing=guarding and counting and self.guard.pressing,
-            # An item waiting longer than the settle window stops letting others by.
-            memory_backfill_since=(
-                self._clock() - self.config.guard.settle_s if free is not None else None
-            ),
+            memory_overdue=self._overdue() if free is not None else frozenset(),
         )
 
     def memory_free(self) -> int:
@@ -215,6 +214,21 @@ class MachineAgent:
             and self._granted_at.get(_grant_key(row), since) >= since
         )
         return max(0, available - self.guard.min_available - recent)
+
+    def _overdue(self) -> frozenset[tuple[str, str]]:
+        """The waiting items that have waited longer than `settle_s`, measured on `_monotonic`:
+        short only of the memory free, they stop letting the items behind them start. Each is
+        stamped when first seen waiting, at its wall-clock `queued_at` taken back from now (no
+        later than now), so a step of the wall clock after that moves nothing."""
+        wall, mono = self._clock(), self._monotonic()
+        live = {(r["scope"], r["item_id"]): r["queued_at"] for r in self.ledger.queued()}
+        for key, queued_at in live.items():
+            if key not in self._queued_at:
+                self._queued_at[key] = mono - max(0.0, wall - queued_at)
+        for key in self._queued_at.keys() - live.keys():
+            del self._queued_at[key]
+        since = mono - self.config.guard.settle_s
+        return frozenset(k for k, at in self._queued_at.items() if at < since)
 
     def _note_grants(self) -> None:
         """Note when each lease granted since the last call was first seen; forget ended ones."""
@@ -649,29 +663,23 @@ class MachineAgent:
         """Which commands take a lease, for agent hooks and shims to match against: each rule
         with its pool named and its weight cut to the most one lease declaring its memory could
         ever be admitted with in that pool (`AdmissionPolicy.heaviest`), so what it asks for can
-        be granted. A rule no lease could ever be granted for (its declared memory does not fit
-        beside the standing memory, say) is not served: it is listed under `never`, with the
-        reason, so hooks and shims never ask for it."""
+        be granted. A rule no lease could ever be granted for (`MachineConfig.never_reason`)
+        is served at its own weight with `never`, the reason: it still matches its commands,
+        and hooks and shims refuse them rather than take a lighter rule's lease."""
         settings = self.config.commands
         policy = self.policy()
-        rules, never = [], []
+        rules = []
         for src, rule in settings.rules():
-            pool = rule.pool or self.config.kinds.get("work", "work")
-            memory = None if rule.memory is None else memory_to_bytes(rule.memory)
-            top = policy.heaviest(pool, memory) if pool in policy.pools else rule.weight
-            weight = min(rule.weight, top, self.config.ceiling.slots)
-            served = rule.model_dump() | {"pool": pool, "source": src}
-            if weight < 1:
-                asked = max(1, min(rule.weight, self.config.ceiling.slots))
-                reason = (
-                    policy.refusal(pool, asked, memory) if pool in policy.pools else None
-                ) or f"no lease in pool {pool!r} could ever be granted"
-                never.append(served | {"weight": rule.weight, "reason": reason})
+            served = rule.model_dump() | {"pool": self.config.rule_pool(rule), "source": src}
+            reason = self.config.never_reason(rule, policy, self.memory_bytes)
+            if reason is not None:
+                rules.append(served | {"weight": rule.weight, "never": reason})
                 continue
-            rules.append(served | {"weight": weight})
+            memory = None if rule.memory is None else memory_to_bytes(rule.memory)
+            top = policy.heaviest(served["pool"], memory)
+            rules.append(served | {"weight": min(rule.weight, top, self.config.ceiling.slots)})
         return {
             "rules": rules,
-            "never": never,
             "wait_s": settings.wait_s,
             "when_busy": settings.when_busy,
         }

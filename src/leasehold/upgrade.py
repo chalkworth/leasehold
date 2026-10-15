@@ -168,8 +168,9 @@ def _oversized_rules(config: MachineConfig) -> list[str]:
 def _blocked(new: MachineConfig, memory_bytes: int | None) -> list[str]:
     """Why the upgraded config `new` would not let work start as before on a machine of
     `memory_bytes` (None: unknown, then only what needs no machine): every problem
-    `MachineConfig.memory_problems` finds, and rules over `[ceiling] memory`."""
-    found = _oversized_rules(new)
+    `MachineConfig.memory_problems` finds, and every rule no lease could then be granted for
+    (`MachineConfig.never_rules`)."""
+    found = [f"{name} would never be granted: {why}" for name, why in new.never_rules(memory_bytes)]
     if memory_bytes:
         found += [what for _, what, _ in new.memory_problems(memory_bytes)]
     return found
@@ -198,13 +199,16 @@ def plan(path: Path, config: MachineConfig, memory_bytes: int | None = None) -> 
     crlf = "\r\n" in old
     lf = old.replace("\r\n", "\n")
     text, pristine_, changes = _upgraded(config, lf)
-    try:
-        new = MachineConfig.model_validate(tomllib.loads(text))
-    except (ValueError, tomllib.TOMLDecodeError):
-        return Plan(
-            path, old, None, False, (), manual=manual_steps(config), identity=identity, raw=raw
-        )
-    blocked = _blocked(new, memory_bytes)
+    blocked = _oversized_rules(config)  # with [memory], the new config would not even load
+    if not blocked:
+        try:
+            new = MachineConfig.model_validate(tomllib.loads(text))
+        except (ValueError, tomllib.TOMLDecodeError):
+            return Plan(
+                path, old, None, False, (), manual=manual_steps(config), identity=identity,
+                raw=raw,
+            )  # fmt: skip
+        blocked = _blocked(new, memory_bytes)
     if blocked:
         manual = (
             "with the [memory] table it would gain on this machine, "

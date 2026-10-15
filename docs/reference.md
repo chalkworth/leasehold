@@ -89,9 +89,11 @@ A budget given as a size must be more than 0 and more than the `[[standing]]` me
 leave room beside it for every `[[commands.rule]]`'s declared memory, or the config does not
 load. An `"auto"` budget worked out as 0 (`kept` at or over the machine's memory) stops the
 daemon starting; one that standing memory fills, or that leaves a rule's declared memory no
-room, fails `leasehold doctor`'s `memory` check. A rule no lease could ever be granted for is
-not served to hooks and shims (`leasehold commands` lists it as never served, with the reason),
-so its commands take no lease. When standing memory leaves room for less than a rule's weight
+room, fails `leasehold doctor`'s `memory` check. A rule no lease could ever be granted for
+(its declared memory over the room beside standing memory or over what one lease may be
+given, no weight of it fitting the slots, or its pool missing) is marked `never` with the
+reason in `leasehold commands`, and `doctor`'s `rules` check fails it. Its commands are
+refused by the agent hook and the shims, not run under another rule's lease. When standing memory leaves room for less than a rule's weight
 at `assumed_per_slot`, the rule is served at the weight that fits (so what it asks for is
 granted, not refused), and `doctor` warns when that cuts the built-in rules. A declared size
 (`hold --memory`, a rule's `memory`, `POST /v1/acquire`'s `memory`) is more than 0; a size
@@ -617,11 +619,17 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
   pool, by its command and session, and the command's place in line: `machine busy for 300s:
   cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds 14 of 14;
   this needs 4; queued #1`. `leasehold doctor` warns when `wait_s` is under 120 s.
-- **A refusal.** A request the daemon refuses (one that could never be granted, a per-user
-  limit, an error answer) is denied with the daemon's reason, whatever `when_busy` says: a
-  working daemon said no, so the command does not run unleased.
-- **Passes through** for a command run in the background, when no daemon answers, and inside a
-  lease already held (`LEASEHOLD_LEASE_ID` set).
+- **The daemon says no.** A `refused` answer (a request that could never be granted, a
+  per-user limit), an error answer under 500 (such as 403 `forbidden`), or a matching rule
+  that `leasehold commands` marks as never granted: the command is denied with the daemon's
+  text, whatever `when_busy` says. A command matching a never-granted rule is never run under
+  a lighter rule's lease instead.
+- **The daemon cannot answer.** No daemon is reached, or it answers with an error of 500 or
+  more (such as 503 `ledger_unavailable` on a full disk): the command runs without a lease,
+  and the agent is told why. The same rule holds for listing the rules and for asking for the
+  lease.
+- **Passes through** for a command run in the background and inside a lease already held
+  (`LEASEHOLD_LEASE_ID` set).
 
 The hooks go through a pre-filter, `hooks/prefilter.sh`, so that an ordinary Bash command
 starts no Python (about 10 ms instead of a tenth of a second or more). It reads the command
@@ -650,8 +658,10 @@ process. It passes straight through, as if no shim were there, inside a lease al
 claude` with the plugin takes one lease per command, not two), with `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. While it
 waits it says its place on stderr, again whenever that changes and at least every 20 s. Busy
 past `wait_s`, it exits 75 and says why on stderr (`when_busy = "run"`: runs the program without a
-lease and says so). A request the daemon refuses makes it exit 77 with the reason, without
-running the program, whatever `when_busy` says.
+lease and says so). When the daemon says no (a refusal, an error answer under 500, a
+matching rule never granted) it exits 77 with the daemon's text, without running the program,
+whatever `when_busy` says; when it answers with an error of 500 or more, it runs the program
+without a lease and says why, as with no daemon.
 
 Shims see only what is run through PATH: `.venv/bin/pytest`, `python -m pytest` and absolute
 paths go round them. `shims list` shows what is installed, `shims remove` removes only shims.
@@ -712,7 +722,8 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
   and whether commands are contained (`enforced (systemd)`, or `advisory:` and why). It warns
   when your own config lacks what today's has ([upgrading](#upgrading-a-02-config)), when no
   built-in build or test rule could start while the memory guard is on, and checks that the
-  [memory budget](#memory) worked out for this machine lets work start. It exits 1
+  [memory budget](#memory) worked out for this machine lets work start, and fails a
+  `[commands]` rule no lease could ever be granted for (its commands are refused). It exits 1
   on any failure and prints a fix for each problem. `--json` for scripts.
 - **`leasehold demo`** runs a made-up busy machine, a daemon with a scripted crowd, in a
   temporary directory, and shows it in `top` (`--ui` for the browser). It touches nothing real.
@@ -728,7 +739,7 @@ client for it.
 | `GET /v1/status` | | the machine: [below](#the-status-object) |
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
-| `GET /v1/commands` | | the `[commands]` rules, each weight clamped as the daemon would grant it; under `never`, with a `reason`, the rules no lease could ever be granted for |
+| `GET /v1/commands` | | the `[commands]` rules, each weight clamped as the daemon would grant it; a rule no lease could ever be granted for carries `never`, the reason |
 | `POST /v1/acquire` | `kind`, `pool`, `weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` (a size such as `"6g"`) | `status`: `granted` (with `lease`), `queued` (with `position` and `blocked`) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown` |
 | `POST /v1/release` | `lease_id` | `released` |

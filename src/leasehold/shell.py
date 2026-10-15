@@ -72,12 +72,16 @@ class Rule:
     args: str | None = None
     source: str = "config"
     memory: str | None = None
+    #: Why no lease for this rule could ever be granted; None when one can. A command it
+    #: matches is refused, not run under another rule's lease.
+    never: str | None = None
 
     @classmethod
     def of(cls, row: Mapping) -> Rule:
         return cls(
             programs=frozenset(row["programs"]), weight=int(row["weight"]), pool=row.get("pool"),
             args=row.get("args"), source=row.get("source", "config"), memory=row.get("memory"),
+            never=row.get("never"),
         )  # fmt: skip
 
     def matches(self, program: str, args: Sequence[str]) -> bool:
