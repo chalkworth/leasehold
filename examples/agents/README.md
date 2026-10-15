@@ -74,7 +74,9 @@ Each of these gives an agent's heavy commands a lease without the agent typing
 `leasehold commands --test "uv run pytest -x"` says which one a command matches and its
 weight). [`docs/reference.md`](../../docs/reference.md#coding-agents) has the detail.
 
-**Claude Code.** Install the plugin from this repository:
+### Claude Code
+
+Install the plugin from this repository:
 
 ```
 /plugin marketplace add chalkworth/leasehold
@@ -85,9 +87,10 @@ Before each Bash command, its hook takes a lease for a heavy one, in the Claude 
 turn (`cc-<session id>`), and gives it back when the command ends. The command is not changed.
 Sub-agents share their parent's session.
 
-**Any agent, through PATH.** Shims run `pytest`, `cargo`, `make` and the rest under a lease
-for whoever calls them through PATH. Give each agent its own session, so its commands take
-turns with the other agents':
+### Any agent, through PATH
+
+Shims run `pytest`, `cargo`, `make` and the rest under a lease for whoever calls them through
+PATH. Give each agent its own session, so its commands take turns with the other agents':
 
 ```sh
 leasehold shims install
@@ -95,11 +98,14 @@ export PATH="$HOME/.local/share/leasehold/shims:$PATH"
 export LEASEHOLD_SESSION=agent-a     # in agent-a's environment; agent-b for the next
 ```
 
-**Agents that speak MCP** (Codex, Cursor, Gemini CLI, Claude Code): `leasehold mcp` lets the
-agent ask how busy the machine is and take a lease before heavy work, and releases what it holds
-when the session ends. It never runs commands. [`integrations/mcp/`](../../integrations/mcp/)
-has each client's config.
+### Agents that speak MCP
 
-**The rest.** Paste [`integrations/AGENTS.md.snippet`](../../integrations/AGENTS.md.snippet)
-into the repository's `AGENTS.md` or `CLAUDE.md`: it tells the agent to run heavy commands
-under `leasehold hold` and what the exit codes mean.
+For Codex, Cursor, Gemini CLI and Claude Code, `leasehold mcp` lets the agent ask how busy the
+machine is and take a lease before heavy work, and releases what it holds when the session ends.
+It never runs commands. [`integrations/mcp/`](../../integrations/mcp/) has each client's config.
+
+### Other agents
+
+Paste [`integrations/AGENTS.md.snippet`](../../integrations/AGENTS.md.snippet) into the
+repository's `AGENTS.md` or `CLAUDE.md`: it tells the agent to run heavy commands under
+`leasehold hold` and what the exit codes mean.

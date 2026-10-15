@@ -74,6 +74,6 @@ under a leasehold command, which holds its lease already. That is also why a rul
 `comm` or `exe` and not only `cmdline`: a `cmdline` pattern matches any process that merely
 mentions the script, such as an editor with it open.
 
-Observing is accounting, not control: the program is already running, so its weight counts even
-past its pool's `max` or the machine's slots, and only new work waits. `max_count` caps how many
+Observing only counts a program: it is already running, so its weight counts even past its
+pool's `max` or the machine's slots, and only new work waits. `max_count` caps how many
 of a rule's processes count at once.
