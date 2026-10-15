@@ -75,19 +75,30 @@ class Rule:
     #: Why no lease for this rule could ever be granted; None when one can. A command it
     #: matches is refused, not run under another rule's lease.
     never: str | None = None
+    #: The size of each process's own thread pool (`leasehold.jobs`): "jobs", the job count,
+    #: or a count of at least 1.
+    threads: int | str = "jobs"
 
     @classmethod
     def of(cls, row: Mapping) -> Rule:
+        """The rule a served row describes. A row without `threads` (a daemon older than the
+        setting), or with one that is not a count of at least 1, has `threads` "jobs"."""
         return cls(
             programs=frozenset(row["programs"]), weight=int(row["weight"]), pool=row.get("pool"),
             args=row.get("args"), source=row.get("source", "config"), memory=row.get("memory"),
-            never=row.get("never"),
+            never=row.get("never"), threads=_threads(row.get("threads")),
         )  # fmt: skip
 
     def matches(self, program: str, args: Sequence[str]) -> bool:
         if program.rsplit("/", 1)[-1] not in self.programs:
             return False
         return self.args is None or re.search(self.args, " ".join(args)) is not None
+
+
+def _threads(value: object) -> int | str:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return "jobs"
 
 
 @dataclass(frozen=True)

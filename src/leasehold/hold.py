@@ -285,13 +285,16 @@ def hold(
     job_env: bool = True,
     jobserver: bool = False,
     memory: str | None = None,
+    threads: jobs.Threads | None = None,
     if_unavailable: str = "run",
 ) -> int:
-    """Run `argv` under a lease, sized to it (`leasehold.jobs`): the job-count variables unless
-    `job_env` is false, a make jobserver when `jobserver` is true, and when contained a scope
-    weighted to the lease and held to `memory` (a size such as `4g`) when given. `memory` is
-    also declared with the request, so a daemon with a memory budget counts it. With no
-    `weight`, the command is weighed as the daemon's `[commands]` rules weigh it (`auto_size`).
+    """Run `argv` under a lease, sized to it (`leasehold.jobs`): the job-count and thread-count
+    variables unless `job_env` is false, a make jobserver when `jobserver` is true, and when
+    contained a scope weighted to the lease and held to `memory` (a size such as `4g`) when
+    given. `memory` is also declared with the request, so a daemon with a memory budget counts
+    it. With no `weight`, the command is weighed as the daemon's `[commands]` rules weigh it
+    (`auto_size`); with no `threads`, its thread count is the matching rule's `threads`, and
+    "jobs" when no rule matches.
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`."""
     if not argv:
@@ -300,9 +303,12 @@ def hold(
     request = None
     try:
         with _interruptible():
-            if weight is None:
-                weight, sized = auto_size(client, argv) if client is not None else (1, None)
-                memory = memory or sized
+            if weight is None or threads is None:
+                rule = auto_size(client, argv) if client is not None else _UNSIZED
+                if weight is None:
+                    weight, memory = rule.weight, memory or rule.memory
+                if threads is None:
+                    threads = rule.threads
             request = lease_request(
                 kind=kind,
                 pool=pool,
@@ -339,6 +345,7 @@ def hold(
                 job_env=job_env,
                 jobserver=jobserver,
                 memory=memory,
+                threads=threads,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -347,18 +354,20 @@ def hold(
         return _interrupted(exc.signum)
 
 
-def auto_size(client: Client, argv: Sequence[str]) -> tuple[int, str | None]:
-    """The weight (and memory) the daemon's `[commands]` rules give `argv`'s program and
-    arguments, as the shims would weigh it; weight 1 and no memory when no rule matches or the
-    rules cannot be read."""
+#: What `auto_size` gives a command no rule matches: weight 1, no memory, "jobs" threads.
+_UNSIZED = shell.Rule(programs=frozenset(), weight=1)
+
+
+def auto_size(client: Client, argv: Sequence[str]) -> shell.Rule:
+    """The rule of the daemon's `[commands]` that `argv`'s program and arguments match, as the
+    shims would match it, for its weight, memory and threads; `_UNSIZED` when no rule matches
+    or the rules cannot be read."""
     try:
         rules = shell.served(client.commands()).rules
-    except (Unavailable, ApiError, KeyError, ValueError):
-        return 1, None
+    except (Unavailable, ApiError, KeyError, ValueError, TypeError):
+        return _UNSIZED
     found = shell.match_programs(rules, [(argv[0], list(argv[1:]))])
-    if found is None:
-        return 1, None
-    return found.rule.weight, found.rule.memory
+    return _UNSIZED if found is None else found.rule
 
 
 def lease_request(
@@ -395,8 +404,10 @@ def run_leased(
     job_env: bool = True,
     jobserver: bool = False,
     memory: str | None = None,
+    threads: jobs.Threads = "jobs",
 ) -> int:
-    """`hold` once `request` is granted (`answer`): run `argv` sized to the lease, renewing it,
+    """`hold` once `request` is granted (`answer`): run `argv` sized to the lease (its thread
+    pools to `threads`, `jobs.thread_count`), renewing it,
     and release it when the command ends; the command's exit code (`_ended`). SIGINT, SIGTERM or
     SIGHUP before the command runs gives the lease back and stops what was started of it."""
     lease_id, kind = request["lease_id"], request["kind"]
@@ -406,7 +417,7 @@ def run_leased(
     tty = terminal.owned()
     with contextlib.ExitStack() as stack:
         relay = stack.enter_context(_relayed())
-        env = child_env(lease_id, granted, count, job_env=job_env)
+        env = child_env(lease_id, granted, count, job_env=job_env, threads=threads)
         if jobserver:
             try:
                 fifo = stack.enter_context(jobs.jobserver(count))
@@ -558,9 +569,12 @@ def scope_prefix(request: dict, answer: dict, memory: str | None) -> list[str] |
     )
 
 
-def child_env(lease_id: str, granted: dict, count: int, *, job_env: bool) -> dict[str, str]:
+def child_env(
+    lease_id: str, granted: dict, count: int, *, job_env: bool, threads: jobs.Threads = "jobs"
+) -> dict[str, str]:
     """The command's environment: ours, the lease's `LEASEHOLD_*` variables, and (with
-    `job_env`) the job-count variables the environment leaves unset."""
+    `job_env`) the job-count and thread-count variables the environment leaves unset
+    (`jobs.job_env`)."""
     env = {
         **os.environ,
         "LEASEHOLD_LEASE_ID": lease_id,
@@ -569,7 +583,7 @@ def child_env(lease_id: str, granted: dict, count: int, *, job_env: bool) -> dic
         "LEASEHOLD_WEIGHT": str(granted["weight"]),
     }
     if job_env:
-        env |= jobs.job_env(count, os.environ)
+        env |= jobs.job_env(count, os.environ, threads)
     return env
 
 

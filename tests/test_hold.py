@@ -25,6 +25,7 @@ import pytest
 from support import CHILD_ENV, until
 
 from leasehold import hold as hold_module
+from leasehold import jobs
 from leasehold.client import ApiError, Client
 from leasehold.exits import EXIT_BUSY, EXIT_REFUSED, EXIT_REVOKED, EXIT_UNAVAILABLE
 from leasehold.hold import waiting_line
@@ -32,7 +33,8 @@ from leasehold.hold import waiting_line
 
 def hold(sock: Path, *args: str, wait: bool = True, **kw) -> subprocess.Popen:
     argv = [sys.executable, "-m", "leasehold", "--socket", str(sock), "hold", *args]
-    proc = subprocess.Popen(argv, env=CHILD_ENV, stderr=subprocess.PIPE, text=True, **kw)
+    kw.setdefault("env", CHILD_ENV)
+    proc = subprocess.Popen(argv, stderr=subprocess.PIPE, text=True, **kw)
     if wait:
         proc.wait(timeout=30)
     return proc
@@ -233,6 +235,33 @@ def test_with_no_weight_hold_weighs_the_command_as_the_commands_rules_do(daemon,
     assert weight("--", str(make), "-j") == "2"
     assert weight("--weight", "1", "--", str(make)) == "1"
     assert weight("--", str(other)) == "1"
+
+
+def test_thread_pools_get_the_rules_threads_or_the_flags_and_worker_counts_the_jobs(
+    daemon, tmp_path
+):
+    """The built-in pytest rule gives each worker one thread; `--threads` overrides it; a
+    variable already set is left alone."""
+    probe = '#!/bin/sh\necho "$PYTEST_XDIST_AUTO_NUM_WORKERS $OMP_NUM_THREADS $LEASEHOLD_THREADS"\n'
+    for name in ("pytest", "other"):
+        (tmp_path / name).write_text(probe)
+        (tmp_path / name).chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+
+    def sizes(*args: str, **extra: str) -> str:
+        proc = hold(daemon.path, *args, stdout=subprocess.PIPE, env=env | extra)
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().strip()
+
+    pytest_, other = str(tmp_path / "pytest"), str(tmp_path / "other")
+    assert sizes("--", pytest_, "-n", "auto") == "2 1 1"  # weight 4, cut to 2 jobs
+    assert sizes("--weight", "2", "--", pytest_) == "2 1 1"  # the rule's threads still
+    assert sizes("--threads", "jobs", "--", pytest_) == "2 2 2"
+    assert sizes("--weight", "2", "--", other) == "2 2 2"  # no rule: the job count
+    assert sizes("--weight", "2", "--threads", "1", "--", other) == "2 1 1"
+    assert sizes("--", pytest_, OMP_NUM_THREADS="6") == "2 6 1"  # the user's own wins
+    bad = hold(daemon.path, "--threads", "0", "--", other)
+    assert bad.returncode == 2 and "count of at least 1" in bad.stderr.read()
 
 
 def on_a_terminal(script: str) -> tuple[int, str]:

@@ -5,6 +5,44 @@ and versions follow [Semantic Versioning](https://semver.org/) as described unde
 the README: before 1.0, a minor release may break the public API, and every break is listed
 here.
 
+## [Unreleased]
+
+### Added
+
+- **Thread counts apart from job counts.** `hold` sets more variables, each only where the
+  environment leaves it unset: `LOKY_MAX_CPU_COUNT` (joblib, scikit-learn's `n_jobs=-1`),
+  `DASK_NUM_WORKERS` (Dask's threaded and multiprocessing schedulers) and `PYTHON_CPU_COUNT`
+  (Python 3.13 and later: `os.cpu_count()`, `os.process_cpu_count()`, `multiprocessing`,
+  `ProcessPoolExecutor`) to the job count; `LEASEHOLD_THREADS`, `OPENBLAS_NUM_THREADS`,
+  `MKL_NUM_THREADS`, `POLARS_MAX_THREADS`, `RAYON_NUM_THREADS` and `NUMBA_NUM_THREADS`, with
+  `OMP_NUM_THREADS`, to the thread count. The thread count is the job count unless a
+  `[[commands.rule]]`'s new `threads` key (`"jobs"`, the default, or a count of at least 1) or
+  `hold --threads N|jobs` says otherwise; a count above the job count is cut to it.
+  `GET /v1/commands` serves each rule's `threads`, and `leasehold commands --test` shows it.
+  Library: `leasehold.jobs.WORKER_VARIABLES`, `THREAD_VARIABLES`, `Threads` and
+  `thread_count`; `job_env` takes `threads`; `leasehold.shell.Rule.threads`;
+  `leasehold.commands.CommandRule.threads`; `leasehold.hold.hold`, `run_leased` and
+  `child_env` take `threads`. `JOB_VARIABLES` is now both groups together.
+
+### Changed
+
+- The built-in pytest rule (pytest, py.test, tox, nox) has `threads = 1`: `hold` and the shims
+  give its commands `OMP_NUM_THREADS=1` and the other thread-pool variables 1, while
+  `PYTEST_XDIST_AUTO_NUM_WORKERS` still gets the job count. With the job count in both, each
+  of N xdist workers could start an N-thread BLAS or OpenMP pool: N × N threads on a lease of
+  N. A test run that is one process now gets one BLAS thread unless you set
+  `OMP_NUM_THREADS` yourself, pass `hold --threads jobs`, or add a rule of your own.
+- `leasehold.hold.auto_size` returns the matching `leasehold.shell.Rule` (weight 1, no memory
+  and `"jobs"` threads when none matches) instead of a `(weight, memory)` pair. `hold` with
+  `--weight` but no `--threads` still reads the rules, for the rule's `threads`.
+
+### Compatibility
+
+- A client reading rules from a daemon that does not serve `threads` gives every rule
+  `"jobs"`, the thread count before the setting; so does a served `threads` that is not a
+  count of at least 1. The Claude Code hook never changes a command's environment, so the
+  thread count reaches only commands run by `hold` and the PATH shims.
+
 ## [0.3.0]
 
 Memory-aware admission, a memory guard that no longer caps pools to their reservations, and an

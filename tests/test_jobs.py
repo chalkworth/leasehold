@@ -22,6 +22,25 @@ def test_job_variables_are_set_only_where_unset():
     assert set(env) == set(jobs.JOB_VARIABLES) - {"GOMAXPROCS"}
 
 
+def test_worker_counts_get_the_jobs_and_thread_pools_the_thread_count():
+    assert not set(jobs.WORKER_VARIABLES) & set(jobs.THREAD_VARIABLES)
+    assert jobs.JOB_VARIABLES == jobs.WORKER_VARIABLES | jobs.THREAD_VARIABLES
+    env = jobs.job_env(4, {"MKL_NUM_THREADS": "3"}, threads=1)
+    assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == env["PYTHON_CPU_COUNT"] == "4"
+    assert env["OMP_NUM_THREADS"] == env["OPENBLAS_NUM_THREADS"] == "1"
+    assert env["POLARS_MAX_THREADS"] == env["LEASEHOLD_THREADS"] == "1"
+    assert "MKL_NUM_THREADS" not in env  # the user's own choice wins
+    ones = {name for name, value in env.items() if value == "1"}
+    assert ones == set(jobs.THREAD_VARIABLES) - {"MKL_NUM_THREADS"}
+    assert set(jobs.job_env(4, {}).values()) == {"4"}  # "jobs", the default
+
+
+def test_the_thread_count_is_the_jobs_or_fewer():
+    assert jobs.thread_count("jobs", 6) == 6
+    assert jobs.thread_count(2, 6) == 2
+    assert jobs.thread_count(8, 6) == 6
+
+
 def test_makeflags_drop_an_outer_jobserver_and_job_count():
     outer = "w -j8 --jobserver-auth=fifo:/tmp/outer -- FOO=1"
     flags = jobs.makeflags(outer, 2, "/tmp/mine")
