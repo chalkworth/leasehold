@@ -18,6 +18,9 @@ import re
 import shlex
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+
+from leasehold import xdist
 
 #: Words that end one simple command and start the next.
 _SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "|&", "(", ")", ";;", "\n"})
@@ -45,6 +48,24 @@ _WRAPPERS: dict[str, tuple[frozenset[str], int]] = {
     "bunx": (frozenset({"-p", "--package"}), 0),
     "pnpx": (frozenset({"-p", "--package"}), 0),
 }
+#: Options of `uv run` that take the next word as their value (`uv run --with X pytest`).
+_UV_RUN_VALUES = frozenset(
+    {
+        "--extra", "--no-extra", "--group", "--no-group", "--only-group", "--env-file",
+        "-w", "--with", "--with-editable", "--with-requirements", "--package",
+        "--no-editable-package", "--python-platform", "--index", "--default-index", "-i",
+        "--index-url", "--extra-index-url", "-f", "--find-links", "--index-strategy",
+        "--keyring-provider", "-P", "--upgrade-package", "--upgrade-group", "--resolution",
+        "--prerelease", "--prerelease-package", "--fork-strategy", "--exclude-newer",
+        "--exclude-newer-package", "--no-sources-package", "--reinstall-package", "--link-mode",
+        "-C", "--config-setting", "--config-settings-package", "--no-build-isolation-package",
+        "--no-build-package", "--no-binary-package", "--cache-dir", "--refresh-package", "-p",
+        "--python", "--color", "--allow-insecure-host", "--directory", "--project",
+        "--config-file",
+    }
+)  # fmt: skip
+#: For each runner, its options that take the next word as their value.
+_RUNNER_VALUES: dict[str, frozenset[str]] = {"uv": _UV_RUN_VALUES}
 #: `<runner> <verb> program ...`: run a project's tool inside its environment.
 _RUNNERS = {
     "uv": "run",
@@ -90,8 +111,14 @@ class Rule:
         )  # fmt: skip
 
     def matches(self, program: str, args: Sequence[str]) -> bool:
+        """Whether `program` with `args` is this rule's. A rule whose `args` is
+        `xdist.XDIST_ARGS` matches a pytest run whose own arguments start xdist workers
+        (`xdist.in_args`, which reads them one by one); any other `args` is searched in the
+        arguments joined by spaces."""
         if program.rsplit("/", 1)[-1] not in self.programs:
             return False
+        if self.args == xdist.XDIST_ARGS:
+            return xdist.in_args(args) is True
         return self.args is None or re.search(self.args, " ".join(args)) is not None
 
 
@@ -245,8 +272,12 @@ def _unwrap(words: list[str], depth: int) -> Iterator[tuple[str, list[str]]]:
         return
     if _RUNNERS.get(program) and rest[:1] == [_RUNNERS[program]]:
         rest = rest[1:]
+        takes = _RUNNER_VALUES.get(program, frozenset())
         while rest and rest[0].startswith("-"):
-            rest = rest[1:]
+            if rest[0] == "--":
+                rest = rest[1:]
+                break
+            rest = rest[2:] if rest[0] in takes else rest[1:]
         yield from _unwrap(rest, depth)
         return
     if re.fullmatch(r"python(\d(\.\d+)?)?", program) and rest[:1] == ["-m"] and len(rest) > 1:
@@ -307,6 +338,53 @@ def match(rules: Iterable[Rule], command: str) -> Match | None:
     """The rule `command` takes a lease under: the heaviest match among the config's rules,
     else among the built-in ones; None when no rule matches."""
     return match_programs(rules, list(programs(command)))
+
+
+#: Programs that are pytest, for reading their configuration (`xdist`).
+_PYTEST = frozenset({"pytest", "py.test"})
+
+
+def threads(
+    rules: Iterable[Rule],
+    found: Sequence[tuple[str, Sequence[str]]],
+    *,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> int | str | None:
+    """The thread count for a command line running the programs `found`: each program's own
+    rule's `threads`, the largest of them ("jobs" when any is), so no program runs with fewer
+    threads than its rule gives it; None when no rule matches. With `env` and `cwd`, a pytest
+    run that its own rule (a built-in one) gives the job count, but that starts xdist workers
+    through `PYTEST_ADDOPTS` or its config's `addopts` (`xdist.run_starts_workers`), takes the
+    built-in xdist rule's `threads`."""
+    rules = list(rules)
+    chosen: list[int | str] = []
+    for program, args in found:
+        own = match_programs(rules, [(program, args)])
+        if own is None:
+            continue
+        count = own.rule.threads
+        name = program.rsplit("/", 1)[-1]
+        if (
+            count == "jobs"
+            and own.rule.source == "default"
+            and name in _PYTEST
+            and env is not None
+            and cwd is not None
+        ):
+            workers = next(
+                (r for r in rules if r.source == "default" and r.args == xdist.XDIST_ARGS
+                 and name in r.programs),
+                None,
+            )  # fmt: skip
+            if workers is not None and xdist.run_starts_workers(args, env, cwd):
+                count = workers.threads
+        chosen.append(count)
+    if not chosen:
+        return None
+    if "jobs" in chosen:
+        return "jobs"
+    return max(int(c) for c in chosen)
 
 
 def match_programs(

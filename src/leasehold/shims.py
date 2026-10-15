@@ -26,8 +26,9 @@ A shim costs a Python start (about 0.1 s) on every run of its program, `--versio
 from __future__ import annotations
 
 import os
+import re
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from leasehold import busy, discovery, hooknotes, jobs, shell
@@ -174,6 +175,7 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     if found is None:
         os.execv(target, argv)
     rule = found.rule
+    threads = _threads(settings.rules, program, args, env) or rule.threads
     if rule.never is not None:
         _say(f"not running {program}: refused: {rule.never}")
         return EXIT_REFUSED
@@ -186,7 +188,7 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     )
     code, answer = wait_for_grant(client, request, settings.wait_s, _say)
     if code is None:
-        return run_leased(client, argv, request, answer, memory=rule.memory, threads=rule.threads)
+        return run_leased(client, argv, request, answer, memory=rule.memory, threads=threads)
     if code == EXIT_BUSY and settings.when_busy == "deny":
         why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
         _say(f"not running {program}: {why}. {busy.ADVICE}")
@@ -205,27 +207,47 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     os.execv(target, argv)
 
 
+#: What reading the rules inside a lease may raise: no daemon, a daemon that does not answer in
+#: time or answers no, and rows that are not rules.
+_ANY_FAULT = (
+    discovery.DiscoveryError, Unavailable, ApiError, OSError, LookupError, ValueError,
+    TypeError, AttributeError, re.error,
+)  # fmt: skip
+#: How long a shim inside a lease waits for the daemon's rules before running as it is.
+WITHIN_LEASE_TIMEOUT_S = 0.3
+
+
+def _threads(
+    rules: Sequence[shell.Rule], program: str, args: list[str], env: Mapping[str, str]
+) -> int | str | None:
+    """`program`'s thread count by the rules (`shell.threads`), its config and
+    `PYTEST_ADDOPTS` read from the directory it runs in."""
+    return shell.threads(rules, [(program, args)], env=env, cwd=Path.cwd())
+
+
 def within_lease(program: str, args: list[str], env: Mapping[str, str]) -> dict[str, str]:
     """The environment `program` runs with inside a lease already held: `env`, with the thread
-    count its own rule gives in the variables the lease set (`jobs.resized`) when that is fewer
-    than the lease's. A lease that set no variables, no matching rule, or no daemon to read the
-    rules from leaves `env` as it is."""
-    if jobs.LEASEHOLD_SET not in env:
+    count its own rule gives (`_threads`) in the variables the lease set (`jobs.resized`) when
+    that is fewer than the lease's. `env` as it is when the lease recorded no variables, its
+    thread count is 1 already, no rule matches, or the daemon does not answer with rules within
+    `WITHIN_LEASE_TIMEOUT_S`."""
+    held = env.get("LEASEHOLD_THREADS", "")
+    lease_jobs = env.get("LEASEHOLD_JOBS", "")
+    if not jobs.recorded(env) or not lease_jobs.isdigit() or "1" in (held, lease_jobs):
         return dict(env)
     try:
-        lease_jobs = int(env.get("LEASEHOLD_JOBS", ""))
-        rules = shell.served(Client(discovery.find(None, None, env)).commands()).rules
-    except (discovery.DiscoveryError, Unavailable, ApiError, OSError, LookupError, ValueError):
+        client = Client(discovery.find(None, None, env), timeout=WITHIN_LEASE_TIMEOUT_S)
+        rules = shell.served(client.commands()).rules
+        wanted = _threads(rules, program, args, env)
+    except _ANY_FAULT:  # whatever goes wrong here, the program runs as it is
         return dict(env)
-    found = shell.match_programs(rules, [(program, args)])
-    if found is None or lease_jobs < 1:
+    if wanted is None:
         return dict(env)
-    held = env.get("LEASEHOLD_THREADS", "")
-    current = int(held) if held.isdigit() else lease_jobs
-    wanted = jobs.thread_count(found.rule.threads, lease_jobs)
-    if wanted >= current:
+    count = jobs.thread_count(wanted, int(lease_jobs))
+    current = int(held) if held.isdigit() else int(lease_jobs)
+    if count >= current:
         return dict(env)
-    return jobs.resized(env, wanted) or dict(env)
+    return jobs.resized(env, count) or dict(env)
 
 
 def _say(message: str) -> None:

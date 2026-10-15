@@ -7,20 +7,25 @@ per slot). `hold` tells its command in two ways:
 * **Variables** many tools read (`JOB_VARIABLES`; `sized_env`). On by default; `hold
   --no-job-env` turns them off. They come in two groups. `WORKER_VARIABLES` say how many jobs or
   worker processes a tool fans out to, and are set to the job count. `THREAD_VARIABLES` limit
-  the parallelism inside each process (OpenMP and BLAS pools, Go, Polars, rayon, process
-  pools sized from the CPU count), and are set to the thread count: the job count, unless the
-  command's `threads` setting (a `[commands]` rule's, or `hold --threads`) gives fewer. A
-  command whose jobs are worker processes, as `pytest -n` runs, takes `threads = 1`, so its N
-  workers run N threads between them rather than N each.
+  the parallelism inside each process (OpenMP and BLAS pools, Go, Polars, rayon, Numba,
+  process pools sized from the CPU count), and are set to the thread count: the job count,
+  unless the command's `threads` setting (a `[commands]` rule's, or `hold --threads`) gives
+  fewer. A command whose jobs are worker processes, as `pytest -n` runs, takes `threads = 1`,
+  so its N workers run N threads between them rather than N each.
 
-  A value the user chose wins: a variable already set, unless an enclosing lease set it,
-  which `LEASEHOLD_SET` records. A nested lease sets the names listed there to its own
-  values. `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` are one family
-  (OpenBLAS reads its own before OpenMP's, and MKL's overrides OpenMP's in PyTorch): when the
-  user set any of them, none of them is set. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are
-  always this lease's: the job count, and the thread count in effect (the user's value of the
-  family when they set one: `OMP_NUM_THREADS`, else `OPENBLAS_NUM_THREADS`, else
-  `MKL_NUM_THREADS`).
+  A variable already set is the user's, and is left alone, unless the lease this command runs
+  in set it to the value it has now: `LEASEHOLD_SET` records each name a lease set with its
+  value (`OMP_NUM_THREADS=4,GOMAXPROCS=4`), and is read only beside `LEASEHOLD_LEASE_ID`. A
+  nested lease sets those names to its own values; a name whose value changed since is the
+  user's again. A user value equal to the one recorded cannot be told from the lease's.
+
+  `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` are one family: OpenBLAS
+  reads its own variable before OpenMP's, and PyTorch reads OpenMP's and lets MKL's override
+  it. When the user set one of them (`OMP_NUM_THREADS`, else `OPENBLAS_NUM_THREADS`, else
+  `MKL_NUM_THREADS`, decides), each sibling the user did not set gets that value, when it is
+  a plain count; otherwise the siblings are left unset. `LEASEHOLD_JOBS` and
+  `LEASEHOLD_THREADS` are always this lease's: the job count, and the thread count in effect
+  (the user's family value when it is a plain count, else the lease's thread count).
 * **A jobserver** (`hold --jobserver`): a named pipe holding `jobs - 1` tokens, announced in
   `MAKEFLAGS` as `--jobserver-auth=fifo:PATH`, the protocol of GNU make 4.4. make, ninja 1.13
   and later, cargo and rustc, and GCC's LTO take a token before each extra job, so the whole tree
@@ -36,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -63,6 +69,10 @@ THREAD_VARIABLES: dict[str, str] = {
     "GOMAXPROCS": "Go programs, go build and go test included",
     "POLARS_MAX_THREADS": "Polars",
     "RAYON_NUM_THREADS": "Rust programs using rayon",
+    "NUMBA_NUM_THREADS": (
+        "Numba, as a ceiling: numba.set_num_threads() above it is an error, which keeps the "
+        "lease's limit"
+    ),
     "LOKY_MAX_CPU_COUNT": "joblib and loky process pools: scikit-learn's n_jobs=-1",
     "DASK_NUM_WORKERS": "Dask's threaded and multiprocessing schedulers",
     "PYTHON_CPU_COUNT": (
@@ -74,15 +84,18 @@ THREAD_VARIABLES: dict[str, str] = {
 #: Every variable `job_env` may set.
 JOB_VARIABLES: dict[str, str] = WORKER_VARIABLES | THREAD_VARIABLES
 
-#: Names a lease set for its command, comma-separated: an enclosing lease's values, not the
-#: user's.
+#: Each name a lease set for its command with the value it set, `NAME=VALUE` pairs joined by
+#: commas: the lease's values, not the user's, while they are unchanged.
 LEASEHOLD_SET = "LEASEHOLD_SET"
 
-#: Variables the user's value of any one of decides all of: none is set beside it.
+#: Variables one user value decides: the first the user set gives the others its value.
 BLAS_FAMILY = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 
 #: Always this lease's own, and never listed in `LEASEHOLD_SET`.
 _OWN = ("LEASEHOLD_JOBS", "LEASEHOLD_THREADS")
+
+#: One `LEASEHOLD_SET` pair: leasehold only ever sets counts.
+_PAIR = re.compile(r"([A-Z_][A-Z0-9_]*)=([0-9]+)")
 
 #: A command's `threads` setting: "jobs" (the job count) or a count of at least 1.
 Threads = int | Literal["jobs"]
@@ -98,68 +111,90 @@ def thread_count(threads: Threads, jobs: int) -> int:
     return max(1, min(int(threads), jobs))
 
 
+def _count(value: str | None) -> bool:
+    """Whether `value` is a plain count of at least 1."""
+    return value is not None and value.isascii() and value.isdigit() and int(value) >= 1
+
+
+def recorded(env: Mapping[str, str]) -> dict[str, str]:
+    """The names and values `env`'s `LEASEHOLD_SET` records, read only beside
+    `LEASEHOLD_LEASE_ID`; empty when it is missing or any part of it is malformed."""
+    if not env.get("LEASEHOLD_LEASE_ID"):
+        return {}
+    out: dict[str, str] = {}
+    for part in env.get(LEASEHOLD_SET, "").split(","):
+        if not part:
+            continue
+        pair = _PAIR.fullmatch(part)
+        if pair is None:
+            return {}
+        out[pair[1]] = pair[2]
+    return out
+
+
 def leasehold_set(env: Mapping[str, str]) -> frozenset[str]:
-    """The names `env`'s `LEASEHOLD_SET` lists: values an enclosing lease set."""
-    return frozenset(name for name in env.get(LEASEHOLD_SET, "").split(",") if name)
+    """The names whose value in `env` is the one its lease recorded setting (`recorded`)."""
+    return frozenset(name for name, value in recorded(env).items() if env.get(name) == value)
 
 
 def _plan(jobs: int, env: Mapping[str, str], threads: Threads) -> tuple[dict[str, str], list[str]]:
-    """What a lease of `jobs` jobs sets in `env`, and the enclosing lease's names it removes
-    (the BLAS family's, when the user set one of it)."""
+    """What a lease of `jobs` jobs sets in `env`, and the names it removes: a sibling of the
+    BLAS family an enclosing lease set, beside a user value that is not a plain count."""
     count = thread_count(threads, jobs)
-    inherited = leasehold_set(env)
+    ours = leasehold_set(env)
 
     def users(name: str) -> bool:
-        return bool(env.get(name)) and name not in inherited
+        return bool(env.get(name)) and name not in ours
 
     family = next((env[name] for name in BLAS_FAMILY if users(name)), None)
     out: dict[str, str] = {}
     removed: list[str] = []
     for name in JOB_VARIABLES:
-        if name in _OWN:
-            continue
-        if users(name):
+        if name in _OWN or users(name):
             continue
         if family is not None and name in BLAS_FAMILY:
-            if name in env:
+            if _count(family):
+                out[name] = family
+            elif name in env:
                 removed.append(name)
             continue
         out[name] = str(jobs if name in WORKER_VARIABLES else count)
-    out[LEASEHOLD_SET] = ",".join(out)
+    out[LEASEHOLD_SET] = ",".join(f"{name}={value}" for name, value in out.items())
     out["LEASEHOLD_JOBS"] = str(jobs)
-    out["LEASEHOLD_THREADS"] = family if family is not None else str(count)
+    out["LEASEHOLD_THREADS"] = family if _count(family) else str(count)
     return out, removed
 
 
 def job_env(jobs: int, env: Mapping[str, str], threads: Threads = "jobs") -> dict[str, str]:
     """The variables a lease of `jobs` jobs sets in `env`: each of `WORKER_VARIABLES` to `jobs`
     and each of `THREAD_VARIABLES` to `thread_count(threads, jobs)`, but not one the user set
-    (present and not in `LEASEHOLD_SET`), nor the BLAS family when the user set one of it;
-    `LEASEHOLD_JOBS`, `LEASEHOLD_THREADS` and `LEASEHOLD_SET` always."""
+    (present, and not at the value its lease recorded), and the BLAS family to the user's
+    value when they set one of it; `LEASEHOLD_JOBS`, `LEASEHOLD_THREADS` and `LEASEHOLD_SET`
+    always."""
     return _plan(jobs, env, threads)[0]
 
 
 def sized_env(env: Mapping[str, str], jobs: int, threads: Threads = "jobs") -> dict[str, str]:
-    """`env` with `job_env` applied, and without an enclosing lease's BLAS family values when
-    the user set one of the family."""
+    """`env` with `job_env` applied, less the enclosing lease's BLAS family values beside a
+    user value of the family that is not a plain count."""
     out, removed = _plan(jobs, env, threads)
     sized = {name: value for name, value in env.items() if name not in removed}
     return sized | out
 
 
+def unsized_env(env: Mapping[str, str]) -> dict[str, str]:
+    """`env` without an enclosing lease's sizing (`LEASEHOLD_SET`, `LEASEHOLD_JOBS`,
+    `LEASEHOLD_THREADS`), for a command run with no job variables."""
+    return {name: value for name, value in env.items() if name not in (LEASEHOLD_SET, *_OWN)}
+
+
 def resized(env: Mapping[str, str], threads: Threads) -> dict[str, str] | None:
-    """`env`, inside a lease that set its variables (`LEASEHOLD_SET` and `LEASEHOLD_JOBS`), with
-    the thread count `threads` gives that lease's job count in the variables the lease set; None
-    when `env` is not such a lease's."""
-    if LEASEHOLD_SET not in env:
+    """`env`, inside a lease that recorded the variables it set (`recorded`) and its job count
+    (`LEASEHOLD_JOBS`), with the thread count `threads` gives that job count; None when `env`
+    is not such a lease's."""
+    if not recorded(env) or not _count(env.get("LEASEHOLD_JOBS")):
         return None
-    try:
-        jobs = int(env.get("LEASEHOLD_JOBS", ""))
-    except ValueError:
-        return None
-    if jobs < 1:
-        return None
-    return sized_env(env, jobs, threads)
+    return sized_env(env, int(env["LEASEHOLD_JOBS"]), threads)
 
 
 def _words(flags: str) -> list[str]:

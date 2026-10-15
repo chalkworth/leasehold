@@ -11,6 +11,7 @@ import fcntl
 import http.server
 import json
 import os
+import shlex
 import signal
 import socketserver
 import subprocess
@@ -297,8 +298,49 @@ def test_a_hold_inside_a_hold_sizes_to_its_own_lease_but_never_over_the_user(roo
 
     assert nested("2", "1") == "4 1 1"
     assert nested("1", "3") == "4 3 3"
-    assert nested("2", "1", OMP_NUM_THREADS="6") == "4 6"  # the user's, and no MKL beside it
+    assert nested("2", "1", OMP_NUM_THREADS="6") == "4 6 6"  # the user's, MKL beside it
     assert nested("2", "1", CARGO_BUILD_JOBS="9") == "9 1 1"
+
+
+def test_a_value_the_user_sets_inside_a_lease_survives_a_hold_inside_it(roomy, tmp_path):
+    probe = tmp_path / "probe"
+    probe.write_text('#!/bin/sh\necho "$OMP_NUM_THREADS $MKL_NUM_THREADS $LEASEHOLD_THREADS"\n')
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = shlex.join(
+        [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold", "--weight",
+         "1", "--threads", "1", "--", str(probe)]
+    )  # fmt: skip
+
+    def outer(script: str) -> str:
+        proc = hold(
+            roomy.path, "--weight", "1", "--threads", "2", "--", "sh", "-c", script,
+            stdout=subprocess.PIPE, env=env,
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().strip()
+
+    assert outer(inner) == "1 1 1"
+    assert outer(f"export OMP_NUM_THREADS=3; {inner}") == "3 3 3"
+    assert outer(f"OMP_NUM_THREADS=3 {inner}") == "3 3 3"
+    assert outer(f"unset OMP_NUM_THREADS; {inner}") == "1 1 1"  # unset: set again
+
+
+def test_no_job_env_passes_on_no_sizing_from_an_enclosing_lease(roomy, tmp_path):
+    probe = tmp_path / "probe"
+    probe.write_text(
+        '#!/bin/sh\necho "${LEASEHOLD_SET:-none} ${LEASEHOLD_JOBS:-none} '
+        '${LEASEHOLD_THREADS:-none} ${OMP_NUM_THREADS:-none}"\n'
+    )
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold"]
+    proc = hold(
+        roomy.path, "--weight", "1", "--", *inner, "--weight", "1", "--no-job-env", "--",
+        str(probe), stdout=subprocess.PIPE, env=env,
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stderr.read()
+    assert proc.stdout.read().split()[:3] == ["none", "none", "none"]
 
 
 def test_auto_size_reads_the_command_line_as_the_hooks_do(daemon):
@@ -308,6 +350,30 @@ def test_auto_size_reads_the_command_line_as_the_hooks_do(daemon):
         assert (rule.weight, rule.threads) == (2, 1), argv
     assert hold_module.auto_size(client, ["python3", "-m", "pytest"]).threads == "jobs"
     assert hold_module.auto_size(client, ["true"]).weight == 1
+    rule = hold_module.auto_size(client, ["uv", "run", "--with", "numpy", "pytest", "-n4"])
+    assert rule.threads == 1
+
+
+def test_a_command_line_of_several_programs_takes_the_most_threads_any_needs(daemon):
+    client = Client(daemon.path)
+    mixed = hold_module.auto_size(client, ["sh", "-c", "cargo test && pytest -n 4"])
+    assert (mixed.weight, mixed.threads) == (2, "jobs")
+    both = hold_module.auto_size(client, ["sh", "-c", "pytest -n 4 tests/a; pytest -n2 tests/b"])
+    assert both.threads == 1
+
+
+def test_auto_size_sees_xdist_turned_on_by_the_config_or_pytest_addopts(daemon, tmp_path):
+    client = Client(daemon.path)
+    (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = -n 4\n")
+    assert hold_module.auto_size(client, ["pytest"], env={}, cwd=tmp_path).threads == 1
+    off = hold_module.auto_size(client, ["pytest", "-n", "0"], env={}, cwd=tmp_path)
+    assert off.threads == "jobs"
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "pytest.ini").write_text("[pytest]\n")
+    by_env = hold_module.auto_size(client, ["pytest"], env={"PYTEST_ADDOPTS": "-n2"}, cwd=plain)
+    assert by_env.threads == 1
+    assert hold_module.auto_size(client, ["pytest"], env={}, cwd=plain).threads == "jobs"
 
 
 class _Rules:

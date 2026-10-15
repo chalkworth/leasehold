@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
-from leasehold import shell
+from leasehold import shell, xdist
 from leasehold.model import Name
 from leasehold.units import declared_to_bytes
 
@@ -62,9 +62,10 @@ def _rule(
     return CommandRule(programs=programs.split(), weight=weight, args=args, threads=threads)
 
 
-#: pytest arguments that start xdist workers: `-n N`, `-nN`, `-n=N`, `--numprocesses N`,
-#: `--numprocesses=N`, N a count, `auto` or `logical` (`-n 0` runs no workers).
-XDIST_ARGS = r"(^|\s)(-n\s*=?\s*|--numprocesses(=|\s+))(auto|logical|[1-9][0-9]*)(\s|$)"
+#: The built-in xdist rule's `args`: a pytest run whose arguments start xdist workers. The
+#: regular expression is what a client without `leasehold.xdist` matches; this one reads the
+#: arguments one by one (`xdist.in_args`).
+XDIST_ARGS = xdist.XDIST_ARGS
 
 #: The weights of the built-in rules when `[commands]` sets none.
 HEAVY_WEIGHT = 4

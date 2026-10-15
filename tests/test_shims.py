@@ -4,14 +4,16 @@ a lease, and passes straight through whenever it should."""
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 from support import CHILD_ENV, FACTS, FakeLoad, cli, machine_config
 
-from leasehold import shims
+from leasehold import jobs, shims
 from leasehold.agent import MachineAgent
 from leasehold.client import Client
 from leasehold.server import Daemon
@@ -99,8 +101,9 @@ def test_a_pytest_shim_under_a_lease_gives_its_xdist_workers_one_thread(tmp_path
         argv = [sys.executable, "-m", "leasehold", "--socket", str(daemon.path), "hold",
                 "--weight", "2", "--threads", "jobs", "--", "sh", "-c", script]  # fmt: skip
         done = subprocess.run(
-            argv, env=env | extra, capture_output=True, text=True, timeout=30, check=False
-        )
+            argv, env=env | extra, capture_output=True, text=True, timeout=30, check=False,
+            cwd=tmp_path,
+        )  # fmt: skip
         assert done.returncode == 0, done.stderr
         return done.stdout.split()
 
@@ -109,9 +112,74 @@ def test_a_pytest_shim_under_a_lease_gives_its_xdist_workers_one_thread(tmp_path
         assert lease != "" and (workers, omp, threads) == ("2", "1", "1")
         assert under_lease("pytest")[1:] == ["2", "2", "2"]  # serial: the lease's own
         assert under_lease("pytest -n 2", OMP_NUM_THREADS="6")[1:] == ["2", "6", "6"]
+        exported = under_lease("export OMP_NUM_THREADS=3; pytest -n 2")
+        assert exported[1:] == ["2", "3", "3"]  # set inside the lease: the user's
+        assert under_lease("OMP_NUM_THREADS=3 pytest -n 2")[1:] == ["2", "3", "3"]
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "pytest.ini").write_text("[pytest]\naddopts = -n 2\n")
+        lease, workers, omp, threads = under_lease("cd project && pytest")
+        assert (workers, omp, threads) == ("2", "1", "1")  # xdist from the config
+        done = subprocess.run(
+            ["pytest"], env=env, cwd=project, capture_output=True, text=True, timeout=30
+        )
+        lease, workers, omp, threads = done.stdout.split()  # its own lease, sized by the config
+        assert lease != "" and omp == "1", done.stderr
         assert len(Client(daemon.path).leases()["leases"]) == 0
     finally:
         daemon.stop()
+
+
+def _leased(**extra: str) -> dict[str, str]:
+    """An environment as a lease of 4 jobs leaves it, with `extra`."""
+    return jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer", "PATH": "/bin"}, 4) | extra
+
+
+def test_within_a_lease_a_daemon_that_never_answers_costs_under_a_second(tmp_path):
+    path = tmp_path / "silent.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(4)
+    try:
+        env = _leased(LEASEHOLD_SOCKET=str(path))
+        started = time.monotonic()
+        assert shims.within_lease("pytest", ["-n", "2"], env) == env
+        assert time.monotonic() - started < 1.0
+    finally:
+        server.close()
+
+
+class _Served:
+    def __init__(self, answer) -> None:
+        self.answer, self.asked = answer, 0
+
+    def __call__(self, *_args, **_kw):
+        return self
+
+    def commands(self):
+        self.asked += 1
+        return self.answer
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"rules": [{"programs": 5, "weight": 1}]}, {"rules": [{"weight": "x"}]}, {"rules": None},
+     {"rules": [{"programs": ["pytest"], "weight": 1, "args": "("}]}, []],
+)  # fmt: skip
+def test_within_a_lease_malformed_rules_run_the_program_as_it_is(monkeypatch, answer):
+    monkeypatch.setattr(shims, "Client", _Served(answer))
+    env = _leased(LEASEHOLD_SOCKET="/nonexistent")
+    assert shims.within_lease("pytest", ["-n", "2"], env) == env
+
+
+def test_within_a_lease_of_one_thread_the_daemon_is_not_asked(monkeypatch):
+    served = _Served({"rules": [], "wait_s": 1, "when_busy": "deny"})
+    monkeypatch.setattr(shims, "Client", served)
+    one = jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer"}, 4, threads=1)
+    assert shims.within_lease("pytest", ["-n", "2"], one | {"LEASEHOLD_SOCKET": "/x"})
+    assert served.asked == 0
+    shims.within_lease("pytest", ["-n", "2"], _leased(LEASEHOLD_SOCKET="/x"))
+    assert served.asked == 1
 
 
 def test_it_passes_through_when_it_should(setup):

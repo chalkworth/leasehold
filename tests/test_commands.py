@@ -138,6 +138,33 @@ def test_a_serial_run_and_tox_and_nox_get_the_job_count(command):
     assert match(DEFAULTS, command).rule.threads == "jobs"
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -k '-n 4'", "pytest -- -n 4", "pytest -m '-n4'", "pytest -n 0 tests"],
+)
+def test_xdist_options_are_read_as_arguments_not_as_text(command):
+    assert match(DEFAULTS, command).rule.threads == "jobs"
+
+
+@pytest.mark.parametrize("command", ["pytest -vn 4", "pytest -xn4", "uv run --with x pytest -n2"])
+def test_combined_short_flags_and_runner_options_still_find_xdist(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.threads) == ("pytest", 1)
+
+
+def test_uv_run_options_that_take_a_value_are_not_the_program():
+    words = list(shell.programs("uv run --with numpy -p 3.12 --group dev pytest -x"))
+    assert words == [("pytest", ["-x"])]
+    assert list(shell.programs("uv run --frozen -- pytest")) == [("pytest", [])]
+
+
+def test_several_programs_take_the_most_threads_any_of_them_needs():
+    rules = DEFAULTS.shell_rules()
+    assert shell.threads(rules, list(shell.programs("cargo test && pytest -n 4"))) == "jobs"
+    assert shell.threads(rules, list(shell.programs("pytest -n 4; pytest -n2 x"))) == 1
+    assert shell.threads(rules, list(shell.programs("ls -l"))) is None
+
+
 def test_builds_get_the_job_count():
     rules = [r for _src, r in CommandSettings().rules()]
     assert all(r.threads == "jobs" for r in rules if r.programs[0] != "pytest" or not r.args)

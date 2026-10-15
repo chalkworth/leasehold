@@ -428,9 +428,11 @@ command runs as before and the lease is advisory. `leasehold doctor` says which 
 ### Sizing the command to its lease
 
 A lease of weight W allows W × `[jobs] per_slot` jobs. `hold` sets two groups of variables
-(`--no-job-env` sets none).
+(`--no-job-env` sets none, and takes away an enclosing lease's `LEASEHOLD_SET`,
+`LEASEHOLD_JOBS` and `LEASEHOLD_THREADS`).
 
-How many jobs or worker processes a tool fans out to is set to the job count:
+The job count goes to the variables that say how many jobs or worker processes a tool fans
+out to:
 
 | Variable | Read by |
 |---|---|
@@ -439,7 +441,7 @@ How many jobs or worker processes a tool fans out to is set to the job count:
 | `CMAKE_BUILD_PARALLEL_LEVEL` | `cmake --build` |
 | `PYTEST_XDIST_AUTO_NUM_WORKERS` | `pytest -n auto` (pytest-xdist) |
 
-The parallelism inside each process is set to the thread count:
+The thread count goes to the variables that limit the parallelism inside each process:
 
 | Variable | Read by |
 |---|---|
@@ -451,39 +453,68 @@ The parallelism inside each process is set to the thread count:
 | `GOMAXPROCS` | Go programs, `go build` and `go test` included |
 | `POLARS_MAX_THREADS` | Polars |
 | `RAYON_NUM_THREADS` | Rust programs using rayon |
+| `NUMBA_NUM_THREADS` | Numba, as a ceiling: `numba.set_num_threads()` above it is an error, which keeps the lease's limit |
 | `LOKY_MAX_CPU_COUNT` | joblib and loky process pools: scikit-learn's `n_jobs=-1` |
 | `DASK_NUM_WORKERS` | Dask's threaded and multiprocessing schedulers (the `num_workers` setting) |
 | `PYTHON_CPU_COUNT` | Python 3.13 and later: `os.cpu_count()` and `os.process_cpu_count()`, and so `multiprocessing`, `ProcessPoolExecutor` and Dask's default worker count |
 
-`NUMBA_NUM_THREADS` is not set: Numba takes it as a ceiling, and `numba.set_num_threads()`
-above it is an error.
+With `PYTHON_CPU_COUNT` at the same count, `os.cpu_count()` agrees with Numba's ceiling.
 
 The thread count is the job count unless the command's `threads` says otherwise: `hold
---threads N` (or `--threads jobs`), else the matching [`[commands]` rule's](#which-commands-take-a-lease-commands)
-`threads`. A count above the job count is cut to it. With the default, every variable gets the
-job count.
+--threads N` (or `--threads jobs`), else what the [`[commands]` rules](#which-commands-take-a-lease-commands)
+give the command line. Each program on the line takes its own rule's `threads`, and the line
+gets the largest of them, the job count if any rule has `"jobs"` (`hold -- sh -c "cargo test
+&& pytest -n 4"` gets the job count). A count above the job count is cut to it. With the
+default every variable gets the job count, as in 0.3.0.
 
-**A value you chose wins.** A variable already set is left alone, unless a lease around this
-one set it: `hold` lists the names it set in `LEASEHOLD_SET`, and a `hold` inside it sets those
-to its own lease's values. `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` are
-one family: when you set any of them, `hold` sets none of them, since OpenBLAS would read its
-own variable before your `OMP_NUM_THREADS` and PyTorch would let `MKL_NUM_THREADS` override
-it. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are always this lease's: the job count, and the
-thread count in effect (your value of the family when you set one: `OMP_NUM_THREADS`, else
-`OPENBLAS_NUM_THREADS`, else `MKL_NUM_THREADS`).
+A variable already set when `hold` starts is yours, and `hold` leaves it alone, unless the
+lease the command runs in set it to the value it still has. `hold` records each name it set,
+with its value, in `LEASEHOLD_SET` (`OMP_NUM_THREADS=4,GOMAXPROCS=4`), and reads it only
+beside `LEASEHOLD_LEASE_ID`. A `hold` inside a lease sets those names to its own lease's
+values; one you changed since (`export OMP_NUM_THREADS=3` inside the lease, or
+`OMP_NUM_THREADS=3 leasehold hold ...`) is yours again, and one you unset is set again. A
+value you set equal to the lease's cannot be told from it. A lease started by leasehold 0.3.0
+records nothing, so a `hold` inside it takes its values for yours.
 
-**Worker processes and N × N threads.** A command whose jobs are worker processes would, with
-the job count in both groups, let each of N workers start an N-thread BLAS or OpenMP pool: N × N
-threads on N jobs' worth of CPU. The built-in rules give an xdist run (`pytest` or `py.test`
-with `-n N`, `-nN`, `-n=N`, `--numprocesses N` or `--numprocesses=N`, N a count, `auto` or
-`logical`) `threads = 1`; a serial `pytest`, tox, nox and every other built-in rule have the
-job count. This covers an xdist run through `hold`, through a PATH shim, and through a shim
-under a lease that set the variables (`hold -- make test`, whose `pytest -n 4` the pytest shim
-runs with one thread per process, in the same lease). It does not cover an xdist run leased by
-the [Claude Code plugin](#the-claude-code-plugin), which never changes a command's
-environment, nor one tox or nox starts in its own virtualenv, whose `pytest` comes before the
-shim on PATH: set `threads` in a rule of your own for tox or nox, or `OMP_NUM_THREADS` in
-their config.
+`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` are one family. When you set
+one of them, `hold` gives each of the others you left unset the same value, so OpenBLAS and
+PyTorch follow your choice; `OMP_NUM_THREADS` decides, else `OPENBLAS_NUM_THREADS`, else
+`MKL_NUM_THREADS`. A value that is not a plain count (`4,2`) is not copied, and
+`LEASEHOLD_THREADS` then reports the lease's thread count. `LEASEHOLD_JOBS` and
+`LEASEHOLD_THREADS` are always this lease's.
+
+A command whose jobs are worker processes would, with the job count in both groups, let each
+of N workers start an N-thread BLAS or OpenMP pool: N × N threads on N jobs' worth of CPU. The
+built-in xdist rule gives a pytest run that starts xdist workers `threads = 1`. A run starts
+them when, reading the config file's `addopts`, then `PYTEST_ADDOPTS`, then the command line,
+the last `-n N` or `--numprocesses N` has N above 0 (`auto`, `logical` or a count; also written
+`-nN`, `-n=N`, `--numprocesses=N`, or after other short flags as in `-vn 4`). Arguments are
+read one at a time: an option's value (`-k '-n 4'`) and anything after `--` do not count. The
+config file is the one pytest would read: `-c`/`--config-file`, else the first of
+`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml` (with
+`[tool.pytest]` or `[tool.pytest.ini_options]`), `tox.ini` (with `[pytest]`) and `setup.cfg`
+(with `[tool:pytest]`), looking from the common directory of the path arguments, or the
+directory the command runs in, upwards. A file that cannot be read counts as none. A serial
+`pytest`, tox, nox and every other built-in rule have the job count.
+
+This covers a pytest run started by `hold` itself, by a PATH shim, and by a PATH shim inside
+another lease: under `hold -- make test`, the pytest shim takes no second lease and gives
+`pytest -n 4` one thread per worker within it (it only ever lowers the lease's count, and asks
+the daemon for at most 0.3 s). Some runs are not covered:
+
+- `python -m pytest`, or a virtualenv's own `pytest`, run by a script or makefile inside a
+  lease passes through no shim; only `hold` itself (`hold -- python -m pytest -n 4`) and a
+  shim see it.
+- A command leased by the [Claude Code plugin](#the-claude-code-plugin), which never changes
+  a command's environment.
+- tox 4 passes none of these variables into its environments by default, and a tox or nox
+  environment's `pytest` comes before the shim on PATH. Give the environment the counts with
+  `pass_env` (`pass_env = OMP_NUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS,
+  PYTEST_XDIST_AUTO_NUM_WORKERS`), or set them in one that runs `pytest -n` with `set_env =
+  OMP_NUM_THREADS=1`.
+- A `[[commands.rule]]` of your own for pytest is tried before the built-in rules, so it is
+  chosen over the xdist rule. Give it `threads = 1` if its runs use xdist, or add a second
+  rule for them with `args` and `threads = 1` beside it.
 
 `hold --jobserver` also hands the command a GNU make jobserver: a named pipe holding one token
 fewer than the job count, announced in `MAKEFLAGS` as `--jobserver-auth=fifo:PATH` (the protocol
@@ -634,7 +665,8 @@ them to run more at once ([two at once](#your-own-daemon), opt-in).
 A weight is both what a command costs in slots and the job count it is given. A rule's
 `threads` sets the parallelism inside each process ([sizing](#sizing-the-command-to-its-lease)):
 `"jobs"`, the job count (the default), or a count of at least 1; the built-in xdist rule has
-1. Among
+1. A config rule for pytest without `args` is tried before it, so give such a rule
+`threads = 1` if its runs use xdist ([sizing](#sizing-the-command-to-its-lease)). Among
 one source's rules the heaviest match wins. The daemon clamps each weight to the most its pool
 could ever grant one lease, beside the other pools' reservations and standing work. `leasehold commands` lists the rules; `leasehold commands --test "CMD"` says which
 one a command matches.
