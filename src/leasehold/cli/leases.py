@@ -95,7 +95,15 @@ def register(sub) -> None:
         "--no-job-env",
         dest="job_env",
         action="store_false",
-        help="leave CARGO_BUILD_JOBS, GOMAXPROCS and the other job-count variables alone",
+        help="leave CARGO_BUILD_JOBS, OMP_NUM_THREADS and the other job and thread variables alone",
+    )
+    s.add_argument(
+        "--threads",
+        type=_threads,
+        metavar="N|jobs",
+        help="the thread count OMP_NUM_THREADS and the other per-process thread-pool variables "
+        "get: N (at most the job count) or jobs, the job count. Default: the matching "
+        "[commands] rule's threads, else jobs",
     )
     s.add_argument(
         "--if-unavailable",
@@ -154,8 +162,17 @@ def _hold(args, ctx) -> int:
         job_env=args.job_env,
         jobserver=args.jobserver,
         memory=args.memory,
+        threads=args.threads,
         if_unavailable=args.if_unavailable,
     )
+
+
+def _threads(value: str) -> int | str:
+    if value == "jobs":
+        return value
+    if value.isdigit() and int(value) >= 1:
+        return int(value)
+    raise argparse.ArgumentTypeError(f"{value!r} is not jobs or a count of at least 1")
 
 
 def _memory(value: str) -> str:

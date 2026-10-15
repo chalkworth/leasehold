@@ -11,9 +11,9 @@ and `light_weight` for JavaScript tooling, both set in `[commands]`.
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from leasehold import shell
 from leasehold.model import Name
@@ -22,7 +22,8 @@ from leasehold.units import declared_to_bytes
 
 class CommandRule(BaseModel):
     """`weight` slots (in `pool`, else the kind's) for a command that runs one of `programs`
-    with arguments in which `args` is found, held to `memory` when contained."""
+    with arguments in which `args` is found, held to `memory` when contained, each of its
+    processes given `threads` threads (`leasehold.jobs`)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -33,6 +34,9 @@ class CommandRule(BaseModel):
     pool: Name | None = None
     #: Memory the command is held to when contained (`MemoryHigh`), a size such as `4g`.
     memory: str | None = None
+    #: The size of each process's own thread pool (OpenMP, BLAS and the like): "jobs", the
+    #: lease's job count, or a count of at least 1 (never more than the job count).
+    threads: Literal["jobs"] | Annotated[StrictInt, Field(ge=1)] = "jobs"
 
     @field_validator("memory")
     @classmethod
@@ -52,8 +56,10 @@ class CommandRule(BaseModel):
         return value
 
 
-def _rule(programs: str, weight: int, args: str | None = None) -> CommandRule:
-    return CommandRule(programs=programs.split(), weight=weight, args=args)
+def _rule(
+    programs: str, weight: int, args: str | None = None, threads: int | str = "jobs"
+) -> CommandRule:
+    return CommandRule(programs=programs.split(), weight=weight, args=args, threads=threads)
 
 
 #: The weights of the built-in rules when `[commands]` sets none.
@@ -63,9 +69,10 @@ LIGHT_WEIGHT = 2
 
 def default_rules(heavy: int = HEAVY_WEIGHT, light: int = LIGHT_WEIGHT) -> tuple[CommandRule, ...]:
     """The built-in rules: builds and test runs that use every core they are given, at weight
-    `heavy`, and JavaScript tooling at weight `light`."""
+    `heavy`, and JavaScript tooling at weight `light`. pytest's jobs are worker processes
+    (pytest-xdist), each of which may run a BLAS or OpenMP pool, so each gets one thread."""
     return (
-        _rule("pytest py.test tox nox", heavy),
+        _rule("pytest py.test tox nox", heavy, threads=1),
         _rule(
             "cargo", heavy, r"^(build|b|test|t|check|c|clippy|bench|run|r|nextest|doc|install)\b"
         ),

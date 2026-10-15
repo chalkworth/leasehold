@@ -181,7 +181,7 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     )
     code, answer = wait_for_grant(client, request, settings.wait_s, _say)
     if code is None:
-        return run_leased(client, argv, request, answer, memory=rule.memory)
+        return run_leased(client, argv, request, answer, memory=rule.memory, threads=rule.threads)
     if code == EXIT_BUSY and settings.when_busy == "deny":
         why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
         _say(f"not running {program}: {why}. {busy.ADVICE}")

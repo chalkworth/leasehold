@@ -107,6 +107,30 @@ def test_rules_are_checked_in_the_config(tmp_path):
         )
 
 
+def test_a_rule_gives_its_processes_jobs_threads_or_a_count():
+    def threads(value):
+        return CommandSettings(rule=[{"programs": ["x"], "weight": 1, "threads": value}])
+
+    assert CommandSettings(rule=[{"programs": ["x"], "weight": 1}]).rule[0].threads == "jobs"
+    assert threads(3).rule[0].threads == 3 and threads("jobs").rule[0].threads == "jobs"
+    for bad in (0, -1, "two", "3", True, 1.5):
+        with pytest.raises(ValueError, match="threads"):
+            threads(bad)
+
+
+def test_pytest_workers_get_one_thread_each_and_builds_the_job_count():
+    rules = {r.programs[0]: r for _src, r in CommandSettings().rules()}
+    assert rules["pytest"].threads == 1
+    assert rules["cargo"].threads == rules["make"].threads == "jobs"
+
+
+def test_a_rule_served_without_threads_gives_the_job_count():
+    """A daemon older than the setting serves rules without it."""
+    assert shell.Rule.of({"programs": ["pytest"], "weight": 4}).threads == "jobs"
+    assert shell.Rule.of({"programs": ["x"], "weight": 1, "threads": 2}).threads == 2
+    assert shell.Rule.of({"programs": ["x"], "weight": 1, "threads": 0}).threads == "jobs"
+
+
 def test_the_daemon_serves_rules_its_pools_can_grant(daemon):
     """The test machine's work pool may hold 2, so every rule asks for at most 2."""
     answer = Client(daemon.path).commands()
@@ -115,6 +139,9 @@ def test_the_daemon_serves_rules_its_pools_can_grant(daemon):
     assert all(r["pool"] == "work" and 1 <= r["weight"] <= 2 for r in answer["rules"])
     served = shell.served(answer)
     assert shell.match(served.rules, "uv run pytest").rule.weight == 2
+    assert shell.match(served.rules, "uv run pytest").rule.threads == 1
+    assert shell.match(served.rules, "cargo build").rule.threads == "jobs"
+    assert all("threads" in r for r in answer["rules"])
 
 
 def _top_level_help() -> str:

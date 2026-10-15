@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 #: A stand-in heavy program: prints what lease it runs under.
 FAKE = """#!/bin/sh
 echo "lease=${LEASEHOLD_LEASE_ID:-none} weight=${LEASEHOLD_WEIGHT:-none} \\
-jobs=${CARGO_BUILD_JOBS:-none} args=$*"
+jobs=${CARGO_BUILD_JOBS:-none} omp=${OMP_NUM_THREADS:-none} args=$*"
 """
 
 
@@ -32,7 +32,7 @@ def setup(tmp_path, sock_dir, request):
         socket=str(sock_dir / "s.sock"),
         commands={
             "defaults": False,
-            "rule": [{"programs": ["fakebuild"], "args": "^build", "weight": 2}],
+            "rule": [{"programs": ["fakebuild"], "args": "^build", "weight": 2, "threads": 1}],
             "wait_s": 1,
             "when_busy": getattr(request, "param", "run"),
         },
@@ -69,7 +69,7 @@ def test_a_matching_run_gets_a_lease_sized_to_its_rule(setup):
     *_, env = setup
     done = run(env, "build", "--release")
     assert done.returncode == 0, done.stderr
-    assert "weight=2 jobs=2 args=build --release" in done.stdout
+    assert "weight=2 jobs=2 omp=1 args=build --release" in done.stdout  # the rule's threads
     assert "lease=none" not in done.stdout
 
 
