@@ -6,3 +6,4 @@ dist/
 .ruff_cache/
 .import_linter_cache/
 /bench-results/
+/sim-results/

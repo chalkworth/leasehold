@@ -6,7 +6,7 @@ here.
 ## Checks
 
 ```sh
-uv sync
+uv sync --group bench     # the bench group adds SimPy; without it tests/test_sim.py is skipped
 uv run pytest -q          # about a minute; daemon tests use real unix sockets under /tmp
 uv run ruff check && uv run ruff format --check
 uv run lint-imports       # the layer contracts in .importlinter
