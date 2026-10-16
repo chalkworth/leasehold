@@ -388,13 +388,22 @@ conditions, 6 for three, 10 for five. `compare` says so when the rounds it reads
 whole number of cycles.
 
 `--round N --dir DIR` runs round N alone into DIR. The first invocation calibrates and writes
-`spec.json`, with the run's sizes under `args`: the preset and duration, agents, `--mem-gib`,
+`spec.json`. Under `args` go the run's sizes: the preset and duration, agents, `--mem-gib`,
 `--cap-gib`, `--swap-gib`, `--weights`, `--memory-budget`, `--slice-weight`, and whether
-`--git-repo` was given. It also records the commit and the leasehold version. Later invocations
-reuse it. They refuse to run if they name another schedule (conditions, seed base, agents,
-preset or workload) or other sizes, or run on another commit or leasehold version. A runner can
-run one round per invocation and lose at most a round when it stops. A run that is run again
-moves its old directory to `DIR/superseded/`.
+`--git-repo` was given. Under `harness` go the settings that change what a run measures:
+`--no-scope`, `--no-wait`, `--drop-caches` and `--allow-dirty`. The file also records the
+commit, whether tracked files had uncommitted changes, the leasehold version and the machine.
+
+Later invocations reuse `spec.json`, and refuse to run when anything recorded there differs:
+another schedule (conditions, seed base, agents, preset or workload), other sizes or harness
+settings, another commit, checkout state or leasehold version, or another machine (its class,
+CPUs, memory, swap, kernel or virtualisation). A runner can run one round per invocation and
+lose at most a round when it stops. A run that is run again moves its old directory to
+`DIR/superseded/`.
+
+A run refuses to start when tracked files have uncommitted changes, since the recorded commit
+would not be the code that ran. `--allow-dirty` runs anyway and is recorded. `--tiny` and
+`--dry-run` skip the check.
 
 A run that ran is still invalid if its inner process failed, if a thread of the harness (an
 agent or the sampler) raised, or if the number of jobs that ran is not the number its plan
@@ -461,19 +470,28 @@ A gate file has:
 - `[test] alpha` (one-sided), `[[metrics]]` (each a summary column and its `margin`), `[hard]`
   (`failed_jobs`, `oom_kills`, `psi_max`, `psi_over_control`) and `[order] sequential`.
 
-**What `compare` refuses.** It judges only results it can pool, and says why it refuses any
-other. It refuses a results directory whose seed base is not the gate's, so a pilot's rounds
-are never pooled with a gate's. It refuses one whose workload the gate does not name, or whose
-recorded `args` differ from that workload's `args`. It refuses two runs of one condition in one
-round of one workload, as when a directory is passed twice. It refuses runs from more than one
-commit, leasehold version or machine class. And it refuses a round whose control and candidate
-ran different seeds.
+**What `compare` refuses.** `compare` judges only results it can pool, and says why it refuses
+the rest:
+
+- a results directory whose seed base is not the gate's, so a pilot's rounds are never pooled
+  with a gate's;
+- a workload the gate does not name, or recorded `args` that differ from that workload's;
+- two runs of one condition in one round of one workload, as when a directory is passed twice;
+- runs from more than one commit, checkout state, leasehold version, machine class or machine
+  (CPUs, memory, swap, kernel, virtualisation), or directories with different harness settings;
+- a round whose control and candidate ran different seeds.
 
 **Which rounds count.** The unit is the round. A round counts for a candidate when its control
 run and its candidate run are both valid and the control broke no hard rule. A round that does
 not count is listed in the report with the reason. The verdict uses exactly the first N rounds
 that count, where N is what the gate asks for. Rounds after those are listed as extra and never
-enter the verdict, so running more rounds cannot change it.
+enter the verdict. N is fixed once the blind look has been taken (below), and from then on
+running more rounds cannot change the verdict.
+
+A run that was run again keeps its old directory under `superseded/`. The report lists each
+superseded run in the rounds it judges, with the reason it was replaced. Its hard-rule breaks
+still count: a superseded candidate run with an OOM kill fails the candidate, and a superseded
+control run with one makes its round not count. A rerun cannot hide a break.
 
 **The test.** In each of the N rounds, `compare` takes d = ln(candidate / control) for each
 metric. Over the rounds it gives the mean and SD of d, and a one-sided upper bound,
@@ -488,52 +506,80 @@ its round counts or not. A failed job, an OOM kill or an abort breaks one. So do
 pressure: PSI `some` max above `psi_max` (10%) and above the control's in the same round plus
 `psi_over_control` (5 points), both at once. The report gives both arms' PSI max per round. A
 broken hard rule fails a candidate at once. A control run with a failed job, an OOM kill or an
-abort makes its round not count. Without a broken rule, fewer than N rounds, or a metric
-missing in any of the N, makes the verdict `incomplete`.
+abort makes its round not count.
+
+Memory pressure needs both arms' PSI. A round where the candidate's PSI is missing does not
+count, and neither does one where the candidate is above `psi_max` and the control's PSI is
+missing; neither is a break. Without a broken rule, fewer than N rounds, or a metric missing in
+any of the N, makes the verdict `incomplete`.
 
 **The permutation check.** Beside each bound, `compare` reports a sign-permutation test of the
-same hypothesis. It is exact over all 2^N sign flips up to 12 rounds. It cannot reach 0.05 with
-fewer than 5 rounds. It does not change the verdict.
+same hypothesis, exact over all 2^N sign flips up to 12 rounds. With fewer than 5 rounds it
+cannot reach 0.05. The verdict does not depend on it.
 
 **Screens and A/A runs.** A `screen` gate only drops arms. An arm goes when its geometric-mean
 wake or makespan ratio is above the gate's limit, or it breaks a hard rule. At most
 `max_survivors` stay. With fewer than `planned` rounds that count, an arm is `incomplete`. An
-`aa` gate runs one condition as two arms (`arm=a`, `arm=b`) over `planned` rounds. It reports
+`aa` gate runs one condition as two arms (`arm=a`, `arm=b`) over `planned` rounds and reports
 the paired SD of every metric. It passes when the two-sided interval of `aa.metric`'s mean log
 ratio contains 0 and that metric's paired SD is at most `max_paired_sd`.
 
 **The plan rule.** A gate's `[plan]` says, before the A/A run, how its SDs set the gate's rounds
 and margins. A candidate passes only if it passes every metric on every workload, so the rule
-looks at joint power. That is the chance a candidate equal to the control (a true ratio of 1)
-passes all of them, taking the metrics and workloads as independent: the product of each
-metric's power to pass its margin, raised to the number of workloads. The gate runs the fewest
-rounds from `min_rounds` (8) to `max_rounds` (12) whose joint power is at least `joint_power`
-(0.8). If no count up to 12 reaches it, the throughput margins (makespan and job mean) become
-1.10 and the search runs again. The latency margins never widen. If 12 rounds still fall
-short, the gate runs 12 and the plan prints the joint power it has as a known limit. Power
-comes from the noncentral t distribution, integrated numerically in the standard library.
+looks at joint power: the chance a candidate equal to the control (a true ratio of 1) passes all
+of them. The metrics and workloads are taken as independent, so joint power is the product of
+each metric's power to pass its margin, raised to the number of workloads. Power comes from the
+noncentral t distribution, integrated numerically in the standard library.
+
+The rule only considers round counts that are a whole number of Williams cycles of the gate's
+arms, so the order stays balanced: 8, 10 or 12 for two arms (the control and one candidate), and
+only 12 for three, which is why `max_rounds` is 12. The gate runs the fewest of those, from
+`min_rounds` (8) up, whose joint power is at least `joint_power` (0.8). If none reaches it, the
+throughput margins (makespan and job mean) become 1.10 and the search runs again. The latency
+margins never widen. If the largest count still falls short, the gate runs it, and the plan
+prints the joint power it has as a known limit.
 
 The A/A runs only the `full` workload. Its SDs stand for `memheavy` too, and the plan says so.
 
-The plan prints each metric's power and the joint power at the rounds it chose. With latency
-SDs of 0.29 on both workloads:
+With latency SDs of 0.29 on both workloads, the plan gives:
 
-| throughput SD | rounds | throughput margins | joint power |
-|---|---|---|---|
-| 0.03 | 8 | 1.05 | 0.86 |
-| 0.06 | 8 | 1.10 | 0.86 |
-| 0.08 | 10 | 1.10 | 0.84 |
+| throughput SD | two arms: rounds, throughput margins, joint power | three arms |
+|---|---|---|
+| 0.03 | 8, 1.05, 0.86 | 12, 1.05, 0.99 |
+| 0.06 | 8, 1.10, 0.86 | 12, 1.10, 0.99 |
+| 0.08 | 10, 1.10, 0.84 | 12, 1.10, 0.94 |
 
 At an SD of 0.06 and a margin of 1.05, each throughput metric has a power of 0.84 at 12
 rounds. Over four metrics and two workloads that leaves a joint power near 0.5, so the margins
 widen. A fail is evidence against a candidate only when the plan showed power for it.
 
+**The frozen plan.** The plan binds the gate. Once the pilot has named the candidates, and
+before any round of the gate runs, `compare --plan --write` writes it to a file next to the
+gate:
+
+```sh
+uv run python bench/run.py compare bench-results/aa --gate bench/gates/aa.toml \
+  --plan bench/gates/defaults.toml --arms 3 --write bench/gates/defaults.plan.toml
+```
+
+`--arms` is the control and each candidate. The file holds the arm count and its Williams
+cycle, the rounds, every metric's margin after any widening, the A/A's SDs and joint power,
+and the SHA-256 of the A/A's results and the A/A's commit. It is written only from an A/A that
+passed. The gate names the file in `[plan] frozen`. `compare` gives no verdict on the gate
+without it, or with a plan for another arm count. It takes the gate's planned rounds and
+margins from the file, in place of those written in the gate. The report names the file and
+gives the joint power at the rounds the verdict used.
+
 **The blind look.** A confirmatory gate's runs are scheduled for `extend_to` rounds from the
 start (`--rounds 12`) and stop after the rounds the gate needs. After `look_after` rounds,
-`--blind-sd` prints the pooled paired SD of each metric, pooled over candidates and workloads.
-It also prints the rounds the plan rule asks for at those SDs, between `planned` and
-`extend_to`, without widening any margin. It says nothing about which arm is ahead, so the look
-cannot stop a run early for success. The verdict then uses that many rounds.
+`--blind-sd` prints the pooled paired SD of each metric, pooled over candidates and workloads,
+and the rounds the plan rule asks for at those SDs. Those are the frozen plan's rounds, or more
+by whole Williams cycles up to `extend_to`, with no margin widened. Nothing in it says which arm
+is ahead, so the look cannot stop a run early for success.
+
+The look is fixed the first time it is ready, when every candidate has `look_after` rounds that
+count. `compare` records it then, as `blind-<gate>.json` in the first results directory, and
+every later `--blind-sd` and verdict uses the recorded look. The verdict uses that many rounds.
 
 **The report.** Without `--blind-sd`, `compare` prints a markdown report. It writes the report,
 with the same figures as JSON, to `DIR/compare-<gate>.md` and `.json` (`--out` for another
@@ -544,19 +590,21 @@ The gates so far:
 
 - [`aa.toml`](../bench/gates/aa.toml): fixed weight 4 against itself, 4 rounds, on the `full`
   workload. It passes if the interval of the makespan ratio contains 1 and the paired SD is at
-  most 0.06. Its SDs set the defaults gate's rounds and margins by that gate's `[plan]`,
-  for both of that gate's workloads.
+  most 0.06. Its SDs set the defaults gate's frozen plan, for both of that gate's workloads.
 - [`pilot.toml`](../bench/gates/pilot.toml): a screen of fixed 4 against `w=3-3,h=1`, `w=2-4`,
   `w=2-3,kept=3` and `w=4-8` over 3 rounds (seeds 101 to 103), on the `full` workload. It drops
   an arm whose wake p99 ratio is above 2.0 or makespan ratio above 1.15, or that breaks a hard
-  rule, and keeps at most two.
+  rule, and keeps at most two. Five arms have a Williams cycle of 10 rounds, so in 3 rounds the
+  arms run in unbalanced positions. `compare` says so, and the screen's thresholds are coarse
+  for that reason.
 - [`defaults.toml`](../bench/gates/defaults.toml): the confirmatory gate for what leasehold
   recommends for test runs, on the `full` and `memheavy` workloads. The bench measures a
   `hold --weight` range together with its pool settings (kept CPUs, headroom). It does not test
-  a generated heavy rule: `[commands] heavy_weight` takes one number, not a range. 8 rounds, or
-  up to 12 by the plan rule at the blind look after 4. Margins: makespan and job mean 1.05
-  (both 1.10 if the plan rule calls for it), wake p99 and `git status` p95 1.5. Its
-  candidates are filled in after the pilot, and `compare` refuses it until they are.
+  a generated heavy rule: `[commands] heavy_weight` takes one number, not a range. Its rounds
+  and margins come from its frozen plan, `bench/gates/defaults.plan.toml`. Before widening, the
+  margins are 1.05 for makespan and job mean (1.10 if the plan widens them) and 1.5 for wake p99
+  and `git status` p95. Its candidates are filled in after the pilot, and `compare` refuses it
+  until they are and its plan is frozen.
 
 The workloads are pinned in the gate files and `compare` checks them against each run's
 `spec.json`:
@@ -611,7 +659,7 @@ for r in 1 2 3 4; do
     --dir bench-results/aa --round $r
 done
 uv run python bench/run.py compare bench-results/aa --gate bench/gates/aa.toml \
-  --plan bench/gates/defaults.toml
+  --plan bench/gates/defaults.toml --arms 3
 ```
 
 The pilot, `bench/gates/pilot.toml`:
@@ -625,9 +673,17 @@ done
 uv run python bench/run.py compare bench-results/pilot --gate bench/gates/pilot.toml
 ```
 
-The defaults gate, `bench/gates/defaults.toml`, once its candidates are in it. Both workloads
-are scheduled for 12 rounds, and run round by round. After round 4 of both comes the blind
-look, which says whether to stop after 8 rounds or go on:
+The defaults gate, `bench/gates/defaults.toml`, once its candidates are in it. First freeze
+its plan from the A/A results, with `--arms` the control and each candidate:
+
+```sh
+uv run python bench/run.py compare bench-results/aa --gate bench/gates/aa.toml \
+  --plan bench/gates/defaults.toml --arms 3 --write bench/gates/defaults.plan.toml
+```
+
+Both workloads are scheduled for 12 rounds, and run round by round. After round 4 of both
+comes the blind look, which fixes how many rounds the verdict uses: the frozen plan's, or more
+by whole cycles:
 
 ```sh
 ARMS='lh-enforced@w=4,CANDIDATE-1,CANDIDATE-2'
@@ -639,7 +695,7 @@ for r in 1 2 3 4; do
 done
 uv run python bench/run.py compare bench-results/defaults-full bench-results/defaults-memheavy \
   --gate bench/gates/defaults.toml --blind-sd
-# then rounds 5 to 8, or to the count the look gave, the same way, and the verdict:
+# then the rounds up to the count the look gave, the same way, and the verdict:
 uv run python bench/run.py compare bench-results/defaults-full bench-results/defaults-memheavy \
   --gate bench/gates/defaults.toml
 ```

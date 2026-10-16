@@ -2,7 +2,8 @@
 
     python bench/run.py compare DIR [DIR ...] --gate bench/gates/X.toml
     python bench/run.py compare DIR [DIR ...] --gate bench/gates/X.toml --blind-sd
-    python bench/run.py compare AA-DIR --gate bench/gates/aa.toml --plan bench/gates/defaults.toml
+    python bench/run.py compare AA-DIR --gate bench/gates/aa.toml \
+        --plan bench/gates/defaults.toml --arms N [--write bench/gates/defaults.plan.toml]
 
 Provenance first. `compare` refuses results it cannot pool, and says why:
 
@@ -10,35 +11,38 @@ Provenance first. `compare` refuses results it cannot pool, and says why:
   name, or whose recorded sizes (`spec.json` `args`) differ from the workload's `args`;
 * two runs of one condition in one round of one workload (a directory passed twice, or a
   pilot beside a gate);
-* runs from more than one commit, leasehold version or machine class;
+* runs from more than one commit, checkout state, leasehold version, machine class or machine,
+  or directories with different harness settings (`spec.json` `harness`);
 * a control and a candidate run of one round with different seeds.
 
 The unit is the round. A round counts for a candidate when its control run and its candidate
-run are both valid and the control broke no hard rule (no failed job, no OOM kill, no abort).
-A round that does not count is listed with the reason. The verdict uses exactly the first N
-rounds that count, N being what the gate asks for; later rounds are reported as extra and
-never enter it. In each of the N rounds, each co-primary metric gives one paired log ratio,
-d = ln(candidate / control). Over the N rounds come the mean, the SD and the one-sided upper
-bound mean + t(1 - alpha, N - 1) * SD / sqrt(N). A metric passes when exp(upper bound) is under
-its margin.
+run are both valid, the control broke no hard rule (no failed job, no OOM kill, no abort), and
+the memory-pressure rule can be judged. A round that does not count is listed with the reason.
+The verdict uses exactly the first N rounds that count, N being what the gate asks for; later
+rounds are reported as extra and never enter it. In each of the N rounds, each co-primary
+metric gives one paired log ratio, d = ln(candidate / control). Over the N rounds come the
+mean, the SD and the one-sided upper bound mean + t(1 - alpha, N - 1) * SD / sqrt(N). A metric
+passes when exp(upper bound) is under its margin.
 
 A candidate passes only when every metric passes on every workload and it broke no hard rule.
 This is an intersection-union test, so the number of metrics needs no correction. The hard
 rules are checked on every candidate run up to the last of the N rounds, whether or not its
 round counts: no failed job, no OOM kill, no abort other than the harness's own failure, and
 memory pressure (PSI `some` max) not above `psi_max` and the control's plus `psi_over_control`
-at once. A broken hard rule fails a candidate at once. Otherwise, fewer than N rounds, or a
-metric missing in any of the N, makes the verdict `incomplete`.
+at once. Without both arms' PSI the pressure rule cannot break; the round does not count. A run
+replaced by a rerun (under `superseded/`) is listed, and its breaks still count. A broken hard
+rule fails a candidate at once. Otherwise, fewer than N rounds, or a metric missing in any of
+the N, makes the verdict `incomplete`.
 
-A sign-permutation test of the same hypothesis is reported beside each t bound as a check. It
-shifts d by ln(margin) and is exact over all 2^N sign flips up to 12 rounds (else 20 000 seeded
-draws). It does not change the verdict.
+A sign-permutation test of the same hypothesis is reported beside each t bound as a check,
+with d shifted by ln(margin). It is exact over all 2^N sign flips up to 12 rounds (else 20 000
+seeded draws), and the verdict does not depend on it.
 
 A gate has one of three kinds:
 
 * `confirmatory`: candidates in their listed order; with `sequential = true`, a candidate is
-  tested only if the one before it passed. N is `rounds.planned`, or more after the blind look
-  (below), up to `rounds.extend_to`.
+  tested only if the one before it passed. N is the frozen plan's rounds, or more by whole
+  Williams cycles after the blind look (below), up to `rounds.extend_to`.
 * `screen`: drops arms and never promotes one. N is `rounds.planned`. An arm goes if the
   geometric mean of its wake or makespan ratio is above the gate's limit, or it breaks a hard
   rule; with fewer than N rounds it is `incomplete`. At most `max_survivors` stay, the best by
@@ -50,19 +54,26 @@ A gate has one of three kinds:
 The plan. Each gate file states its rule in `[plan]`. The joint power at N rounds is the
 chance that a candidate equal to the control passes every metric on every workload, taking the
 metrics and workloads as independent: the product of each metric's power to pass its margin,
-raised to the number of workloads. The gate runs the fewest rounds from `min_rounds` (8) to
-`max_rounds` (12) whose joint power reaches `joint_power` (0.8). If none does, the margins in
-`widen` (makespan and job mean, to 1.10) take their wider values and the search runs again.
-The latency margins never widen. If 12 rounds still fall short, the gate runs 12 and the plan
-states its joint power as a known limit. `--plan GATE` applies GATE's rule to the SDs of an
-A/A run; the A/A runs one workload, and its SDs stand for all of GATE's. The blind look
-applies the same rule, with no widening, to the pooled SDs of the first `rounds.look_after`
-rounds, so a gate runs `planned` rounds, or more if the look asks for it, up to `extend_to`.
-Power comes from the noncentral t distribution, integrated numerically.
+raised to the number of workloads. The rule considers only round counts that are whole Williams
+cycles of the gate's arms, from `min_rounds` (8) to `max_rounds` (12). It takes the fewest
+whose joint power reaches `joint_power` (0.8). If none does, the margins in `widen` (makespan
+and job mean, to 1.10) take their wider values and the search runs again. The latency margins
+never widen. If the largest count still falls short, the gate runs it and the plan states its
+joint power as a known limit. Power comes from the noncentral t distribution, integrated
+numerically.
 
-`--blind-sd` prints only those pooled SDs and the rounds the rule asks for. It says nothing
-about which arm is ahead. Otherwise the report is printed, and written as markdown and JSON
-to `DIR/compare-<gate name>.md` and `.json`.
+`--plan GATE --arms N` applies GATE's rule to the SDs of an A/A run for a gate of N arms. The
+A/A runs one workload, and its SDs stand for all of GATE's. `--write FILE` freezes the plan
+there (rounds, margins after widening, the A/A's SDs, the SHA-256 of its results and its
+commit), from an A/A that passed. A confirmatory gate names that file in `[plan] frozen`, gives
+no verdict without it, and takes its planned rounds and margins from it.
+
+The blind look applies the same rule, with no widening, to the pooled SDs of the first
+`rounds.look_after` rounds: the frozen rounds, or more by whole cycles up to `extend_to`. The
+look is fixed the first time it is ready and recorded as `blind-<gate>.json` in the first
+results directory. `--blind-sd` prints only those pooled SDs and the rounds the rule asks for,
+and nothing about which arm is ahead. Otherwise the report is printed, and written as markdown
+and JSON to `DIR/compare-<gate name>.md` and `.json`.
 
 Results are matched to the gate by workload (a run's `--workload`) and by condition. A
 workload's `params` are added to every arm in it, so `lh-enforced@w=4` in a workload with
@@ -74,6 +85,7 @@ incomplete beta function (a continued fraction).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -264,6 +276,15 @@ def joint_power(n: int, sds: dict, margins: dict, alpha: float, workloads: int) 
     return each**workloads
 
 
+def round_counts(least: int, most: int, cycle: int, base: int | None = None) -> list[int]:
+    """The round counts a plan may choose, each a whole number of Williams cycles of `cycle`
+    rounds: from `least` to `most`; or, with `base`, `base` and whole cycles added to it up to
+    `most`."""
+    if base is not None:
+        return list(range(base, max(base, most) + 1, cycle))
+    return [n for n in range(least, most + 1) if n % cycle == 0]
+
+
 def plan(
     sds: dict,
     metrics: list[dict],
@@ -271,26 +292,30 @@ def plan(
     alpha: float,
     workloads: int = 1,
     widen: bool = True,
+    cycle: int = 1,
+    base: int | None = None,
 ) -> dict:
     """The gate's rounds and margins for the paired SDs `sds` (metric: SD), by `rule` (a gate's
-    `[plan]`): the fewest rounds from `min_rounds` to `max_rounds` whose joint power over every
-    metric and all `workloads` reaches `joint_power`. If none does, the margins in `widen`
-    take their wider values and the search runs again. If that falls short too, the plan is
-    `max_rounds` and says the joint power it has. A metric without an SD is left out and
-    named."""
+    `[plan]`). It takes the fewest rounds in `round_counts` whose joint power over every metric
+    and all `workloads` reaches `joint_power`. If none does, the margins in `widen` take their
+    wider values and the search runs again. If that falls short too, the plan is the largest
+    count and states its joint power. A metric without an SD is left out and named. A
+    ValueError if no whole number of cycles fits between `min_rounds` and `max_rounds`."""
     target = rule.get("joint_power", 0.8)
     least, most = rule.get("min_rounds", 8), rule.get("max_rounds", 12)
+    counts = round_counts(least, most, cycle, base)
+    if not counts:
+        raise ValueError(
+            f"no whole number of Williams cycles of {cycle} rounds lies between {least} and "
+            f"{most} rounds; raise max_rounds to at least {-(-least // cycle) * cycle}"
+        )
     wider = rule.get("widen", {}) if widen else {}
     measured = [m for m in metrics if sds.get(m["name"]) is not None]
     margins = {m["name"]: m["margin"] for m in measured}
 
     def search(margins: dict) -> int | None:
         return next(
-            (
-                n
-                for n in range(least, most + 1)
-                if joint_power(n, sds, margins, alpha, workloads) >= target
-            ),
+            (n for n in counts if joint_power(n, sds, margins, alpha, workloads) >= target),
             None,
         )
 
@@ -300,9 +325,11 @@ def plan(
         margins = margins | {k: wider[k] for k in widened}
         rounds = search(margins)
     reached = rounds is not None
-    rounds = rounds if reached else most
+    rounds = rounds if reached else counts[-1]
     return {
         "rounds": rounds,
+        "cycle": cycle,
+        "counts": counts,
         "target": target,
         "reached": reached,
         "joint_power": joint_power(rounds, sds, margins, alpha, workloads) if measured else 0.0,
@@ -333,9 +360,11 @@ def plan_text(result: dict, heading: str, note: str = "") -> str:
     lines = [heading, ""]
     if note:
         lines += [note, ""]
+    counts = ", ".join(map(str, result["counts"]))
     lines += [
-        f"Rounds: {result['rounds']}. Joint power, the chance an equal candidate passes every "
-        f"metric on {_workloads(result['workloads'])}, taking them as independent: "
+        f"Rounds: {result['rounds']}, chosen from whole Williams cycles of {result['cycle']} "
+        f"rounds ({counts}). Joint power, the chance an equal candidate passes every metric on "
+        f"{_workloads(result['workloads'])}, taking them as independent: "
         f"{result['joint_power']:.2f} (target {result['target']:.2f}).",
         "",
         "| metric | paired SD | margin | power on one workload |",
@@ -357,6 +386,49 @@ def plan_text(result: dict, heading: str, note: str = "") -> str:
     if result["missing"]:
         lines.append(f"No SD for: {', '.join(result['missing'])}; the plan leaves them out.")
     return "\n".join(lines)
+
+
+def data_digest(dirs: list[Path]) -> str:
+    """The SHA-256 of every file under `dirs`, by path, apart from what `compare` writes."""
+    h = hashlib.sha256()
+    for d in dirs:
+        for f in sorted(x for x in d.rglob("*") if x.is_file()):
+            rel = f.relative_to(d)
+            if len(rel.parts) == 1 and rel.name.startswith(("compare-", "blind-")):
+                continue
+            h.update(f"{d.name}/{rel.as_posix()}\0".encode())
+            h.update(f.read_bytes())
+            h.update(b"\0")
+    return h.hexdigest()
+
+
+def frozen_text(planned: dict, *, gate: str, arms: int, alpha: float, aa: dict) -> str:
+    """The frozen plan file `compare --plan --write` writes: what the gate runs and judges by."""
+    lines = [
+        f"# The frozen plan of gate `{gate}`, written by `bench/run.py compare --plan --write`",
+        "# from an A/A run. The gate takes its rounds and margins from this file; write it",
+        "# again rather than editing it.",
+        f"gate = {json.dumps(gate)}",
+        f"arms = {arms}",
+        f"cycle = {planned['cycle']}",
+        f"rounds = {planned['rounds']}",
+        f"workloads = {planned['workloads']}",
+        f"alpha = {alpha}",
+        f"target = {planned['target']}",
+        f"joint_power = {planned['joint_power']:.4f}",
+        f"reached = {'true' if planned['reached'] else 'false'}",
+        f"aa_gate = {json.dumps(aa['gate'])}",
+        f"aa_dirs = {json.dumps(aa['dirs'])}",
+        f"aa_data_sha256 = {json.dumps(aa['digest'])}",
+        f"aa_git_sha = {json.dumps(aa['git_sha'] or '')}",
+        "",
+        "[margins]",
+        *[f"{m['metric']} = {m['margin']}" for m in planned["metrics"]],
+        "",
+        "[sds]",
+        *[f"{m['metric']} = {m['sd']:.6f}" for m in planned["metrics"] if m["sd"] is not None],
+    ]
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -410,13 +482,51 @@ def load_gate(path: Path) -> dict:
         w["sizes"] = bench.workload_args(w["args"])
     if not gate.get("metrics") and kind != "screen":
         raise SystemExit(f"{path}: needs [[metrics]]")
+    if kind == "confirmatory" and gate["plan"]:
+        if not gate["plan"].get("frozen"):
+            raise SystemExit(f"{path}: [plan] needs frozen, the file compare --plan --write writes")
+        apply_frozen(gate, path.parent / gate["plan"]["frozen"])
     return gate
+
+
+def apply_frozen(gate: dict, where: Path) -> None:
+    """Set `gate`'s planned rounds and its margins from the frozen plan at `where`; a
+    SystemExit if there is none, or it was planned for another gate or another arm count."""
+    name = gate["gate"]["name"]
+    if not where.exists():
+        raise SystemExit(
+            f"{where} does not exist: gate {name!r} gives no verdict without its frozen plan. "
+            "Write it from the A/A results first: python bench/run.py compare AA-DIR --gate "
+            f"bench/gates/aa.toml --plan GATE-FILE --write {where}"
+        )
+    frozen = tomllib.loads(where.read_text())
+    arms = 1 + len(gate["arms"]["candidates"])
+    if frozen.get("gate") != name:
+        raise SystemExit(f"{where} is the plan of gate {frozen.get('gate')!r}, not {name!r}")
+    if frozen.get("arms") != arms:
+        raise SystemExit(
+            f"{where} was planned for {frozen.get('arms')} arms, and the gate has {arms}; "
+            f"write the plan again with --arms {arms}"
+        )
+    margins = frozen.get("margins", {})
+    missing = [m["name"] for m in gate["metrics"] if m["name"] not in margins]
+    if missing:
+        raise SystemExit(f"{where} has no margin for {', '.join(missing)}")
+    for m in gate["metrics"]:
+        m["margin"] = margins[m["name"]]
+    gate["rounds"]["planned"] = frozen["rounds"]
+    gate["frozen_plan"] = frozen | {"path": where.name}
+
+
+#: The facts of the machine a run ran on that results from one machine share.
+MACHINE_FACTS = ("cpus", "memory_bytes", "swap_bytes", "kernel", "virt")
 
 
 def collect(dirs: list[Path]) -> tuple[list[dict], list[dict]]:
     """(every run under `dirs` that has a manifest, each directory's facts). A run has its
     workload, round, seed, condition, whether it is valid and why not, the code and machine
-    it ran on, and, if it has results, its summary row."""
+    it ran on, and, if it has results, its summary row. Runs under `superseded/` are marked so,
+    with why they were replaced."""
     import run as bench
 
     records, infos = [], []
@@ -425,12 +535,21 @@ def collect(dirs: list[Path]) -> tuple[list[dict], list[dict]]:
         workload = spec.get("workload") or spec.get("preset_name")
         seed_base = spec.get("seed_base", spec.get("seed", 1) - 1)
         rounds_seen = 0
-        for manifest_path in sorted(d.glob("*/manifest.json")):
+        found = [(m, False) for m in sorted(d.glob("*/manifest.json"))]
+        found += [(m, True) for m in sorted(d.glob("superseded/*/manifest.json"))]
+        for manifest_path, superseded in found:
             m = json.loads(manifest_path.read_text())
             workdir = manifest_path.parent
             has = (workdir / "outer.json").exists()
             row = bench.summarize_condition(workdir, m["label"]) if has else None
-            rounds_seen = max(rounds_seen, m["round"])
+            if not superseded:
+                rounds_seen = max(rounds_seen, m["round"])
+            replaced = ""
+            if superseded:
+                replaced = m.get("why_invalid") or (
+                    "it stopped before it finished" if m.get("valid") is None else "it ran again"
+                )
+            machine = m.get("machine", {})
             records.append(
                 {
                     "dir": d.name,
@@ -443,8 +562,12 @@ def collect(dirs: list[Path]) -> tuple[list[dict], list[dict]]:
                     "why_invalid": m.get("why_invalid") or ("no results" if not has else ""),
                     "row": row,
                     "git_sha": (m.get("git") or {}).get("sha"),
+                    "git_dirty": (m.get("git") or {}).get("dirty"),
                     "leasehold": m.get("leasehold"),
-                    "machine_class": m.get("machine", {}).get("class"),
+                    "machine_class": machine.get("class"),
+                    "machine": [machine.get(k) for k in MACHINE_FACTS],
+                    "superseded": superseded,
+                    "replaced_why": replaced,
                 }
             )
         infos.append(
@@ -453,6 +576,7 @@ def collect(dirs: list[Path]) -> tuple[list[dict], list[dict]]:
                 "workload": workload,
                 "seed_base": seed_base,
                 "args": spec.get("args"),
+                "harness": spec.get("harness"),
                 "arms": len(spec.get("conditions", [])),
                 "rounds_seen": rounds_seen,
             }
@@ -481,8 +605,16 @@ def check_provenance(gate: dict, records: list[dict], infos: list[dict]) -> None
                 if info["args"].get(k) != sizes[info["workload"]][k]
             )
             why.append(f"{name} ran with other args than workload {info['workload']!r}: {diff}")
+    harness = sorted({json.dumps(i.get("harness"), sort_keys=True) for i in infos})
+    if len(harness) > 1:
+        why.append(
+            "the directories ran with different harness settings (--no-scope, --no-wait, "
+            f"--drop-caches, --allow-dirty): {'; '.join(harness)}"
+        )
     seen: dict[tuple, str] = {}
     for r in records:
+        if r.get("superseded"):
+            continue
         key = (r["workload"], r["condition"], r["round"])
         if key in seen:
             why.append(
@@ -492,10 +624,12 @@ def check_provenance(gate: dict, records: list[dict], infos: list[dict]) -> None
         seen[key] = r["dir"]
     for field, label in (
         ("git_sha", "commits"),
+        ("git_dirty", "states of the checkout (with and without uncommitted changes)"),
         ("leasehold", "leasehold versions"),
         ("machine_class", "machine classes"),
+        ("machine", "machines (CPUs, memory, swap, kernel, virtualisation)"),
     ):
-        values = sorted({str(r[field]) for r in records})
+        values = sorted({str(r.get(field)) for r in records})
         if len(values) > 1:
             why.append(f"the runs come from {len(values)} {label}: {', '.join(values)}")
     if why:
@@ -531,34 +665,73 @@ def _breaks(gate: dict, row: dict, harness_counts: bool) -> list[str]:
 
 def psi_break(gate: dict, cand: dict, ctrl: dict | None) -> str:
     """The memory-pressure rule: a candidate round breaks it when its PSI max is above
-    `psi_max` and above the control's in that round plus `psi_over_control` (without a control
-    run, above `psi_max` alone)."""
+    `psi_max` and above the control's in that round plus `psi_over_control`. Without the
+    control's PSI it cannot break (`psi_unjudged` makes that round not count)."""
     hard = gate["hard"]
     psi = cand.get("mem_some_max")
-    if "psi_max" not in hard or psi is None or psi <= hard["psi_max"]:
-        return ""
     base = (ctrl or {}).get("mem_some_max")
-    over = hard.get("psi_over_control", 0.0)
-    if base is not None and psi <= base + over:
+    if "psi_max" not in hard or psi is None or base is None or psi <= hard["psi_max"]:
         return ""
-    return f"memory PSI max {psi}% (control {base}%) above {hard['psi_max']}%" + (
-        f" and the control's plus {over}" if base is not None else ""
+    over = hard.get("psi_over_control", 0.0)
+    if psi <= base + over:
+        return ""
+    return (
+        f"memory PSI max {psi}% (control {base}%) above {hard['psi_max']}% and the "
+        f"control's plus {over}"
     )
+
+
+def psi_unjudged(gate: dict, cand: dict | None, ctrl: dict | None) -> str:
+    """Why the memory-pressure rule cannot be judged in a round ("": it can): the candidate's
+    PSI is missing, or it is above `psi_max` and the control's is missing."""
+    hard = gate["hard"]
+    if "psi_max" not in hard:
+        return ""
+    psi = (cand or {}).get("mem_some_max")
+    if psi is None:
+        return "the candidate's memory PSI is missing"
+    if psi > hard["psi_max"] and (ctrl or {}).get("mem_some_max") is None:
+        return (
+            f"the candidate's memory PSI max {psi}% is above {hard['psi_max']}% and the "
+            "control's is missing, so the rule cannot be judged"
+        )
+    return ""
+
+
+def _not_counting(gate: dict, c: dict | None, k: dict | None) -> str:
+    """Why a round with control run `c` and candidate run `k` does not count ("": it does)."""
+    if c is None:
+        return "no control run"
+    if k is None:
+        return "no candidate run"
+    if c["row"] and (broke := _breaks(gate, c["row"], True)):
+        return "the control broke a hard rule: " + ", ".join(broke)
+    if not c["valid"]:
+        return f"the control run is invalid: {c['why_invalid']}"
+    if not k["valid"]:
+        return f"the candidate run is invalid: {k['why_invalid']}"
+    return psi_unjudged(gate, k["row"], c["row"])
 
 
 def window(gate: dict, records: list[dict], workload: str, candidate: str, needed: int) -> dict:
     """The rounds of `candidate` against the control in `workload`: the first `needed` that
     count (`used`, as (round, control row, candidate row)), those that do not and why
     (`invalid`), those after the `needed`th (`extra`), and the hard rules the candidate broke
-    in any round up to the last used one (or any round, while fewer than `needed` count)."""
+    in any round up to the last used one (or any round, while fewer than `needed` count). A
+    superseded run in those rounds is listed; its hard-rule breaks still count, as the
+    candidate's breaks or as a reason the control's round does not count."""
     control = arm_in(gate, workload, gate["arms"]["control"])
     candidate = arm_in(gate, workload, candidate)
     runs: dict[tuple[str, int], dict] = {}
+    old: dict[tuple[str, int], list[dict]] = {}
     for r in records:
         if r["workload"] == workload and r["condition"] in (control, candidate):
-            runs[(r["condition"], r["round"])] = r
-    used, invalid, extra, hard, psi = [], [], [], [], []
-    for rnd in sorted({k[1] for k in runs}):
+            if r.get("superseded"):
+                old.setdefault((r["condition"], r["round"]), []).append(r)
+            else:
+                runs[(r["condition"], r["round"])] = r
+    used, invalid, extra, hard, psi, superseded = [], [], [], [], [], []
+    for rnd in sorted({k[1] for k in runs} | {k[1] for k in old}):
         if len(used) >= needed:
             extra.append(rnd)
             continue
@@ -568,23 +741,21 @@ def window(gate: dict, records: list[dict], workload: str, candidate: str, neede
                 f"{workload!r} round {rnd}: the control ran seed {c['seed']}, the "
                 f"candidate {k['seed']}"
             )
+        reason = ""
+        for r in old.get((control, rnd), []) + old.get((candidate, rnd), []):
+            arm = "control" if r["condition"] == control else "candidate"
+            superseded.append({"round": rnd, "arm": arm, "why": r["replaced_why"]})
+            broke = _breaks(gate, r["row"], arm == "control") if r["row"] else []
+            if broke and arm == "control":
+                reason = reason or "a superseded control run broke a hard rule: " + ", ".join(broke)
+            hard += [f"round {rnd}: a superseded run: {b}" for b in broke if arm == "candidate"]
+        ctrl_row = c["row"] if c else None
         if k and k["row"]:
-            ctrl_row = c["row"] if c else None
             hard += [f"round {rnd}: {b}" for b in _breaks(gate, k["row"], False)]
             if why := psi_break(gate, k["row"], ctrl_row):
                 hard.append(f"round {rnd}: {why}")
             psi.append((rnd, (ctrl_row or {}).get("mem_some_max"), k["row"].get("mem_some_max")))
-        reason = ""
-        if c is None:
-            reason = "no control run"
-        elif k is None:
-            reason = "no candidate run"
-        elif c["row"] and (broke := _breaks(gate, c["row"], True)):
-            reason = "the control broke a hard rule: " + ", ".join(broke)
-        elif not c["valid"]:
-            reason = f"the control run is invalid: {c['why_invalid']}"
-        elif not k["valid"]:
-            reason = f"the candidate run is invalid: {k['why_invalid']}"
+        reason = reason or _not_counting(gate, c, k)
         if reason:
             invalid.append((rnd, reason))
         else:
@@ -595,6 +766,7 @@ def window(gate: dict, records: list[dict], workload: str, candidate: str, neede
         "extra": extra,
         "hard": hard,
         "psi": psi,
+        "superseded": superseded,
         "needed": needed,
         "complete": len(used) >= needed,
     }
@@ -621,13 +793,20 @@ def _window_out(w: dict) -> dict:
         "extra": w["extra"],
         "hard": w["hard"],
         "psi": [{"round": r, "control": c, "candidate": k} for r, c, k in w["psi"]],
+        "superseded": w["superseded"],
     }
+
+
+def cycle_of(gate: dict) -> int:
+    """The Williams cycle, in rounds, of the gate's arms (the control and its candidates)."""
+    return len(schedule.williams(1 + len(gate["arms"]["candidates"])))
 
 
 def blind_sd(gate: dict, records: list[dict]) -> dict:
     """The pooled paired SD of each co-primary metric over the first `look_after` rounds that
     count, pooled over candidates and workloads, and the rounds the plan rule asks for at those
-    SDs (between `planned` and `extend_to`). Nothing about which arm is ahead."""
+    SDs: `planned` and whole Williams cycles added to it, up to `extend_to`, with no margin
+    widened. Nothing about which arm is ahead."""
     rounds = gate["rounds"]
     look = rounds.get("look_after") or rounds["planned"]
     sums: dict[str, list[float]] = {m["name"]: [0.0, 0] for m in gate["metrics"]}
@@ -643,21 +822,43 @@ def blind_sd(gate: dict, records: list[dict]) -> dict:
                     sums[spec["name"]][0] += (len(d) - 1) * sd**2
                     sums[spec["name"]][1] += len(d) - 1
     sds = {k: (math.sqrt(a / b) if b else None) for k, (a, b) in sums.items()}
-    rule = gate["plan"] | {
-        "min_rounds": rounds["planned"],
-        "max_rounds": rounds.get("extend_to", rounds["planned"]),
-    }
+    rule = gate["plan"] | {"max_rounds": rounds.get("extend_to", rounds["planned"])}
     planned = plan(
-        sds, gate["metrics"], rule, gate["test"]["alpha"], len(gate["workloads"]), widen=False
+        sds,
+        gate["metrics"],
+        rule,
+        gate["test"]["alpha"],
+        len(gate["workloads"]),
+        widen=False,
+        cycle=cycle_of(gate),
+        base=rounds["planned"],
     )
     ready = ready and not planned["missing"]
     return {
         "look_after": look,
         "ready": ready,
+        "frozen": False,
         "pooled_sd": sds,
         "rounds_needed": planned["rounds"] if ready else rounds["planned"],
         "plan": planned,
     }
+
+
+def look_once(gate: dict, dirs: list[Path], records: list[dict]) -> dict:
+    """The blind look of a confirmatory gate, fixed the first time it is ready: the one
+    recorded in `dirs` (`blind-<gate>.json`), or a new one, recorded in the first directory
+    once it is ready. Refused if two directories record different looks."""
+    name = f"blind-{gate['gate']['name']}.json"
+    found = {d.name: (d / name).read_text() for d in dirs if (d / name).exists()}
+    if len({json.dumps(json.loads(t), sort_keys=True) for t in found.values()}) > 1:
+        raise Refused(f"the blind looks recorded in {', '.join(found)} differ")
+    if found:
+        return json.loads(next(iter(found.values()))) | {"frozen": True}
+    look = blind_sd(gate, records)
+    if look["ready"] and gate["gate"]["kind"] == "confirmatory":
+        look["frozen"] = True
+        (dirs[0] / name).write_text(json.dumps(look, indent=1))
+    return look
 
 
 def evaluate(gate: dict, records: list[dict]) -> dict:
@@ -667,7 +868,7 @@ def evaluate(gate: dict, records: list[dict]) -> dict:
 
 def confirmatory(gate: dict, records: list[dict]) -> dict:
     alpha = gate["test"]["alpha"]
-    look = blind_sd(gate, records)
+    look = gate.get("look") or blind_sd(gate, records)
     needed = look["rounds_needed"]
     results, stop = [], False
     for cand in gate["arms"]["candidates"]:
@@ -716,7 +917,18 @@ def confirmatory(gate: dict, records: list[dict]) -> dict:
         # Sequential order: the next candidate is tested only after this one passed.
         if gate.get("order", {}).get("sequential", True) and verdict != "pass":
             stop = True
-    return {"kind": "confirmatory", "rounds_needed": needed, "blind": look, "results": results}
+    frozen = gate.get("frozen_plan") or {}
+    sds = frozen.get("sds") or {}
+    margins = {m["name"]: m["margin"] for m in gate["metrics"] if m["name"] in sds}
+    power = joint_power(needed, sds, margins, alpha, len(gate["workloads"])) if sds else None
+    return {
+        "kind": "confirmatory",
+        "rounds_needed": needed,
+        "blind": look,
+        "joint_power": power,
+        "plan_file": frozen.get("path"),
+        "results": results,
+    }
 
 
 def screen(gate: dict, records: list[dict]) -> dict:
@@ -839,7 +1051,7 @@ def aa(gate: dict, records: list[dict]) -> dict:
     }
 
 
-def balance_notes(infos: list[dict]) -> list[str]:
+def balance_notes(infos: list[dict], kind: str = "") -> list[str]:
     """Where the order is not balanced: a directory whose rounds are not a whole number of
     Williams cycles."""
     out = []
@@ -848,11 +1060,15 @@ def balance_notes(infos: list[dict]) -> list[str]:
             continue
         cycle = len(schedule.williams(info["arms"]))
         if info["rounds_seen"] % cycle:
-            out.append(
-                f"{info['name']}: {info['rounds_seen']} rounds of {info['arms']} arms is not a "
-                f"multiple of the Williams cycle of {cycle}, so the order is balanced only over "
-                "the whole cycles in it"
+            text = (
+                f"{info['name']}: {info['rounds_seen']} rounds of {info['arms']} arms are not a "
+                f"whole number of Williams cycles ({cycle} rounds). The arms ran in unbalanced "
+                "positions and orders, so position and carry-over effects are mixed into the "
+                "ratios"
             )
+            if kind == "screen":
+                text += ", and the screen's thresholds are coarse for that reason"
+            out.append(text + ".")
     return out
 
 
@@ -860,7 +1076,13 @@ def judge(gate: dict, dirs: list[Path]) -> dict:
     """The gate's verdict on the results in `dirs`; Refused if they cannot be judged."""
     records, infos = collect(dirs)
     check_provenance(gate, records, infos)
-    return evaluate(gate, records) | {"notes": balance_notes(infos)}
+    if gate["gate"]["kind"] == "confirmatory":
+        gate = gate | {"look": look_once(gate, dirs, records)}
+    code = {k: next((r[k] for r in records), None) for k in ("git_sha", "leasehold")}
+    return evaluate(gate, records) | {
+        "notes": balance_notes(infos, gate["gate"]["kind"]),
+        "code": code,
+    }
 
 
 # ---------------------------------------------------------------------------------------------
@@ -890,6 +1112,10 @@ def _window_lines(w: dict) -> list[str]:
             "- memory PSI max by round, control / candidate: "
             + ", ".join(f"r{p['round']} {p['control']} / {p['candidate']}" for p in w["psi"])
         )
+    lines += [
+        f"- round {x['round']}: a superseded {x['arm']} run, replaced because {x['why']}"
+        for x in w.get("superseded", [])
+    ]
     lines.append("")
     return lines
 
@@ -911,15 +1137,21 @@ def report(gate: dict, result: dict, dirs: list[Path]) -> str:
     ]
     if result["kind"] == "confirmatory":
         b = result["blind"]
-        lines += [
-            f"Rounds the verdict uses: {result['rounds_needed']}"
-            + (
-                f" (the plan rule at the pooled SDs of the first {b['look_after']} rounds)."
-                if b["ready"]
-                else f" (the blind look needs {b['look_after']} rounds of every candidate)."
-            ),
-            "",
-        ]
+        if b["ready"]:
+            how = f" (the blind look at the pooled SDs of the first {b['look_after']} rounds"
+            how += ", fixed when it was first taken)." if b.get("frozen") else ")."
+        else:
+            how = f" (the blind look needs {b['look_after']} rounds of every candidate)."
+        lines += [f"Rounds the verdict uses: {result['rounds_needed']}{how}", ""]
+        if result.get("plan_file"):
+            lines += [f"Planned rounds and margins come from `{result['plan_file']}`.", ""]
+        if result.get("joint_power") is not None:
+            lines += [
+                f"Joint power at {result['rounds_needed']} rounds, at the frozen plan's A/A "
+                f"SDs: {result['joint_power']:.2f}. This is the chance a candidate equal to the "
+                "control passes every metric on every workload.",
+                "",
+            ]
     for r in result["results"]:
         lines += [f"## `{r['candidate']}`: {r['verdict']}", ""]
         lines += [f"- {w}" for w in r["why"]] + ([""] if r["why"] else [])
@@ -963,10 +1195,12 @@ def blind_text(b: dict) -> str:
         lines.append(f"  {m['metric']}: {sd}")
     if b["ready"]:
         lines.append(f"The plan rule asks for {b['rounds_needed']} rounds.")
+        if b.get("frozen"):
+            lines.append("This look is recorded and fixed; later looks print it again.")
     else:
         lines.append(
             f"Not every candidate has {b['look_after']} rounds that count yet, or a metric has "
-            "no SD; the gate stays at its planned rounds."
+            "no SD. The gate stays at its planned rounds until a look is ready."
         )
     return "\n".join(lines)
 
@@ -986,15 +1220,26 @@ def main(argv: list[str]) -> int:
         help="with an aa gate: print the rounds and margins this gate's [plan] rule gives",
     )
     parser.add_argument(
+        "--arms",
+        type=int,
+        help="with --plan: the arms the planned gate runs (the control and each candidate), "
+        "when its file names no candidates yet",
+    )
+    parser.add_argument(
+        "--write", type=Path, help="with --plan: write the frozen plan the gate runs by here"
+    )
+    parser.add_argument(
         "--out", type=Path, help="report path without suffix (default: DIR/compare-<gate name>)"
     )
     args = parser.parse_args(argv)
+    if (args.write or args.arms) and not args.plan:
+        parser.error("--write and --arms go with --plan")
     gate = load_gate(args.gate)
     try:
         if args.blind_sd:
             records, infos = collect(args.dirs)
             check_provenance(gate, records, infos)
-            print(blind_text(blind_sd(gate, records)))
+            print(blind_text(look_once(gate, args.dirs, records)))
             return 0
         result = judge(gate, args.dirs)
     except Refused as exc:
@@ -1004,20 +1249,56 @@ def main(argv: list[str]) -> int:
     if args.plan:
         if result["kind"] != "aa":
             parser.error("--plan reads the SDs of an aa gate's results")
-        target = load_gate(args.plan) if _has_candidates(args.plan) else _load_plan_only(args.plan)
+        target = _load_plan_only(args.plan)
+        arms = args.arms or (1 + len(target["candidates"]) if target["candidates"] else None)
+        if not arms or arms < 2:
+            parser.error(
+                f"{args.plan.name} names no candidates yet; pass --arms, the arms its gate "
+                "will run (the control and each candidate)"
+            )
         names = [w["name"] for w in target["workloads"]] or ["one workload"]
-        planned = plan(
-            result["sds"], target["metrics"], target["plan"], target["test"]["alpha"], len(names)
-        )
+        try:
+            planned = plan(
+                result["sds"],
+                target["metrics"],
+                target["plan"],
+                target["test"]["alpha"],
+                len(names),
+                cycle=len(schedule.williams(arms)),
+            )
+        except ValueError as exc:
+            parser.error(f"{args.plan.name}: {exc}")
         measured = ", ".join(f"`{w}`" for w in workloads_of(gate))
         note = (
-            f"The A/A measured {measured} only; its SDs stand for every workload of the gate "
-            f"({', '.join(f'`{n}`' for n in names)})."
+            f"For {arms} arms. The A/A measured {measured} only; its SDs stand for every "
+            f"workload of the gate ({', '.join(f'`{n}`' for n in names)})."
         )
         text += "\n" + plan_text(planned, f"## Plan for `{args.plan.name}`", note)
-        if result["results"][0]["verdict"] != "pass":
+        passed = result["results"][0]["verdict"] == "pass"
+        if not passed:
             text += "\n\nThe A/A did not pass; fix the bench before planning on its SDs."
         result["plan"] = planned
+        if args.write:
+            if not passed:
+                print(text)
+                print("compare: refused: no plan is written from an A/A that did not pass")
+                return 2
+            aa_facts = {
+                "gate": gate["gate"]["name"],
+                "dirs": [d.name for d in args.dirs],
+                "digest": data_digest(args.dirs),
+                "git_sha": result["code"]["git_sha"],
+            }
+            args.write.write_text(
+                frozen_text(
+                    planned,
+                    gate=target["name"],
+                    arms=arms,
+                    alpha=target["test"]["alpha"],
+                    aa=aa_facts,
+                )
+            )
+            text += f"\n\nThe frozen plan is written to {args.write}."
     stem = args.out or args.dirs[0] / f"compare-{gate['gate']['name']}"
     stem.with_suffix(".md").write_text(text + "\n")
     stem.with_suffix(".json").write_text(
@@ -1027,17 +1308,15 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-def _has_candidates(path: Path) -> bool:
-    return bool(tomllib.loads(path.read_text()).get("arms", {}).get("candidates"))
-
-
 def _load_plan_only(path: Path) -> dict:
-    """A gate file's metrics, `[plan]` and alpha, for a gate whose candidates are not yet
-    filled in."""
+    """What `--plan` needs of a gate file: its name, candidates, metrics, `[plan]`, alpha and
+    workloads. Its candidates may not be filled in yet."""
     raw = tomllib.loads(path.read_text())
     if not raw.get("metrics"):
         raise SystemExit(f"{path}: needs [[metrics]]")
     return {
+        "name": raw.get("gate", {}).get("name", path.stem),
+        "candidates": raw.get("arms", {}).get("candidates", []),
         "metrics": raw["metrics"],
         "plan": raw.get("plan", {}),
         "test": {"alpha": raw.get("test", {}).get("alpha", 0.05)},

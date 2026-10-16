@@ -161,12 +161,21 @@ here.
     pinning its workloads' `args`, and `bench/run.py compare`, which judges results by one.
     It uses paired log ratios over exactly the first N valid rounds, one-sided t bounds, an
     intersection-union verdict, hard rules on every candidate run (memory pressure relative to
-    the control's), and a sign-permutation check. It refuses results with another seed base,
-    other `args`, duplicate rounds, mixed commits, leasehold versions or machine classes, or a
-    pair with two seeds. `--blind-sd` gives each metric's pooled SD for the blind look, and
-    `--plan GATE` applies a gate's `[plan]` rule: from an A/A run's SDs, the fewest rounds
-    from 8 to 12 whose joint power over every metric and workload is 0.8, with the
-    throughput margins widened to 1.10 if needed.
+    the control's, and never judged without it), and a sign-permutation check. Runs replaced by
+    a rerun are listed, and their hard-rule breaks still count. It refuses results with another
+    seed base, other `args`, duplicate rounds, mixed commits, checkout states, leasehold
+    versions, machine classes, machines or harness settings, or a pair with two seeds.
+  - `compare --plan GATE --arms N` applies a gate's `[plan]` rule to an A/A run's SDs: the
+    fewest rounds from 8 to 12 that are whole Williams cycles of N arms and whose joint power
+    over every metric and workload is 0.8, with the throughput margins widened to 1.10 if
+    needed. `--write FILE` freezes that plan, with the A/A results' SHA-256. A confirmatory
+    gate names the file in `[plan] frozen`, gives no verdict without it, and takes its rounds
+    and margins from it.
+  - `--blind-sd` gives each metric's pooled SD for the blind look, which may add whole cycles
+    to the frozen rounds. The look is fixed the first time it is ready (`blind-<gate>.json`).
+  - `spec.json` records `harness` (`--no-scope`, `--no-wait`, `--drop-caches`,
+    `--allow-dirty`) and whether tracked files had uncommitted changes. A run refuses to start
+    on a checkout with uncommitted changes unless `--allow-dirty` is given.
 
 ### Changed
 
@@ -177,7 +186,9 @@ here.
   plan. With three or more conditions, the order is a Williams design instead of every other
   round reversed. `spec.json` says whether `git status` was timed instead of naming the
   repository, holds the config `init` wrote (named `bench`) instead of the plan, and records
-  the run's sizes (`args`), commit and leasehold version. A resumed run must match all of them.
+  the run's sizes (`args`), commit and leasehold version. A resumed run must match all of them,
+  and the harness settings, the checkout state and the machine (class, CPUs, memory, swap,
+  kernel, virtualisation) it started with.
   The leasehold conditions' config and ledger now sit beside the daemon's socket, with a copy
   in each run's `config.toml`.
 - The benchmark's wait for a quiet machine needs memory pressure under 0.5%, not 1%. The

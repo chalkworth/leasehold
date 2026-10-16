@@ -1,0 +1,59 @@
+{
+ "label": "lh-enforced_w4_arma-r2",
+ "round": 2,
+ "position": 2,
+ "seed": 202,
+ "workload": "tiny",
+ "condition": {
+  "text": "lh-enforced@w=4,arm=a",
+  "base": "lh-enforced",
+  "params": {
+   "w": "4",
+   "arm": "a"
+  }
+ },
+ "config": {
+  "summary": {
+   "slots": 6,
+   "cpus": 6,
+   "work_reserved": 3,
+   "work_max": 6,
+   "work_headroom": "auto",
+   "memory_budget": "auto",
+   "heavy_weight": 4,
+   "hard_cpu": false
+  },
+  "hold_weight": {
+   "cpu": "4",
+   "mem": "4"
+  },
+  "mem_declared_bytes": null,
+  "jobserver": false,
+  "elastic": false,
+  "contained": true,
+  "text": "# leasehold config for your own daemon on bench.\n# Sized for 8 CPUs and 16 GiB: one slot per CPU; 2 CPUs are kept for you, and at most three quarters of the memory to any one lease.\n# Made by `leasehold init` (or `leasehold setup`); `leasehold doctor` checks it. Only\n# [ceiling] slots is required; the reference (docs/reference.md) lists every key.\n\nname = \"bench\"\nmode = \"user\"\nledger_dir = \"ledger\"            # your own daemon; `leasehold init --system` writes the machine's\n# socket and ledger_dir: by default $XDG_RUNTIME_DIR/leasehold/leasehold.sock and\n# $XDG_STATE_HOME/leasehold; the socket is yours alone (mode 0600)\n\n# Slots are what leases share, one per CPU given to leasehold's work; what is left is kept for\n# you (your editor, browser and shell). cpus and memory are the most one lease may be given.\n[ceiling]\nslots = 6\ncpus = 6\nmemory = \"11g\"\n\n# Two pools. Your agents' and your own commands go in `work`; `hold --kind external` (a CI\n# runner's job, a batch run) goes in `background`, which never takes work's reserved slots and\n# is served after it.\n[pools.work]\nreserved = 3\nmax = 6\npriority = 0\n\n[pools.background]\nreserved = 0\nmax = 3\npriority = 1\n\n[kinds]\nwork = \"work\"\nexternal = \"background\"\n\n[lend]\npools = []               # no lending on a personal machine; see docs/reference.md, Lending\n\n# Containment: commands leasehold starts run in a systemd user scope weighted to their lease\n# (CPUWeight 100 per slot) where your systemd user manager allows it.\n[contain]\nmode = \"auto\"            # \"off\": never\nhard_cpu = false         # true: also cap a command at its weight in CPUs\n\n# Memory admission: a command starts only while the memory it counts fits the budget. It\n# counts what its rule or `hold --memory` declares, or, declaring none, its weight times\n# assumed_per_slot (\"auto\": the budget over the slots, so full slots are a full budget).\n[memory]\nbudget = \"auto\"          # the machine's memory less `kept`; or a size such as \"12g\"\nkept = \"25%\"             # kept back for you: a share of the memory, or a size such as \"4g\"\nassumed_per_slot = \"auto\"\n\n# While memory is short, what runs keeps running and new work starts only within the memory\n# measured free: none while pressure is high, then a little at a time as it eases. What waits\n# says why.\n[guard]\nmemory_pressure_on = 20.0     # PSI some avg10, percent\nmemory_pressure_off = 5.0\n# min_available = \"2g\"        # default: 5% of memory, at least 512 MiB\nsettle_s = 30\n\n# Which commands take a lease when an agent (or you, through the shims) runs them. The built-in\n# rules cover common builds and test runs; `leasehold commands` lists them.\n[commands]\nheavy_weight = 4\nwait_s = 300             # how long a command waits in line for its lease...\nwhen_busy = \"deny\"       # ...then: \"deny\" it with the reason, or \"run\" it without a lease\n\n# The built-in rules weigh 4 slots (builds and test runs: pytest, cargo, make, ...) and 2\n# (JavaScript tooling: npm test, jest, tsc, ...), in slots and in jobs.\n# On 6 slots, one of them runs at a time.\n# To run two at once instead, each with fewer jobs (opt-in):\n# heavy_weight = 3\n# light_weight = 2\n# A command that declares no memory then counts its weight times the budget over the\n# slots, which may be less than it uses: declare memory for memory-heavy work (a rule's\n# `memory`, or `hold --memory`).\n\n# [[commands.rule]]\n# programs = [\"pytest\"]\n# weight = 3\n# memory = \"8g\"          # counted against [memory]; held to this when contained (MemoryHigh)\n"
+ },
+ "valid": true,
+ "why_invalid": "",
+ "washout": [
+  {
+   "quiet": true,
+   "skipped": true,
+   "attempt": 1,
+   "ran": true
+  }
+ ],
+ "git": null,
+ "leasehold": "0.3.0",
+ "machine": {
+  "class": "kvm-test",
+  "cpus": 8,
+  "memory_bytes": 16775348224,
+  "swap_bytes": 8589930496,
+  "kernel": "6.12.101+deb13-amd64",
+  "virt": "kvm",
+  "python": "3.12.14"
+ },
+ "notes": [],
+ "written": "2026-10-16T23:33:18+0200"
+}

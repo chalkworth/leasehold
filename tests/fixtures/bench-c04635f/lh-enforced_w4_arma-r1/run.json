@@ -1,0 +1,22 @@
+{
+ "start": 1792186379.4682794,
+ "end": 1792186383.9806223,
+ "aborted": null,
+ "seed": 201,
+ "cgroups": {
+  "harness": {
+   "path": "/sys/fs/cgroup/user.slice/user-1000.slice/session-42.scope",
+   "oom_kill": 0,
+   "high": 0,
+   "max": 0,
+   "peak": 13194166272
+  },
+  "jobs": {
+   "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/leasehold.slice/leasehold-bench_a44d14.slice",
+   "oom_kill": 0,
+   "high": 0,
+   "max": 0,
+   "peak": 25468928
+  }
+ }
+}

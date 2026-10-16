@@ -1112,7 +1112,18 @@ def parse_weights(text: str, init: str) -> dict[str, int]:
 
 #: What a resumed run must be given again exactly as it was first: the schedule, the plan, the
 #: sizes (`args`) and the code (`git`, `leasehold_version`).
-RESUME_KEYS = ("conditions", "seed_base", "agents", "preset_name", "workload", "args")
+RESUME_KEYS = (
+    "conditions",
+    "seed_base",
+    "agents",
+    "preset_name",
+    "workload",
+    "args",
+    "harness",
+)
+
+#: The machine facts a resumed run must find again: its class and what it is made of.
+MACHINE_KEYS = ("class", "cpus", "memory_bytes", "swap_bytes", "kernel", "virt")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1199,6 +1210,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="empty the page cache before each run's wait (needs root or passwordless sudo)",
     )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="run although tracked files have uncommitted changes (recorded in spec.json)",
+    )
     return parser
 
 
@@ -1234,9 +1250,26 @@ def workload_args(text: str) -> dict:
 
 
 def code_version() -> dict:
-    """The code a run ran: the checkout's commit and the leasehold version."""
+    """The code a run ran: the checkout's commit, whether its tracked files had uncommitted
+    changes, and the leasehold version."""
     git = manifest.git_state()
-    return {"git_sha": git and git["sha"], "leasehold_version": manifest.leasehold_version()}
+    return {
+        "git_sha": git and git["sha"],
+        "git_dirty": git and git["dirty"],
+        "leasehold_version": manifest.leasehold_version(),
+    }
+
+
+def harness_settings(args) -> dict:
+    """The harness's own settings, which change what a run measures: whether the jobs ran
+    without the benchmark's memory limit, without the washout, after dropping the page cache,
+    and whether a checkout with uncommitted changes was allowed."""
+    return {
+        "no_scope": bool(args.no_scope),
+        "no_wait": bool(args.no_wait),
+        "drop_caches": bool(args.drop_caches),
+        "allow_dirty": bool(args.allow_dirty),
+    }
 
 
 def resume(spec_path: Path, fresh: dict, rounds: int, parser) -> dict:
@@ -1255,6 +1288,14 @@ def resume(spec_path: Path, fresh: dict, rounds: int, parser) -> dict:
             parser.error(
                 f"{spec_path.parent} was started with {key} {spec.get(key)!r}; this is "
                 f"{value!r}. Run more of it on the code it started with"
+            )
+    now = fresh["machine"]
+    for key in MACHINE_KEYS:
+        if spec.get("machine", {}).get(key) != now.get(key):
+            parser.error(
+                f"{spec_path.parent} was started on a machine with {key} "
+                f"{spec.get('machine', {}).get(key)!r}; this one has {now.get(key)!r}. Run more "
+                "of it on the machine, and with the --machine-class, it started with"
             )
     if (spec.get("rounds", 1) == 1) != (rounds == 1):
         parser.error(f"{spec_path.parent} was started with --rounds {spec.get('rounds', 1)}")
@@ -1329,6 +1370,13 @@ def main(argv: list[str] | None = None) -> int:
         washout.check_probes()
     if args.drop_caches:
         washout.check_drop_caches()
+    if not args.dry_run and not args.tiny and not args.allow_dirty:
+        git = manifest.git_state()
+        if git and git["dirty"]:
+            parser.error(
+                "tracked files have uncommitted changes, so the commit in the results would not "
+                "be the code that ran; commit them, or pass --allow-dirty (recorded)"
+            )
     init = init_config()
     try:
         args.weights = parse_weights(args.weights, init)
@@ -1391,10 +1439,11 @@ def main(argv: list[str] | None = None) -> int:
         "preset_name": name,
         "workload": args.workload or name,
         "args": sizes,
+        "harness": harness_settings(args),
     }
     if args.dir and (args.dir / "spec.json").exists():
         outdir = args.dir
-        spec = resume(outdir / "spec.json", fresh, args.rounds, parser)
+        spec = resume(outdir / "spec.json", fresh | {"machine": m}, args.rounds, parser)
         print(f"results in {outdir} (run again with the schedule it was started with)", flush=True)
     else:
         if args.tiny:

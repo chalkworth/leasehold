@@ -1,8 +1,12 @@
 # Confirmatory gate for the defaults leasehold ships for ranged leases. Written before the runs.
-# The candidates are filled in after the pilot (bench/gates/pilot.toml), and the rounds and
-# margins follow from the A/A run (bench/gates/aa.toml) by the [plan] rule below, before any
-# round of this gate runs. Each workload runs into its own directory, scheduled for 12 rounds
-# so that an extension needs no new schedule:
+# The candidates are filled in after the pilot (bench/gates/pilot.toml). The rounds and margins
+# come from the frozen plan, which the A/A run (bench/gates/aa.toml) gives by the [plan] rule
+# below, before any round of this gate runs:
+#   python bench/run.py compare AA-DIR --gate bench/gates/aa.toml \
+#       --plan bench/gates/defaults.toml --arms ARMS --write bench/gates/defaults.plan.toml
+# ARMS is the control and each candidate: 2 or 3. compare refuses a verdict without that file.
+# Each workload runs into its own directory, scheduled for 12 rounds so that an extension needs
+# no new schedule:
 #   python bench/run.py --conditions 'lh-enforced@w=4,CANDIDATE-1,CANDIDATE-2' \
 #       --rounds 12 --seed-base 1000 --workload full --dir DIR-FULL \
 #       --agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo
@@ -18,7 +22,7 @@ name = "defaults"
 kind = "confirmatory"
 intent = "Decide whether a hold --weight range, with its pool settings (kept CPUs, headroom), can replace fixed weight 4 as what leasehold recommends for test runs."
 objective = "Per candidate against fixed weight 4: one-sided 95% upper bounds on the geometric-mean ratios of makespan, mean job time, wake p99 and git status p95, on both workloads."
-stop = "8 rounds, or more (at most 12) if the plan rule asks for it at the pooled SDs of the first 4, a look blind to which arm leads. The verdict uses exactly the first 8 (or 12) valid rounds; no early stop for success or failure."
+stop = "The frozen plan's rounds, a whole number of Williams cycles (8, 10 or 12 for two arms; 12 for three). After 4 rounds, a look blind to which arm leads may add whole cycles, up to 12, and is fixed once taken. The verdict uses exactly that many valid rounds; no early stop for success or failure."
 decision = "The first candidate that passes every metric on both workloads, with no hard rule broken, becomes the recommended range and pool settings. If none passes, find the cause (most likely memory) before release."
 
 [arms]
@@ -39,6 +43,7 @@ args = "--agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/
 name = "memheavy"
 args = "--agents 8 --duration 240 --mem-gib 3 --cap-gib 7 --git-repo /var/tmp/bigrepo"
 
+# `planned` is replaced by the frozen plan's rounds.
 [rounds]
 planned = 8
 look_after = 4
@@ -47,16 +52,19 @@ seed_base = 1000
 
 # The plan rule, stated before the A/A. Joint power is the chance a candidate equal to the
 # control passes every metric on both workloads, taking them as independent. The gate runs the
-# fewest rounds from 8 to 12 whose joint power, at the A/A paired SDs, is at least 0.8. If no
-# count up to 12 reaches it, the makespan and job mean margins become 1.10 and the search runs
-# again. The latency margins never widen. If 12 rounds still fall short, the gate runs 12 and
-# the plan states its joint power as a known limit. The A/A runs only `full`; its SDs stand
-# for `memheavy` too.
+# fewest rounds from 8 to 12 that are a whole number of Williams cycles of its arms (8, 10 or 12
+# for two arms; only 12 for three, which is why max_rounds is 12) and whose joint power, at the
+# A/A paired SDs, is at least 0.8. If none reaches it, the makespan and job mean margins become
+# 1.10 and the search runs again. The latency margins never widen. If it still falls short, the
+# gate runs the largest whole-cycle count and the plan states its joint power as a known limit.
+# The A/A runs only `full`; its SDs stand for `memheavy` too. `compare --plan --write` freezes
+# the result in `frozen`, and the gate takes its rounds and margins from there.
 [plan]
 joint_power = 0.8
 min_rounds = 8
 max_rounds = 12
 widen = { makespan_s = 1.10, job_mean_s = 1.10 }
+frozen = "defaults.plan.toml"
 
 [test]
 alpha = 0.05         # one-sided, for each metric; a candidate must pass them all
@@ -64,11 +72,11 @@ alpha = 0.05         # one-sided, for each metric; a candidate must pass them al
 # Co-primary metrics: the upper bound of the geometric-mean ratio must be under the margin.
 [[metrics]]
 name = "makespan_s"
-margin = 1.05        # 1.10 if the plan rule widens it
+margin = 1.05        # the frozen plan's margin replaces this; 1.10 if widened
 
 [[metrics]]
 name = "job_mean_s"
-margin = 1.05        # 1.10 if the plan rule widens it
+margin = 1.05        # the frozen plan's margin replaces this; 1.10 if widened
 
 [[metrics]]
 name = "wake_same_p99_ms"
