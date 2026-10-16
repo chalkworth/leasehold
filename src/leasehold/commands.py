@@ -4,46 +4,90 @@ coding-agent hooks and the PATH shims (`leasehold.shell` matches commands agains
 A rule names programs (by basename) and, optionally, a regular expression their arguments must
 contain. Rules from the config are tried before the built-in ones (`default_rules`), so a
 config can re-weigh a program the defaults name; among the rules of one source the heaviest
-match wins. The built-in rules come in two weights, `heavy_weight` for builds and test runs
-and `light_weight` for JavaScript tooling, both set in `[commands]`.
+match wins (by the least of a range). The built-in rules come in two weights, `heavy_weight`
+for builds and test runs and `light_weight` for JavaScript tooling, both set in `[commands]`.
+
+A rule's `weight` is a count (`4`) or a range (`"2-4"`, `leasehold.weights`): the least its
+command needs and the most it can use. A command asking a range is granted a size between them
+when it is admitted, and keeps it.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
-from leasehold import shell, xdist
+from leasehold import shell, weights, xdist
 from leasehold.model import Name
 from leasehold.units import declared_to_bytes
 
 
 class CommandRule(BaseModel):
-    """`weight` slots (in `pool`, else the kind's) for a command that runs one of `programs`
-    with arguments in which `args` is found, held to `memory` when contained, each of its
-    processes given `threads` threads (`leasehold.jobs`)."""
+    """`weight` to `max_weight` slots (in `pool`, else the kind's) for a command that runs one
+    of `programs` with arguments in which `args` is found, held to `memory` (or
+    `memory_per_slot` for each slot granted) when contained, each of its processes given
+    `threads` threads (`leasehold.jobs`). In the config, `weight` is a count or a `"MIN-MAX"`
+    range, which sets both."""
 
     model_config = ConfigDict(extra="forbid")
 
     programs: list[str] = Field(min_length=1)
     #: A regular expression searched in the program's arguments, joined by spaces.
     args: str | None = None
+    #: The least weight the command needs.
     weight: int = Field(ge=1)
+    #: The most it can use, from a range; None is `weight`.
+    max_weight: int | None = None
     pool: Name | None = None
     #: Memory the command is held to when contained (`MemoryHigh`), a size such as `4g`.
     memory: str | None = None
+    #: Memory each slot it is granted counts, and holds it to when contained, a size such as
+    #: `2g`: what a command whose memory grows with its size declares instead of `memory`.
+    memory_per_slot: str | None = None
     #: The size of each process's own thread pool (OpenMP, BLAS and the like): "jobs", the
     #: lease's job count, or a count of at least 1 (never more than the job count).
     threads: Literal["jobs"] | Annotated[StrictInt, Field(ge=1)] = "jobs"
 
-    @field_validator("memory")
+    @model_validator(mode="before")
+    @classmethod
+    def _range(cls, data: Any) -> Any:
+        """`weight = "MIN-MAX"` (or `"N"`) as `weight` MIN and `max_weight` MAX."""
+        if not isinstance(data, dict):
+            return data
+        if "max_weight" in data:
+            raise ValueError('max_weight is not a key: give a range as weight = "2-4"')
+        weight = data.get("weight")
+        if isinstance(weight, str):
+            least, most = weights.parse(weight)
+            data = {**data, "weight": least, "max_weight": most}
+        return data
+
+    @model_validator(mode="after")
+    def _one_memory(self) -> CommandRule:
+        if self.memory is not None and self.memory_per_slot is not None:
+            raise ValueError("memory and memory_per_slot are both set: give one or the other")
+        return self
+
+    @field_validator("memory", "memory_per_slot")
     @classmethod
     def _size(cls, value: str | None) -> str | None:
         if value is not None:
             declared_to_bytes(value)
         return value
+
+    @property
+    def most(self) -> int:
+        """The most weight the command can use."""
+        return self.weight if self.max_weight is None else self.max_weight
 
     @field_validator("args")
     @classmethod

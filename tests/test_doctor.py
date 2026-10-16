@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
 from support import machine_config
 
 from leasehold import contain, doctor, paths
@@ -127,6 +128,60 @@ def test_a_socket_mode_open_to_every_user_is_a_warning(tmp_path):
         assert doctor.check_socket_mode(machine_config(tmp_path, socket_mode=mode)) is None
     check = doctor.check_socket_mode(machine_config(tmp_path, socket_mode="0666"))
     assert check.level == "warn" and "0666" in check.detail and "0660" in check.fix
+
+
+def test_a_pool_whose_ranges_never_grow_is_a_warning(tmp_path):
+    assert doctor.check_headroom(None) is None
+    assert doctor.check_headroom(machine_config(tmp_path)) is None
+    base = {
+        "lend": {"reserved": 0, "max": 1, "priority": 2},
+        "observed": {"reserved": 0, "max": 8, "priority": 3},
+    }
+    # Its own headroom fills it.
+    full = base | {
+        "work": {"reserved": 0, "max": 8, "priority": 0},
+        "external": {"reserved": 0, "max": 2, "priority": 1, "headroom": 2},
+    }
+    check = doctor.check_headroom(machine_config(tmp_path, ceiling={"slots": 8}, pools=full))
+    assert check.level == "warn" and "external (max 2, headroom 2)" in check.detail
+    assert "work" not in check.detail
+    # work's reservation of 6 and the machine's headroom of 2 (work's) leave external nothing.
+    owed = base | {
+        "work": {"reserved": 6, "max": 8, "priority": 0},
+        "external": {"reserved": 0, "max": 2, "priority": 1, "headroom": 0},
+    }
+    check = doctor.check_headroom(machine_config(tmp_path, ceiling={"slots": 8}, pools=owed))
+    assert "external (max 2, headroom 0)" in check.detail and "work" not in check.detail
+
+
+@pytest.mark.parametrize("mode", ["system", "user"])
+@pytest.mark.parametrize("slots", [2, 4, 8, 16, 64])
+def test_the_default_configs_have_no_headroom_warning(mode, slots):
+    import tomllib
+
+    from leasehold import template
+    from leasehold.machine import MachineConfig
+
+    text = template.render(name="b", mode=mode, slots=slots, cpus=slots, memory="16g", about="x")
+    rendered = MachineConfig.model_validate(tomllib.loads(text))
+    assert doctor.check_headroom(rendered) is None
+    assert doctor.check_headroom(MachineConfig.defaults(slots=slots)) is None
+
+
+def test_a_pool_a_range_rule_leases_in_is_judged_even_at_auto_headroom(tmp_path):
+    pools = {
+        "work": {"reserved": 6, "max": 8, "priority": 0},
+        "external": {"reserved": 0, "max": 2, "priority": 1},
+        "lend": {"reserved": 0, "max": 1, "priority": 2},
+        "observed": {"reserved": 0, "max": 8, "priority": 3},
+    }
+    plain = machine_config(tmp_path, ceiling={"slots": 8}, pools=pools)
+    assert doctor.check_headroom(plain) is None  # nothing asks a range in external
+    rule = {"programs": ["x"], "weight": "1-2", "pool": "external"}
+    ranged = machine_config(
+        tmp_path, ceiling={"slots": 8}, pools=pools, commands={"defaults": False, "rule": [rule]}
+    )
+    assert "external (max 2, headroom 0)" in doctor.check_headroom(ranged).detail
 
 
 def test_containment_is_reported_with_a_hint_when_advisory(tmp_path):

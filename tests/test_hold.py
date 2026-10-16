@@ -183,6 +183,14 @@ def test_with_no_daemon_the_command_runs_without_a_lease_and_says_so(sock_dir):
     assert proc.stderr.read() == ("leasehold hold: no daemon answers; running without a lease\n")
 
 
+def test_with_no_daemon_the_command_does_not_see_leasehold_want(sock_dir):
+    show = "echo want=${LEASEHOLD_WANT:-none}"
+    env = CHILD_ENV | {"LEASEHOLD_WANT": "1-2"}
+    proc = hold(sock_dir / "absent.sock", "--", "sh", "-c", show, stdout=subprocess.PIPE, env=env)
+    assert proc.returncode == 0
+    assert proc.stdout.read() == "want=none\n"
+
+
 def test_if_unavailable_fail_from_the_environment_keeps_exit_69(sock_dir):
     env = CHILD_ENV | {"LEASEHOLD_IF_UNAVAILABLE": "fail"}
     argv = [sys.executable, "-m", "leasehold", "--socket", str(sock_dir / "absent.sock")]
@@ -216,9 +224,32 @@ def test_the_waiting_line_says_what_is_waited_for_its_place_and_why():
     assert waiting_line(request, {"position": 3, "blocked": "pool ci is closed"}) == (
         "waiting for 2 slots in pool ci (external): place 3; pool ci is closed"
     )
+    ranged = {"kind": "work", "pool": None, "weight": 1, "max_weight": 4}
+    assert waiting_line(ranged, {"position": 1, "blocked": None}) == (
+        "waiting for 1-4 slots (work): place 1"
+    )
     assert waiting_line({"kind": "work", "pool": None}, {"position": 1, "blocked": None}) == (
         "waiting for 1 slot (work): place 1"
     )
+
+
+def test_a_range_runs_the_command_sized_to_the_weight_granted(daemon):
+    script = (
+        "import os\n"
+        "print(os.environ['LEASEHOLD_WEIGHT'], os.environ['LEASEHOLD_JOBS'],\n"
+        "      os.environ.get('LEASEHOLD_WANT', 'none'))\n"
+    )
+    env = CHILD_ENV | {"LEASEHOLD_WANT": "1-2"}
+    proc = hold(
+        daemon.path, "--weight", "1-2", "--", sys.executable, "-c", script,
+        stdout=subprocess.PIPE, env=env,
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stderr.read()
+    assert proc.stdout.read().split() == ["2", "2", "none"]  # granted 2 of 1-2; no WANT
+    bad = hold(daemon.path, "--weight", "3-1", "--", "true")
+    assert bad.returncode == 2 and "below the least" in bad.stderr.read()
+    both = hold(daemon.path, "--memory", "1g", "--memory-per-slot", "1g", "--", "true")
+    assert both.returncode != 0 and "not both" in both.stderr.read()
 
 
 def test_with_no_weight_hold_weighs_the_command_as_the_commands_rules_do(daemon, tmp_path):

@@ -36,6 +36,7 @@ POOL_FIELDS = {
     "reserved",
     "max",
     "priority",
+    "headroom",
     "preemptible",
     "observed",
     "closed",
@@ -189,3 +190,26 @@ def test_a_lease_in_a_pool_the_config_dropped_still_counts_as_held(tmp_path):
         version="t",
     )
     assert report["held"] == 2
+
+
+def test_the_status_lines_give_each_pools_headroom_when_it_has_any(tmp_path, capsys):
+    from leasehold.cli.views import _print_status
+
+    pools = {
+        "work": {"reserved": 4, "max": 8, "priority": 0},  # auto: 8 // 4
+        "ci": {"reserved": 0, "max": 8, "priority": 1, "headroom": 3},
+        "solo": {"reserved": 0, "max": 8, "priority": 2, "headroom": 0},
+    }
+    agent, _, _ = make_agent(
+        tmp_path,
+        ceiling={"slots": 8},
+        pools=pools,
+        kinds={"work": "work", "external": "ci"},
+        lend={"pools": [], "quiet_s": 0},
+    )
+    agent.tick()
+    _print_status(agent.status())
+    lines = {line.split()[0]: line for line in capsys.readouterr().out.splitlines()[1:]}
+    assert "0/8 held (reserved 4, headroom 2)," in lines["work"]
+    assert "held (reserved 0, headroom 3)," in lines["ci"]
+    assert "held (reserved 0)," in lines["solo"]

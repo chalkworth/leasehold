@@ -7,7 +7,7 @@ import os
 import re
 from collections.abc import Sequence
 
-from leasehold import handoff
+from leasehold import handoff, weights
 from leasehold.hold import hold
 from leasehold.kinds import GRANTED, KINDS
 from leasehold.units import declared_to_bytes
@@ -52,8 +52,11 @@ def _lease_options(s: argparse.ArgumentParser) -> None:
     s.add_argument("--pool", help="the pool (default: the kind's)")
     s.add_argument(
         "--weight",
-        type=int,
-        help="slots to hold (hold: as the [commands] rules weigh the command, else 1; acquire: 1)",
+        type=_weight,
+        metavar="N|MIN-MAX",
+        help="slots to hold, or a range: wait for MIN, and be granted from MIN to MAX, fixed "
+        "for the lease's life (hold: as the [commands] rules weigh the command, else 1; "
+        "acquire: 1)",
     )
     s.add_argument("--label", action="append", default=[], metavar="K=V", help="repeatable")
     s.add_argument(
@@ -69,6 +72,12 @@ def _lease_options(s: argparse.ArgumentParser) -> None:
         help="the memory the work will use, e.g. 4g: counted against the machine's memory "
         "budget, and hold holds a contained command to it (MemoryHigh). hold's default: the "
         "matching [commands] rule's memory",
+    )
+    s.add_argument(
+        "--memory-per-slot",
+        type=_memory,
+        help="instead of --memory: the memory each slot granted will use, e.g. 2g, counted at "
+        "the size the lease is granted (and hold holds a contained command to that much)",
     )
 
 
@@ -135,7 +144,16 @@ def register(sub) -> None:
     s.set_defaults(run=lambda args, ctx: handoff.release(ctx.client(), args.lease_id))
 
 
+def _sizes(args) -> tuple[int | None, int | None]:
+    """`--weight` as (least, most), (None, None) when not given; exit with a message when
+    `--memory` and `--memory-per-slot` are both given."""
+    if args.memory is not None and args.memory_per_slot is not None:
+        raise SystemExit("leasehold: give --memory or --memory-per-slot, not both")
+    return args.weight if args.weight is not None else (None, None)
+
+
 def _hold(args, ctx) -> int:
+    weight, max_weight = _sizes(args)
     cmd = list(args.argv)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
@@ -155,7 +173,8 @@ def _hold(args, ctx) -> int:
         cmd,
         kind=args.kind,
         pool=args.pool,
-        weight=args.weight,
+        weight=weight,
+        max_weight=max_weight,
         labels=labels(args.label),
         session=session(args.session),
         timeout_s=args.timeout,
@@ -164,6 +183,7 @@ def _hold(args, ctx) -> int:
         job_env=args.job_env,
         jobserver=args.jobserver,
         memory=args.memory,
+        memory_per_slot=args.memory_per_slot,
         threads=args.threads,
         if_unavailable=args.if_unavailable,
     )
@@ -177,6 +197,13 @@ def _threads(value: str) -> int | str:
     raise argparse.ArgumentTypeError(f"{value!r} is not jobs or a count of at least 1")
 
 
+def _weight(value: str) -> tuple[int, int]:
+    try:
+        return weights.parse(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def _memory(value: str) -> str:
     try:
         declared_to_bytes(value)
@@ -188,6 +215,8 @@ def _memory(value: str) -> str:
 def _acquire(args, ctx) -> int:
     args.labels = labels(args.label)
     args.session = session(args.session)
-    args.weight = 1 if args.weight is None else args.weight
+    least, most = _sizes(args)
+    args.weight = 1 if least is None else least
+    args.max_weight = most
     client = ctx.client()
     return handoff.acquire_main(client, client.path, args)

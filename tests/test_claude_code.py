@@ -16,6 +16,7 @@ from support import FACTS, FakeLoad, machine_config
 from leasehold import claude_code, hooknotes
 from leasehold.agent import MachineAgent
 from leasehold.client import Client
+from leasehold.ledger import Holder, LedgerItem
 from leasehold.server import Daemon
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,158 @@ def test_a_command_that_waited_for_its_lease_says_how_long(daemon, monkeypatch):
     assert [lease["lease_id"] for lease in leases(daemon.path)] == ["cc.toolu_01ABC"]
 
 
+@pytest.fixture
+def ranged(tmp_path, sock_dir):
+    """An idle 2-slot machine whose rule weighs pytest 1-2."""
+    config = machine_config(
+        tmp_path,
+        socket=str(sock_dir / "r.sock"),
+        commands={"defaults": False, "rule": [{"programs": ["pytest"], "weight": "1-2"}]},
+    )
+    d = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    d.start()
+    try:
+        yield d
+    finally:
+        d.stop()
+
+
+def test_a_rules_range_is_asked_as_a_range_and_the_grant_noted_for_a_shim(ranged, tmp_path):
+    env = {"XDG_RUNTIME_DIR": str(tmp_path)}
+    reply = claude_code.pre(
+        event("pytest -n auto"), Client(ranged.path), env=env, watch_pid=None, spawn=Spawned()
+    )
+    assert reply.output is None
+    [lease] = leases(ranged.path)
+    assert (lease["weight"], lease["min_weight"], lease["max_weight"]) == (2, 1, 2)
+    assert hooknotes.sizing(env, lease["lease_id"]) == (2, 1)  # -n auto: one thread a worker
+    assert hooknotes.weight(env, lease["lease_id"]) == 2
+
+
+@pytest.fixture
+def busy8(tmp_path, sock_dir):
+    """8 slots, work 0-8 (auto headroom 2), an observed pool, and pytest weighing 2-8."""
+    config = machine_config(
+        tmp_path,
+        socket=str(sock_dir / "b.sock"),
+        ceiling={"slots": 8},
+        pools={
+            "work": {"reserved": 0, "max": 8},
+            "observed": {"reserved": 0, "max": 8, "priority": 3},
+        },
+        kinds={"work": "work", "observed": "observed"},
+        lend={"pools": [], "quiet_s": 0},
+        commands={"defaults": False, "rule": [{"programs": ["pytest"], "weight": "2-8"}]},
+    )
+    agent = MachineAgent(config, facts=FACTS, load=FakeLoad())
+    d = Daemon(config, agent)
+    d.start()
+    try:
+        yield d, agent
+    finally:
+        d.stop()
+
+
+def test_on_a_busy_pool_the_hooks_range_and_a_fixed_request_behind_it_both_start(busy8, tmp_path):
+    d, _ = busy8
+    client = Client(d.path)
+    client.acquire(kind="work", weight=3, lease_id="held")
+    [rule] = client.commands()["rules"]
+    assert rule["hook_ceiling"] == 6  # 8 less the headroom of 2
+    env = {"XDG_RUNTIME_DIR": str(tmp_path)}
+    reply = claude_code.pre(event("pytest"), client, env=env, watch_pid=None, spawn=Spawned())
+    assert reply.output == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": "leasehold: pytest was granted 3 of 2-6 slots; size it to 3 "
+            "jobs (or run the agent under `leasehold run`)",
+        }
+    }
+    assert "pytest asks 2-8, cut to 2-6: the rule's hook_ceiling" in "\n".join(reply.log)
+    after = client.acquire(kind="work", weight=2, lease_id="fixed")
+    assert after["status"] == "granted"
+    sizes = {x["lease_id"]: (x["weight"], x["min_weight"], x["max_weight"]) for x in leases(d.path)}
+    # The hook's 2-6 takes its share of the 5 free less the headroom: 3.
+    assert sizes == {"held": (3, 3, 3), "cc.toolu_01ABC": (3, 2, 6), "fixed": (2, 2, 2)}
+    assert hooknotes.weight(env, "cc.toolu_01ABC") == 3
+    assert hooknotes.sizing(env, "cc.toolu_01ABC") == (3, "jobs")
+
+
+def test_an_observed_process_does_not_stop_the_hooks_range(busy8, tmp_path):
+    d, agent = busy8
+    seen = LedgerItem("observer", "seen", "observed", None, "observed", 3)
+    assert agent.ledger.impose(seen, agent.policy(), holder=Holder.current())
+    env = {"XDG_RUNTIME_DIR": str(tmp_path)}
+    client = Client(d.path)
+    reply = claude_code.pre(event("pytest"), client, env=env, watch_pid=None, spawn=Spawned())
+    assert "permissionDecision" not in (reply.output or {}).get("hookSpecificOutput", {})
+    granted = {x["lease_id"]: x["weight"] for x in leases(d.path)}
+    assert granted["cc.toolu_01ABC"] >= 2
+
+
+def test_a_want_range_through_the_hook_is_cut_to_the_hook_ceiling_and_asked_as_a_range(
+    busy8, tmp_path
+):
+    d, _ = busy8
+    env = {"XDG_RUNTIME_DIR": str(tmp_path), "LEASEHOLD_WANT": "8"}
+    reply = claude_code.pre(
+        event("pytest"), Client(d.path), env=env, watch_pid=None, spawn=Spawned()
+    )
+    [lease] = leases(d.path)
+    assert (lease["weight"], lease["min_weight"], lease["max_weight"]) == (6, 6, 6)
+    assert "pytest asks 8, cut to 6: the rule's hook_ceiling" in "\n".join(reply.log)
+    assert reply.output is None  # a fixed size: nothing to tell
+
+
+def test_a_range_granted_its_most_and_a_fixed_rule_tell_the_agent_nothing(daemon, tmp_path):
+    env = {"XDG_RUNTIME_DIR": str(tmp_path)}
+    fixed = claude_code.pre(
+        event("pytest"), Client(daemon.path), env=env, watch_pid=None, spawn=Spawned()
+    )
+    assert fixed.output is None
+    [lease] = leases(daemon.path)
+    assert lease["min_weight"] == lease["max_weight"]
+
+
+def test_leasehold_want_replaces_the_rules_size(ranged):
+    client = Client(ranged.path)
+    reply = claude_code.pre(
+        event("pytest"), client, env={"LEASEHOLD_WANT": "1"}, watch_pid=None, spawn=Spawned()
+    )
+    assert reply.output is None  # a size of one: nothing to tell
+    assert [x["weight"] for x in leases(ranged.path)] == [1]
+
+
+def test_the_note_shares_the_jobs_among_an_xdist_runs_workers_for_a_shim(daemon, tmp_path):
+    # The plain pytest rule gives the job count; PYTEST_ADDOPTS starts xdist workers.
+    env = {"XDG_RUNTIME_DIR": str(tmp_path), "PYTEST_ADDOPTS": "-n 4"}
+    claude_code.pre(
+        event("pytest"), Client(daemon.path), env=env, watch_pid=None,
+        spawn=Spawned(),
+    )  # fmt: skip
+    [lease] = leases(daemon.path)
+    assert hooknotes.sizing(env, lease["lease_id"]) == (2, "jobs/4")
+
+
+def test_leasehold_want_is_asked_as_a_range_and_cut_to_what_could_be_granted(daemon):
+    # The built-in rule weighs pytest 4 (2 here); the caller asks 1-2, then 9, instead.
+    reply = claude_code.pre(
+        event("pytest"), Client(daemon.path), env={"LEASEHOLD_WANT": "1-2"}, watch_pid=None,
+        spawn=Spawned(),
+    )  # fmt: skip
+    assert reply.output is None
+    [lease] = leases(daemon.path)
+    assert (lease["weight"], lease["min_weight"], lease["max_weight"]) == (2, 1, 2)
+    Client(daemon.path).release(lease["lease_id"])
+    reply = claude_code.pre(
+        event("pytest", tool_use_id="toolu_02"), Client(daemon.path),
+        env={"LEASEHOLD_WANT": "9"}, watch_pid=None, spawn=Spawned(),
+    )  # fmt: skip
+    assert reply.output is None, reply.output  # not refused
+    assert [x["weight"] for x in leases(daemon.path)] == [2]
+    assert any("LEASEHOLD_WANT=9 cut to 2" in line for line in reply.log)
+
+
 def test_a_subagents_lease_is_in_its_sessions_turn_and_names_it(daemon):
     client = Client(daemon.path)
     e = event("pytest", agent_id="ac9be8ee61ea46b24", agent_type="general-purpose")
@@ -124,7 +277,7 @@ def test_a_busy_machine_runs_the_command_unleased_and_says_so(busy):
     )
     message = reply.output["systemMessage"]
     assert message.startswith("leasehold: machine busy for 0.5s: work lease someone-else holds")
-    assert message.endswith("queued #1; running pytest without a lease")
+    assert message.endswith("gave up its place in line (#1); running pytest without a lease")
     assert [lease["lease_id"] for lease in leases(busy.path)] == ["someone-else"]
     assert Client(busy.path).leases()["queue"] == []  # its place in line given back
 
@@ -138,8 +291,8 @@ def test_a_busy_machine_can_refuse_the_command_with_a_reason_for_the_agent(busy)
     assert out["hookEventName"] == "PreToolUse" and out["permissionDecision"] == "deny"
     assert out["permissionDecisionReason"] == (
         "leasehold: machine busy for 0.5s: work lease someone-else holds 2 slots; pool work "
-        "holds 2 of 2; this needs 2; queued #1. The command did not run. Do lighter work first, "
-        "then run it again."
+        "holds 2 of 2; this needs 2; gave up its place in line (#1). The command did not run. "
+        "Do lighter work first, then run it again."
     )
 
 
@@ -212,8 +365,10 @@ def test_a_lease_is_noted_for_post_or_not_taken(daemon, tmp_path):
     env = {"XDG_RUNTIME_DIR": str(run_dir)}
     claude_code.pre(event("pytest"), client, env=env, watch_pid=777, spawn=Spawned())
     notes = run_dir / f"leasehold-hooks-{os.getuid()}"
-    renewer, _, agent, program = (notes / "cc.toolu_01ABC").read_text().split()
+    noted = (notes / "cc.toolu_01ABC").read_text().split()
+    renewer, _, agent, program, jobs, threads, weight = noted
     assert (renewer, agent, program) == ("4242", "777", "pytest")  # what a shim looks for
+    assert (jobs, threads, weight) == ("2", "jobs", "2")  # what it sizes the program to
     claude_code.post(event("pytest"), client, env=env)
     assert list(notes.iterdir()) == [] and leases(daemon.path) == []
 

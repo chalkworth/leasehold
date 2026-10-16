@@ -56,5 +56,6 @@ def test_told_lists_nothing_when_no_daemon_answers(sock_dir):
     from leasehold.client import Client
 
     assert busy.told(Client(sock_dir / "none.sock"), QUEUED, pool="work", waited_s=1) == (
-        "machine busy for 1s: pool work holds 14 of 14; this needs 4; queued #1"
+        "machine busy for 1s: pool work holds 14 of 14; this needs 4; "
+        "gave up its place in line (#1)"
     )

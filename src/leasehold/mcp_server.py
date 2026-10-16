@@ -107,6 +107,21 @@ class Held:
     lease: dict = field(default_factory=dict)
     #: Why a held lease is ending, when the daemon revoked it.
     revoked: str | None = None
+    #: The most weight asked for (None: `weight`); granted, the lease's weight is its size.
+    max_weight: int | None = None
+    #: The range the daemon last said this item waits with (`min_weight`, `max_weight`), while
+    #: it is queued; empty from a daemon that does not say.
+    waiting: dict = field(default_factory=dict)
+
+    def sizes(self) -> tuple[int, int] | None:
+        """The least and the most weight the daemon says this item may be granted: the lease's
+        once granted, the queued answer's before; None when the daemon has not said (one from
+        before ranges grants a single weight)."""
+        said = self.lease if self.state == "granted" else self.waiting
+        least, most = said.get("min_weight"), said.get("max_weight")
+        if least is None or most is None:
+            return None
+        return int(least), int(most)
 
     def public(self) -> dict:
         out = {
@@ -114,9 +129,12 @@ class Held:
             "state": self.state,
             "kind": self.kind,
             "pool": self.lease.get("pool", self.pool),
-            "weight": self.weight,
+            "weight": self.lease.get("weight", self.weight),
             "reason": self.reason,
         }
+        sizes = self.sizes()
+        if sizes is not None and sizes[0] != sizes[1]:
+            out |= {"min_weight": sizes[0], "max_weight": sizes[1]}
         if self.state == "granted":
             out["claimed"] = self.claimed
             out["jobs"] = self.lease.get("jobs")
@@ -169,10 +187,19 @@ class Leases:
 
     # --- the agent's side ------------------------------------------------------------------
 
-    def new(self, *, kind: str, pool: str | None, weight: int, reason: str) -> Held:
+    def new(
+        self,
+        *,
+        kind: str,
+        pool: str | None,
+        weight: int,
+        reason: str,
+        max_weight: int | None = None,
+    ) -> Held:
         """A new request, tracked from now on (so a failed or slow first ask is still renewed
         and released)."""
         held = Held(f"mcp.{secrets.token_hex(8)}", kind, pool, weight, reason)
+        held.max_weight = max_weight
         with self._lock:
             if self._closed:
                 raise ToolFailure("this leasehold MCP server is shutting down")
@@ -219,22 +246,28 @@ class Leases:
             "kind": held.kind,
             "pool": held.pool,
             "weight": held.weight,
+            "max_weight": held.max_weight,
             "labels": labels,
             "lease_id": held.lease_id,
             "session": self.session,
             "ttl_s": self.ttl_s,
         }
 
-    def answered(self, held: Held, lease: dict | None) -> str | None:
+    def answered(self, held: Held, lease: dict | None, queued: dict | None = None) -> str | None:
         """Record the daemon's answer to the agent's call: `lease` once granted, None while
-        queued. Why the lease is revoked, if the answer or the renewer (before or during the
-        call) says it is; None otherwise. A `ToolFailure` if `held` stopped being tracked
+        queued (`queued`, that answer, gives the range the item waits with). Why the lease is
+        revoked, if the answer or the renewer (before or during the call) says it is; None
+        otherwise. A `ToolFailure` if `held` stopped being tracked
         during the call (the server is closing, or the place was given back): its lease is
         then released."""
         with self._lock:
             tracked = self._items.get(held.lease_id) is held
             if tracked:
                 held.seen_at = self._clock()
+                if queued is not None:
+                    held.waiting = {
+                        k: queued[k] for k in ("min_weight", "max_weight") if k in queued
+                    }
                 if lease is not None:
                     held.state, held.claimed, held.lease = "granted", True, lease
                     if lease.get("revoked") and not held.revoked:
@@ -324,6 +357,9 @@ class Leases:
                 )
                 continue
             with self._lock:
+                if status in ("ok", "revoked"):
+                    said = ("weight", "min_weight", "max_weight", "pool", "jobs")
+                    held.lease = held.lease | {k: answer[k] for k in said if answer.get(k)}
                 if status == "ok" and held.state == "queued":
                     held.state, held.claimed = "granted", False
                 elif status == "revoked":
@@ -437,16 +473,18 @@ def _ask(leases: Leases, held: Held, wait_s: float) -> Answer:
         lease = answer["lease"]
         if leases.answered(held, lease):
             return _revoked(held)
-        jobs = lease.get("jobs") or held.weight
+        jobs = lease.get("jobs") or lease.get("weight") or held.weight
+        sizes = held.sizes()
+        asked = "" if sizes is None or sizes[0] == sizes[1] else f" (of {sizes[0]}-{sizes[1]})"
         text = (
-            f"Granted {held.lease_id}: weight {lease['weight']} in pool {lease['pool']}, "
+            f"Granted {held.lease_id}: weight {lease['weight']}{asked} in pool {lease['pool']}, "
             f"{jobs} parallel job{'s' if jobs != 1 else ''} (for example `make -j{jobs}`). "
             "This server renews it until you call release_lease or the session ends; release "
             "it as soon as the work is done."
         )
         return Answer(text, {"status": "granted"} | held.public())
     if status == "queued":
-        leases.answered(held, None)
+        leases.answered(held, None, answer)
         line = waiting_line(request, answer)
         text = (
             f"Queued {held.lease_id}: {line.removeprefix('waiting for ')}. Call "
@@ -471,15 +509,25 @@ def acquire_lease(
     reason: str = "",
     wait_s: float = 10,
     lease_id: str | None = None,
+    max_weight: int | None = None,
 ) -> Answer:
-    """Ask for a lease of `weight` slots, waiting up to `wait_s` (at most `MAX_WAIT_S`).
-    With `lease_id`, ask again for that earlier request of this server's, as first made (the
-    other arguments are then ignored): the same as `wait_for_capacity`."""
+    """Ask for a lease of `weight` slots, or with `max_weight` from `weight` to that many
+    (granted a size between them, fixed for the lease's life), waiting up to `wait_s` (at most
+    `MAX_WAIT_S`). With `lease_id`, ask again for that earlier request of this server's, as
+    first made (the other arguments are then ignored): the same as `wait_for_capacity`."""
     if lease_id is not None:
         return _ask(leases, leases.touch(lease_id), wait_s)
     if weight < 1:
         raise ToolFailure("weight is at least 1")
-    held = leases.new(kind=kind, pool=pool, weight=weight, reason=reason.strip()[:200])
+    if max_weight is not None and max_weight < weight:
+        raise ToolFailure("max_weight is at least weight")
+    held = leases.new(
+        kind=kind,
+        pool=pool,
+        weight=weight,
+        reason=reason.strip()[:200],
+        max_weight=None if max_weight == weight else max_weight,
+    )
     try:
         return _ask(leases, held, wait_s)
     except ToolFailure:
@@ -686,12 +734,15 @@ def serve(client: Client, *, session: str | None = None) -> None:
         reason: str = "",
         wait_s: float = 10,
         lease_id: str | None = None,
+        max_weight: int | None = None,
     ) -> CallToolResult:
         """Ask for a share of the machine before heavy work. `weight` is the slots it needs,
-        about one per parallel job. Waits up to `wait_s` (at most 20) and answers granted (with
-        the job count to use) or queued (with the place in line and why). Leave `pool` and
-        `kind` unset unless told otherwise. Pass a queued `lease_id` to keep waiting for it.
-        Runs nothing: run the work yourself, then call release_lease."""
+        about one per parallel job. Optionally, `max_weight` is the most it could use: the
+        lease is then granted a weight from `weight` to `max_weight`, by how busy the machine
+        is, and keeps it. Waits up to `wait_s` (at most 20) and answers granted (with the job
+        count to use) or queued (with the place in line and why). Leave `pool` and `kind`
+        unset unless told otherwise. Pass a queued `lease_id` to keep waiting for it. Runs
+        nothing: run the work yourself, then call release_lease."""
         return result(
             lambda: acquire_lease(
                 leases,
@@ -701,6 +752,7 @@ def serve(client: Client, *, session: str | None = None) -> None:
                 reason=reason,
                 wait_s=wait_s,
                 lease_id=lease_id,
+                max_weight=max_weight,
             )
         )
 

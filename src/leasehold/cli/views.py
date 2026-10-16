@@ -11,6 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from leasehold import weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.facts import probe
 
@@ -157,12 +158,23 @@ def _row(x: dict, now: float, state: str) -> tuple[str, ...]:
         x["lease_id"],  # whole: it is what `release` and `keep` take
         x["kind"],
         x["pool"],
-        str(x["weight"]),
+        _weight(x),
         x["user"] or "-",
         x.get("session") or "-",
         _ago(x["expires_at"], now),
         state,
     )
+
+
+def _weight(x: dict) -> str:
+    """A lease's weight (`3`, or `3/2-4`: granted 3 of the range 2-4), or a waiting item's
+    (`2`, or `2-4`)."""
+    least = x.get("min_weight") or x["weight"]
+    most = x.get("max_weight") or least
+    if most == least:
+        return str(x["weight"])
+    asked = weights.text(least, most)
+    return asked if "queued_at" in x else f"{x['weight']}/{asked}"
 
 
 def _print_standing(st: dict) -> None:
@@ -216,8 +228,10 @@ def _print_status(st: dict) -> None:
         flags += " observed" if p.get("observed") else ""
         flags += " closed" if p["closed"] else ""
         flags += f" {p['overcommitted']} over" if p.get("overcommitted") else ""
+        shape = f"reserved {p['reserved']}"
+        shape += f", headroom {p['headroom']}" if p.get("headroom") else ""
         print(
-            f"  {name:<10} {p['held_weight']}/{p['max']} held (reserved {p['reserved']}), "
+            f"  {name:<10} {p['held_weight']}/{p['max']} held ({shape}), "
             f"{p['running']} running, {p['queued']} queued{flags}"
         )
     _print_standing(st)

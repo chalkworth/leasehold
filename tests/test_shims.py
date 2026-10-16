@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from support import CHILD_ENV, FACTS, FakeLoad, cli, machine_config
 
-from leasehold import jobs, shims
+from leasehold import jobs, shell, shims
 from leasehold.agent import MachineAgent
 from leasehold.client import Client
 from leasehold.commands import CommandSettings
@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 #: A stand-in heavy program: prints what lease it runs under.
 FAKE = """#!/bin/sh
 echo "lease=${LEASEHOLD_LEASE_ID:-none} weight=${LEASEHOLD_WEIGHT:-none} \\
-jobs=${CARGO_BUILD_JOBS:-none} omp=${OMP_NUM_THREADS:-none} args=$*"
+jobs=${CARGO_BUILD_JOBS:-none} omp=${OMP_NUM_THREADS:-none} args=$* \
+want=${LEASEHOLD_WANT:-none}"
 """
 
 
@@ -267,6 +268,20 @@ def test_a_shim_divides_the_leases_jobs_among_its_workers(monkeypatch, tmp_path)
     assert shims.within_lease("pytest", ["-n", "16"], env)["GOMAXPROCS"] == "1"
 
 
+def test_leasehold_want_sets_the_size_asked_for_and_is_not_passed_on(setup):
+    *_, env = setup
+    ranged = run(env, "build", LEASEHOLD_WANT="1-2")
+    assert ranged.returncode == 0, ranged.stderr
+    assert "weight=2 jobs=2" in ranged.stdout and "want=none" in ranged.stdout
+    assert "weight=1 jobs=1" in run(env, "build", LEASEHOLD_WANT="1").stdout
+    bad = run(env, "build", LEASEHOLD_WANT="6-2")
+    assert "weight=2 jobs=2" in bad.stdout and "LEASEHOLD_WANT ignored" in bad.stderr
+    # More than one lease could ever be granted: cut to fit, and run, never refused.
+    big = run(env, "build", LEASEHOLD_WANT="9")
+    assert big.returncode == 0, big.stderr
+    assert "weight=2 jobs=2" in big.stdout and "LEASEHOLD_WANT=9 cut to 2" in big.stderr
+
+
 def test_it_passes_through_when_it_should(setup):
     daemon, _, _, env = setup
     assert "lease=none" in run(env, "--version").stdout  # no rule matches
@@ -297,7 +312,7 @@ def test_a_busy_machine_can_refuse_it_saying_who_holds_the_machine(setup):
     done = run(env, "build")
     assert done.returncode == 75 and done.stdout == ""
     assert "not running fakebuild: machine busy for 1s: make all holds 2 slots;" in done.stderr
-    assert "queued #1. The command did not run. Do lighter work first" in done.stderr
+    assert "gave up its place in line (#1). The command did not run." in done.stderr
 
 
 def test_the_exit_code_is_the_programs(setup):
@@ -370,6 +385,53 @@ def test_a_script_without_a_shebang_runs_through_sh(setup):
     assert unleased.returncode == 0 and "lease=none" in unleased.stdout
 
 
+def test_a_hook_leases_sizing_is_the_notes_and_keeps_what_the_user_set(tmp_path):
+    from leasehold import hooknotes
+
+    env = {
+        "XDG_RUNTIME_DIR": str(tmp_path),
+        "OMP_NUM_THREADS": "3",  # the user's
+        "LEASEHOLD_WANT": "2-4",
+        # A record with no lease beside it is not trusted: RAYON_NUM_THREADS is the user's.
+        "LEASEHOLD_THREADS": "8",
+        "LEASEHOLD_JOBS": "8",
+        "LEASEHOLD_SET": "RAYON_NUM_THREADS=1",
+        "RAYON_NUM_THREADS": "1",
+    }
+    notes = hooknotes.state_dir(env)
+    hooknotes.write(notes, "cc.t", None, 1, "pytest", jobs=4, threads=2, weight=4)
+    out = shims.covered_env(env, "cc.t")
+    assert out["LEASEHOLD_LEASE_ID"] == "cc.t" and "LEASEHOLD_WANT" not in out
+    assert (out["LEASEHOLD_JOBS"], out["LEASEHOLD_THREADS"]) == ("4", "2")
+    assert out["LEASEHOLD_WEIGHT"] == "4"  # the size the hook was granted
+    assert out["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "4" and out["POLARS_MAX_THREADS"] == "2"
+    assert out["OMP_NUM_THREADS"] == "3" and out["OPENBLAS_NUM_THREADS"] == "3"
+    assert out["RAYON_NUM_THREADS"] == "1" and "RAYON" not in out["LEASEHOLD_SET"]
+
+
+def test_a_notes_share_of_the_jobs_sizes_the_threads(tmp_path):
+    from leasehold import hooknotes
+
+    env = {"XDG_RUNTIME_DIR": str(tmp_path)}
+    hooknotes.write(hooknotes.state_dir(env), "cc.t", None, 1, "pytest", jobs=8, threads="jobs/4")
+    assert hooknotes.sizing(env, "cc.t") == (8, "jobs/4")
+    out = shims.covered_env(env, "cc.t")
+    assert (out["LEASEHOLD_JOBS"], out["LEASEHOLD_THREADS"]) == ("8", "2")
+    for bad in ("jobs/x", "jobs/04", "jobs/4:", "jobs/4:0"):
+        hooknotes.write(hooknotes.state_dir(env), "cc.u", None, 1, "pytest", jobs=8, threads=bad)
+        assert hooknotes.sizing(env, "cc.u") is None, bad
+        assert shell.Rule.of({"programs": ["p"], "weight": 1, "threads": bad}).threads == 1
+
+
+def test_a_note_that_gives_no_weight_drops_an_inherited_one(tmp_path):
+    from leasehold import hooknotes
+
+    env = {"XDG_RUNTIME_DIR": str(tmp_path), "LEASEHOLD_WEIGHT": "9"}
+    (hooknotes.state_dir(env) / "cc.t").write_text("0 - 1 pytest 4 jobs\n")  # 6 fields
+    out = shims.covered_env(env, "cc.t")
+    assert out["LEASEHOLD_JOBS"] == "4" and "LEASEHOLD_WEIGHT" not in out
+
+
 def test_an_agent_hooks_lease_for_this_program_covers_it_and_no_other(setup, tmp_path):
     """Under `leasehold run` with the Claude Code plugin, the hook has taken the command's lease
     before the shim runs: the shim runs inside it rather than asking for a second one."""
@@ -384,10 +446,19 @@ def test_an_agent_hooks_lease_for_this_program_covers_it_and_no_other(setup, tmp
         agent = os.getpid()  # this test is the agent: the shim runs under it
         hooknotes.write(notes, "cc.toolu_1", renewer.pid, agent, "fakebuild")
         done = run(env, "build")
-        assert "lease=cc.toolu_1 weight=none" in done.stdout, done.stderr
+        assert "lease=cc.toolu_1 weight=none jobs=none" in done.stdout, done.stderr
         assert Client(daemon.path).leases()["leases"] == []  # no second lease was taken
+        # A note that says the lease's job count and threads sizes the command to them.
+        hooknotes.write(notes, "cc.toolu_1", renewer.pid, agent, "fakebuild", jobs=2, threads=1)
+        sized = run(env, "build", LEASEHOLD_WANT="1")
+        assert "lease=cc.toolu_1 weight=none jobs=2 omp=1" in sized.stdout, sized.stderr
+        assert "want=none" in sized.stdout
+        assert Client(daemon.path).leases()["leases"] == []
         hooknotes.write(notes, "cc.toolu_1", renewer.pid, agent, "otherprog")
         assert "lease=cc.toolu_1" not in run(env, "build").stdout
+        # The agent's LEASEHOLD_WANT was for its hook's lease: this shim takes its rule's 2.
+        own = run(env, "build", LEASEHOLD_WANT="1")
+        assert "weight=2 jobs=2" in own.stdout and "want=none" in own.stdout, own.stderr
         hooknotes.write(notes, "cc.toolu_1", renewer.pid, 1, "fakebuild")  # not our agent
         assert "lease=cc.toolu_1" not in run(env, "build").stdout
     finally:

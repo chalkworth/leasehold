@@ -346,8 +346,8 @@ def test_the_policy_comes_from_a_pool_set_and_refuses_the_impossible():
     )
     policy = AdmissionPolicy.from_pools(pools, closed=frozenset({"ci"}), standing={"work": 1})
     assert policy.slots == {MACHINE: 6}
-    assert policy.pools["work"] == PoolPolicy(MACHINE, 3, 6, 0, 2)
-    assert policy.pools["ci"] == PoolPolicy(MACHINE, 0, 2, 1, None)
+    assert policy.pools["work"] == PoolPolicy(MACHINE, 3, 6, 0, 2, headroom=1)
+    assert policy.pools["ci"] == PoolPolicy(MACHINE, 0, 2, 1, None, headroom=0)
     assert policy.closed == frozenset({"ci"}) and policy.standing == {"work": 1}
     assert policy.refusal("ci", 2) is None
     assert policy.refusal("ci", 3) == "weight 3 is more than pool 'ci''s max 2"

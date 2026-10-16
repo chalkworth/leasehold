@@ -10,7 +10,8 @@ those.
 
 A shim passes straight to the real program, with no lease, when one is held already (a
 `make` under a leased `cargo`, any command under `leasehold hold`: `LEASEHOLD_LEASE_ID` is
-set; or an agent hook's lease for this program under this agent, `leasehold.hooknotes`), when
+set; or an agent hook's lease for this program under this agent, `leasehold.hooknotes`, whose
+job count and threads the program is then given, `covered_env`), when
 `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. Under a lease that
 set the job variables (`jobs.LEASEHOLD_SET`), a program whose own rule gives fewer threads
 (`pytest -n 4` under `hold -- make test`) runs with that thread count (`within_lease`). On a
@@ -19,6 +20,10 @@ run without a lease. When the daemon
 says no (a refusal, an error answer under 500, or a matching rule no lease could ever be
 granted for) the shim exits 77 without running the program; when it cannot answer (an error
 of 500 or more) the program runs without a lease, and the shim says why.
+
+A shim asks for the matching rule's weight (a count or a range), unless the caller's
+environment sets `LEASEHOLD_WANT` (`leasehold.weights`), which it asks for instead, cut to the
+most the rule's lease could ever be granted. The program runs sized to the weight granted.
 
 A shim costs a Python start (about 0.1 s) on every run of its program, `--version` included.
 """
@@ -31,7 +36,7 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import busy, discovery, hooknotes, jobs, shell
+from leasehold import busy, discovery, hooknotes, jobs, shell, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, run_leased, wait_for_grant
@@ -159,7 +164,10 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         os.execve(target, argv, within_lease(program, args, env))
     covered = hooknotes.covering(env, program, os.getpid())
     if covered is not None:  # an agent hook holds this command's lease already
-        os.execve(target, argv, {**env, "LEASEHOLD_LEASE_ID": covered})
+        os.execve(target, argv, covered_env(env, covered))
+    if weights.ENV_WANT in env and hooknotes.under_agent(env, os.getpid()):
+        # The agent's LEASEHOLD_WANT is what its hook asked for its own command's lease.
+        env = {k: v for k, v in env.items() if k != weights.ENV_WANT}
     try:
         client = Client(discovery.find(None, None, env))
         settings = shell.served(client.commands())
@@ -179,16 +187,22 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     if rule.never is not None:
         _say(f"not running {program}: refused: {rule.never}")
         return EXIT_REFUSED
+    least, most = weights.asked(env, rule.weight, rule.max_weight, _say, rule.ceiling)
     request = lease_request(
         pool=rule.pool,
-        weight=rule.weight,
+        weight=least,
+        max_weight=most,
         labels={"shim": program, "cmd": " ".join([program, *args])[:120]},
         session=env.get("LEASEHOLD_SESSION") or None,
         memory=rule.memory,
+        memory_per_slot=rule.memory_per_slot,
     )
     code, answer = wait_for_grant(client, request, settings.wait_s, _say)
     if code is None:
-        return run_leased(client, argv, request, answer, memory=rule.memory, threads=threads)
+        return run_leased(
+            client, argv, request, answer, memory=rule.memory, threads=threads,
+            memory_per_slot=rule.memory_per_slot,
+        )  # fmt: skip
     if code == EXIT_BUSY and settings.when_busy == "deny":
         why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
         _say(f"not running {program}: {why}. {busy.ADVICE}")
@@ -227,6 +241,25 @@ def _threads(
         return shell.threads(rules, [(program, args)], env=env, cwd=Path.cwd)
     except Exception:  # noqa: BLE001 - sizing threads must never stop the program running
         return None
+
+
+def covered_env(env: Mapping[str, str], lease_id: str) -> dict[str, str]:
+    """The environment a program runs with under an agent hook's lease `lease_id`: `env` with
+    `LEASEHOLD_LEASE_ID`, without `LEASEHOLD_WANT`, and with the job and thread variables `hold`
+    sets (`jobs.sized_env`) for the job count and thread count the hook's note gives. Sizing
+    left in `env` by another lease is not this lease's and is dropped first; a value the user
+    set is kept, and `LEASEHOLD_THREADS` is the thread count chosen. `LEASEHOLD_WEIGHT` is the
+    weight the note says was granted, and is dropped when the note does not say. A note that
+    gives no sizing leaves the job and thread variables as they are."""
+    out = {k: v for k, v in env.items() if k not in (weights.ENV_WANT, "LEASEHOLD_WEIGHT")}
+    granted = hooknotes.weight(env, lease_id)
+    if granted is not None:
+        out["LEASEHOLD_WEIGHT"] = str(granted)
+    sizing = hooknotes.sizing(env, lease_id)
+    if sizing is None:
+        return out | {"LEASEHOLD_LEASE_ID": lease_id}
+    out = jobs.unsized_env(out) | {"LEASEHOLD_LEASE_ID": lease_id}
+    return jobs.sized_env(out, *sizing, cap=True)
 
 
 def within_lease(program: str, args: list[str], env: Mapping[str, str]) -> dict[str, str]:

@@ -201,6 +201,17 @@ def test_hold_starts_its_command_in_a_scope_sized_to_the_lease(daemon):
 
 
 @live
+def test_hold_sizes_a_ranges_scope_to_the_weight_granted_and_its_memory_per_slot(daemon):
+    done = _hold(
+        daemon.path, "--weight", "1-2", "--memory-per-slot", "256m",
+        "--", sys.executable, "-c", _REPORT,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr
+    _group, weight, high = done.stdout.split()
+    assert (weight, high) == ("200", str(2 * 256 * 1024 * 1024))  # granted 2 of 1-2
+
+
+@live
 def test_hold_leaves_a_command_where_it_is_when_containment_is_off(daemon):
     off = CHILD_ENV | {contain.ENV: "off"}
     done = _hold(daemon.path, "--", sys.executable, "-c", _REPORT, env=off)

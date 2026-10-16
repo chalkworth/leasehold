@@ -48,7 +48,7 @@ from leasehold.admission import (
     State,
     Waiting,
     blocker,
-    decide,
+    grants,
     positions,
 )
 from leasehold.process import pid_namespace, process_birth, process_matches
@@ -70,7 +70,8 @@ _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('grants', '0');
--- An admitted item: the weight it holds in its pool, and the process that holds it.
+-- An admitted item: the weight it holds in its pool (the size it was granted, from its
+-- min_weight to its max_weight), and the process that holds it.
 CREATE TABLE IF NOT EXISTS leases (
     scope TEXT NOT NULL,
     item_id TEXT NOT NULL,
@@ -95,6 +96,11 @@ CREATE TABLE IF NOT EXISTS leases (
     revoke_deadline REAL,
     -- The memory the item declared, in bytes; NULL: none.
     memory INTEGER,
+    -- The weights it asked for, the least and the most; NULL: weight (no range was asked).
+    min_weight INTEGER,
+    max_weight INTEGER,
+    -- The memory it declared for each slot it holds, in bytes; NULL: none.
+    memory_per_slot INTEGER,
     PRIMARY KEY (scope, item_id)
 );
 -- A waiting item, in its user's FIFO by (queued_at, seq).
@@ -116,6 +122,9 @@ CREATE TABLE IF NOT EXISTS queue (
     ttl_s REAL,
     expires_at REAL,
     memory INTEGER,
+    -- The most weight it can use (weight is the least); NULL: weight.
+    max_weight INTEGER,
+    memory_per_slot INTEGER,
     UNIQUE (scope, item_id)
 );
 -- Whose turn was last in each pool: the round-robin's memory ('' is the item with no user).
@@ -200,9 +209,15 @@ class LedgerItem:
     `external`, `lend` and `observed`); both are stored as given. `session` is the user's
     session the item belongs to, for taking turns between one user's sessions (None: the
     user's shared session). `labels` are free-form (key, value) pairs, stored and listed but
-    never read by admission. `memory` is the memory, in bytes, the item declares (None: none),
-    from 0 to `leasehold.units.MEMORY_MAX` (outside that, a ValueError); admission counts it
-    only where the policy sets a memory budget."""
+    never read by admission. `memory` is the memory, in bytes, the item declares in all
+    (None: none), and `memory_per_slot` what it declares for each slot it is granted (None:
+    none); each from 0 to `leasehold.units.MEMORY_MAX`, and never both (a ValueError);
+    admission counts them only where the policy sets a memory budget. `weight` is the least
+    the item can be admitted with and `max_weight` the most it asks for (None: `weight`; less
+    than `weight`, a ValueError), kept as asked while it waits: it is granted a size between
+    `weight` and that most as admission cuts it then (`leasehold.admission.grants`,
+    `AdmissionPolicy.most`), its lease's weight from then on, and the lease keeps the range so
+    cut."""
 
     scope: str
     item_id: str
@@ -213,10 +228,18 @@ class LedgerItem:
     labels: tuple[tuple[str, str], ...] = ()
     session: str | None = None
     memory: int | None = None
+    max_weight: int | None = None
+    memory_per_slot: int | None = None
 
     def __post_init__(self) -> None:
-        if self.memory is not None and not 0 <= self.memory <= MEMORY_MAX:
-            raise ValueError(f"memory {self.memory} is not between 0 and {MEMORY_MAX} bytes")
+        for name in ("memory", "memory_per_slot"):
+            value = getattr(self, name)
+            if value is not None and not 0 <= value <= MEMORY_MAX:
+                raise ValueError(f"{name} {value} is not between 0 and {MEMORY_MAX} bytes")
+        if self.memory is not None and self.memory_per_slot is not None:
+            raise ValueError("memory and memory_per_slot are both given: declare one or the other")
+        if self.max_weight is not None and self.max_weight < self.weight:
+            raise ValueError(f"max_weight {self.max_weight} is below weight {self.weight}")
 
     @property
     def key(self) -> ItemKey:
@@ -254,6 +277,13 @@ class Renewal:
     status: RenewStatus
     expires_at: float | None = None
     reason: str | None = None
+    #: For a lease (`ok` or `revoked`): the weight it was granted, and the least and the most
+    #: it could be granted.
+    weight: int | None = None
+    min_weight: int | None = None
+    max_weight: int | None = None
+    #: For a lease: the pool it holds its weight in.
+    pool: str | None = None
 
 
 class Ledger:
@@ -361,8 +391,11 @@ class Ledger:
                 weight=r["weight"],
                 session=r["session"],
                 memory=r["memory"],
+                memory_per_slot=r["memory_per_slot"],
             )
-            for r in conn.execute("SELECT pool, host, user, session, weight, memory FROM leases")
+            for r in conn.execute(
+                "SELECT pool, host, user, session, weight, memory, memory_per_slot FROM leases"
+            )
         )
         waiting = tuple(
             Waiting(
@@ -373,6 +406,8 @@ class Ledger:
                 order=(r["queued_at"], r["seq"]),
                 session=r["session"],
                 memory=r["memory"],
+                max_weight=r["max_weight"],
+                memory_per_slot=r["memory_per_slot"],
             )
             for r in conn.execute("SELECT * FROM queue")
         )
@@ -405,8 +440,9 @@ class Ledger:
             )
         conn.execute(
             "INSERT INTO queue (scope, item_id, kind, user, session, pool, weight, holder_pid, "
-            "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at, memory) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at, memory, "
+            "max_weight, memory_per_slot) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (scope, item_id) DO NOTHING",
             (
                 item.scope,
@@ -425,13 +461,15 @@ class Ledger:
                 ttl_s,
                 expires_at,
                 item.memory,
+                item.max_weight,
+                item.memory_per_slot,
             ),
         )
 
     def _admit(self, conn: sqlite3.Connection, policy: AdmissionPolicy) -> list[ItemKey]:
         now = self._now()
-        admitted = decide(self._state(conn), policy)
-        for scope, item_id in admitted:
+        granted = grants(self._state(conn), policy)
+        for (scope, item_id), weight in ((g.key, g.weight) for g in granted):
             row = conn.execute(
                 "SELECT * FROM queue WHERE scope = ? AND item_id = ?", (scope, item_id)
             ).fetchone()
@@ -440,8 +478,8 @@ class Ledger:
             conn.execute(
                 "INSERT INTO leases (scope, item_id, kind, user, session, host, pool, weight, "
                 "holder_pid, holder_birth, holder_ns, beat_at, acquired_at, labels, ttl_s, "
-                "expires_at, grant_no, memory) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "expires_at, grant_no, memory, min_weight, max_weight, memory_per_slot) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scope,
                     item_id,
@@ -450,7 +488,7 @@ class Ledger:
                     row["session"],
                     policy.pools[row["pool"]].host,
                     row["pool"],
-                    row["weight"],
+                    weight,
                     row["holder_pid"],
                     row["holder_birth"],
                     row["holder_ns"],
@@ -460,7 +498,19 @@ class Ledger:
                     ttl_s,
                     None if ttl_s is None else now + ttl_s,
                     grant,
-                    row["memory"],
+                    # A per-slot lease also records its total, which a 0.3 process counts.
+                    row["memory"]
+                    if row["memory_per_slot"] is None
+                    else weight * row["memory_per_slot"],
+                    row["weight"],
+                    policy.most(
+                        row["pool"],
+                        row["weight"],
+                        row["max_weight"],
+                        row["memory"],
+                        row["memory_per_slot"],
+                    ),
+                    row["memory_per_slot"],
                 ),
             )
             conn.execute("DELETE FROM queue WHERE seq = ?", (row["seq"],))
@@ -476,6 +526,7 @@ class Ledger:
                 "ON CONFLICT (pool, user, session) DO UPDATE SET seq = excluded.seq",
                 (row["pool"], row["user"] or "", row["session"] or ""),
             )
+        admitted = [g.key for g in granted]
         if admitted:
             # Sessions are often one-off (a CI job, an agent's session): forget the least
             # recently served of those with nothing held or waiting. One that comes back ranks
@@ -540,7 +591,8 @@ class Ledger:
         whatever now fits (anyone's -- a holder learns of its lease on its next call), and say
         where `item` stands. Idempotent: an item that holds a lease is `Admitted` again. A key
         another user holds or waits under is `Refused`: two users never share one lease. So is
-        one `policy.refusal` gives a reason for (a weight below 1, or one that could never fit).
+        one `policy.refusal` gives a reason for (a weight below 1, or one whose least could
+        never fit).
         With `ttl_s` the item's place and lease are TTL ones (see the module docstring)."""
         holder = holder or Holder.current()
         with self._tx() as conn:
@@ -551,7 +603,7 @@ class Ledger:
                 return Refused(f"{item.key[1]} is another user's lease")
             if self._leased(conn, item.key):
                 return Admitted()
-            reason = policy.refusal(item.pool, item.weight, item.memory)
+            reason = policy.refusal(item.pool, item.weight, item.memory, item.memory_per_slot)
             if reason is not None:
                 conn.execute("DELETE FROM queue WHERE scope = ? AND item_id = ?", item.key)
                 return Refused(reason)
@@ -564,7 +616,8 @@ class Ledger:
 
     def impose(self, item: LedgerItem, policy: AdmissionPolicy, *, holder: Holder) -> bool:
         """Record a lease for work that is already running and was never asked for (a process
-        seen on the machine), without asking `decide`: its weight counts from now on, even past
+        seen on the machine), without asking `decide`: its weight (fixed: a range is not sized
+        here) and its memory, in all or per slot, count from now on, even past
         its pool's `max` or the machine's slots, and new work waits until enough of it ends.
         `holder` is that process (pid and birth time), so the lease ends when it does (for a
         holder in another pid namespace: once nothing `beat`s for it for `STALE_S`). True
@@ -587,8 +640,8 @@ class Ledger:
             conn.execute(
                 "INSERT INTO leases (scope, item_id, kind, user, session, host, pool, weight, "
                 "holder_pid, holder_birth, holder_ns, beat_at, acquired_at, labels, ttl_s, "
-                "expires_at, grant_no, memory) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+                "expires_at, grant_no, memory, min_weight, max_weight, memory_per_slot) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)",
                 (
                     item.scope,
                     item.item_id,
@@ -605,7 +658,12 @@ class Ledger:
                     now,
                     json.dumps(dict(item.labels)) if item.labels else None,
                     grant,
-                    item.memory,
+                    item.memory
+                    if item.memory_per_slot is None
+                    else item.weight * item.memory_per_slot,
+                    item.weight,
+                    item.weight,
+                    item.memory_per_slot,
                 ),
             )
             return True
@@ -633,8 +691,8 @@ class Ledger:
         with self._tx() as conn:
             self._reclaim(conn)
             row = conn.execute(
-                "SELECT ttl_s, expires_at, revoked_at, revoke_reason, revoke_deadline "
-                "FROM leases WHERE scope = ? AND item_id = ?",
+                "SELECT ttl_s, expires_at, revoked_at, revoke_reason, revoke_deadline, weight, "
+                "min_weight, max_weight, pool FROM leases WHERE scope = ? AND item_id = ?",
                 key,
             ).fetchone()
             if row is not None:
@@ -654,9 +712,10 @@ class Ledger:
                         "WHERE scope = ? AND item_id = ?",
                         (expires, now, *key),
                     )
+                sizes = _sizes(row)
                 if row["revoked_at"] is not None:
-                    return Renewal("revoked", expires, row["revoke_reason"])
-                return Renewal("ok", expires)
+                    return Renewal("revoked", expires, row["revoke_reason"], *sizes, row["pool"])
+                return Renewal("ok", expires, None, *sizes, row["pool"])
             row = conn.execute(
                 "SELECT ttl_s, expires_at FROM queue WHERE scope = ? AND item_id = ?", key
             ).fetchone()
@@ -845,20 +904,39 @@ def _holder_args(holder: Holder | None) -> tuple:
     return () if holder is None else (holder.pid, holder.birth, holder.ns)
 
 
+def _sizes(row: sqlite3.Row) -> tuple[int, int, int]:
+    """A lease row's granted weight, and the least and the most it asked for (a row from
+    before ranges asked for its weight)."""
+    weight = row["weight"]
+    least = row["min_weight"] if row["min_weight"] is not None else weight
+    most = row["max_weight"] if row["max_weight"] is not None else weight
+    return weight, least, most
+
+
+#: The columns added to each table since the schema version was last bumped, all integers
+#: NULL for a row written before them: `memory` (leasehold 0.3), the ranges and `memory_per_slot`.
+_ADDED_COLUMNS = {
+    "leases": ("memory", "min_weight", "max_weight", "memory_per_slot"),
+    "queue": ("memory", "max_weight", "memory_per_slot"),
+}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """A ledger from an older schema is dropped and rebuilt: it is transient, its live holders
-    re-acquire on their next call. One of this schema without the `memory` columns (made by
-    leasehold 0.2) gains them, NULL for every row: a process of either version can share it."""
+    re-acquire on their next call. One of this schema without some of `_ADDED_COLUMNS` (made by
+    an older leasehold) gains them, NULL for every row: processes of either version can share
+    it."""
     try:
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     except sqlite3.OperationalError:
         return  # a new file
     if row is not None and row[0] == str(SCHEMA_VERSION):
-        for table in ("leases", "queue"):
+        for table, added in _ADDED_COLUMNS.items():
             columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-            if columns and "memory" not in columns:
-                with contextlib.suppress(sqlite3.OperationalError):  # another process added it
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN memory INTEGER")
+            for column in added:
+                if columns and column not in columns:
+                    with contextlib.suppress(sqlite3.OperationalError):  # another process did
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
         return
     conn.executescript(
         "DROP TABLE IF EXISTS leases; DROP TABLE IF EXISTS queue; "

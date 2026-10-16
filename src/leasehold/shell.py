@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from leasehold import xdist
+from leasehold import jobs, xdist
 
 #: Words that end one simple command and start the next.
 _SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "|&", "(", ")", ";;", "\n"})
@@ -91,9 +91,9 @@ _KEYWORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!"
 
 @dataclass(frozen=True)
 class Rule:
-    """`weight` slots in `pool` for a command that runs one of `programs` (basenames) with
-    arguments in which the regular expression `args` is found. `source` is `config` or
-    `default`: the config's rules are tried first."""
+    """`weight` to `max_weight` slots in `pool` for a command that runs one of `programs`
+    (basenames) with arguments in which the regular expression `args` is found. `source` is
+    `config` or `default`: the config's rules are tried first."""
 
     programs: frozenset[str]
     weight: int
@@ -104,18 +104,41 @@ class Rule:
     #: Why no lease for this rule could ever be granted; None when one can. A command it
     #: matches is refused, not run under another rule's lease.
     never: str | None = None
-    #: The size of each process's own thread pool (`leasehold.jobs`): "jobs", the job count,
-    #: or a count of at least 1.
+    #: The size of each process's own thread pool (`leasehold.jobs`): "jobs", the job count;
+    #: a count of at least 1; or a share of the job count, "jobs/N" (divided among N workers)
+    #: or "jobs/N:K" (and at most K).
     threads: int | str = "jobs"
+    #: The most weight a command it matches can use; None, or less than `weight`, is `weight`.
+    max_weight: int | None = None
+    #: Memory each slot granted counts, a size such as `2g`; None: none declared per slot.
+    memory_per_slot: str | None = None
+    #: The most weight one lease under the rule could ever be granted, as the daemon serves it;
+    #: None when it does not say.
+    ceiling: int | None = None
+    #: The most an agent hook asks under the rule: what its range alone would be granted on
+    #: an idle machine (`admission.alone`), as the daemon serves it; None when it does not say.
+    hook_ceiling: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_weight is None or self.max_weight < self.weight:
+            object.__setattr__(self, "max_weight", self.weight)
 
     @classmethod
     def of(cls, row: Mapping) -> Rule:
         """The rule a served row describes. A row without `threads` (a daemon older than the
-        setting) has `threads` "jobs", and one with a `threads` it does not know has 1."""
+        setting) has `threads` "jobs", and one with a `threads` it does not know has 1; one
+        without a `max_weight` that is a count (a daemon older than ranges) asks for its
+        `weight` alone. A row with a `memory_per_slot` declares that alone: its `memory` is
+        served only for clients from before memory per slot."""
+        weight = int(row["weight"])
+        per_slot = row.get("memory_per_slot")
         return cls(
-            programs=frozenset(row["programs"]), weight=int(row["weight"]), pool=row.get("pool"),
-            args=row.get("args"), source=row.get("source", "config"), memory=row.get("memory"),
-            never=row.get("never"), threads=_threads(row.get("threads")),
+            programs=frozenset(row["programs"]), weight=weight, pool=row.get("pool"),
+            args=row.get("args"), source=row.get("source", "config"),
+            memory=None if per_slot else row.get("memory"), never=row.get("never"),
+            threads=_threads(row.get("threads")), max_weight=_count(row.get("max_weight")),
+            memory_per_slot=per_slot or None, ceiling=_count(row.get("ceiling")),
+            hook_ceiling=_count(row.get("hook_ceiling")),
         )  # fmt: skip
 
     def matches(self, program: str, args: Sequence[str]) -> bool:
@@ -130,20 +153,23 @@ class Rule:
         return self.args is None or re.search(self.args, " ".join(args)) is not None
 
 
-#: A served `threads` share: the job count divided among N workers, and at most K.
-_SHARE = re.compile(r"jobs/[1-9][0-9]{0,5}(:[1-9][0-9]{0,5})?")
-
-
 def _threads(value: object) -> int | str:
     """A served `threads`: "jobs" when missing, the value when it is "jobs", a count of at
     least 1 or a share ("jobs/N", "jobs/N:K"), and 1 for anything else."""
     if value is None or value == "jobs":
         return "jobs"
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+    if _count(value) is not None:
         return value
-    if isinstance(value, str) and _SHARE.fullmatch(value):
+    if jobs.is_share(value):
         return value
     return 1
+
+
+def _count(value: object) -> int | None:
+    """`value` if it is a count of at least 1, else None."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return None
 
 
 @dataclass(frozen=True)
@@ -447,7 +473,8 @@ def programs(command: str, *, depth: int = 0) -> Iterator[tuple[str, list[str]]]
 
 def match(rules: Iterable[Rule], command: str) -> Match | None:
     """The rule `command` takes a lease under: the heaviest match among the config's rules,
-    else among the built-in ones; None when no rule matches."""
+    else among the built-in ones, by `weight` (the least of a range), the first of equals;
+    None when no rule matches."""
     return match_programs(rules, list(programs(command)))
 
 

@@ -23,6 +23,8 @@ memory = "$memory"
 
 # How the slots are split. A pool's `reserved` slots are never taken by another pool; `max` is
 # the most it may hold; lower `priority` is served first. Leave [pools] out for this same split.
+# A command that asks for a range of slots is not given a pool's last `headroom` slots beyond
+# its least (default "auto": `max // 4`), so the next one can start.
 [pools.work]                # your own builds, tests and agents' tool calls
 reserved = $work_reserved
 max = $work_max

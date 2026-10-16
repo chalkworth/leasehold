@@ -16,19 +16,30 @@ from leasehold.units import memory_to_bytes
 SCHEMA = 2
 
 
-def public(row: dict) -> dict:
-    """A ledger row as the API shows it."""
+def public(row: dict, policy: AdmissionPolicy | None = None) -> dict:
+    """A ledger row as the API shows it. A lease's `weight` is the size it was granted; a
+    waiting item's, the least it needs. `min_weight` and `max_weight` are the lease's range
+    (both `weight` for a row from before ranges). A waiting item's `max_weight` is the most it
+    asked for, cut as admission would cut it now under `policy` (`AdmissionPolicy.most`) when
+    one is given."""
+    weight = row["weight"]
+    most = _or(row.get("max_weight"), weight)
+    if policy is not None and "acquired_at" not in row and row["pool"] in policy.pools:
+        most = policy.most(row["pool"], weight, most, row.get("memory"), row.get("memory_per_slot"))
     out = {
         "lease_id": row["item_id"],
         "kind": row["kind"],
         "pool": row["pool"],
-        "weight": row["weight"],
+        "weight": weight,
+        "min_weight": _or(row.get("min_weight"), weight),
+        "max_weight": most,
         "user": row["user"],
         "session": row["session"],
         "labels": row["labels"],
         "ttl_s": row["ttl_s"],
         "expires_at": row["expires_at"],
         "memory_bytes": row.get("memory"),
+        "memory_per_slot_bytes": row.get("memory_per_slot"),
     }
     if "acquired_at" in row:
         out |= {
@@ -42,6 +53,10 @@ def public(row: dict) -> dict:
     else:
         out["queued_at"] = row["queued_at"]
     return out
+
+
+def _or(value: int | None, default: int) -> int:
+    return default if value is None else value
 
 
 def standing(config: MachineConfig) -> list[dict]:
@@ -83,7 +98,9 @@ def counted(policy: AdmissionPolicy, item: dict) -> int:
     """The memory, in bytes, admission counts for a lease or queued item (0 without a budget)."""
     shaped = policy.pools.get(item["pool"])
     host = shaped.host if shaped is not None else MACHINE
-    return policy.counted(host, item["weight"], item.get("memory_bytes"))
+    return policy.counted(
+        host, item["weight"], item.get("memory_bytes"), item.get("memory_per_slot_bytes")
+    )
 
 
 def with_counted(policy: AdmissionPolicy, items: list[dict]) -> list[dict]:
@@ -136,6 +153,7 @@ def pools(
             "reserved": pool.reserved,
             "max": shaped.max,
             "priority": pool.priority,
+            "headroom": shaped.headroom,
             "preemptible": name in lend,
             "observed": name == config.observed_pool,
             "closed": name in policy.closed,

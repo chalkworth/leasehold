@@ -446,3 +446,21 @@ def test_a_rule_without_a_pool_is_taken_when_there_is_no_observed_pool(tmp_path)
     )
     assert config.observed_pool is None
     assert config.commands.rule[0].pool is None
+
+
+def test_the_observed_pool_keeps_no_headroom_unless_the_config_gives_one(tmp_path):
+    from leasehold.admission import alone
+
+    pools = {
+        "work": {"reserved": 0, "max": 16, "priority": 0, "headroom": 0},
+        "observed": {"reserved": 0, "max": 16, "priority": 3},
+    }
+    shape = {"kinds": {"work": "work", "external": "work"}, "lend": {"pools": [], "quiet_s": 0}}
+    config = machine_config(tmp_path, ceiling={"slots": 16}, pools=pools, **shape)
+    policy = config.policy()
+    assert policy.observed == frozenset({"observed"}) and policy.pools["observed"].headroom == 0
+    assert alone(policy, "work", 1, 16) == 16
+    given = pools | {"observed": pools["observed"] | {"headroom": 4}}
+    policy = machine_config(tmp_path, ceiling={"slots": 16}, pools=given, **shape).policy()
+    assert policy.pools["observed"].headroom == 4
+    assert alone(policy, "work", 1, 16) == 16  # nothing waits for it: it keeps nothing free

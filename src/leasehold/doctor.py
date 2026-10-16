@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 from leasehold import contain, discovery, machine, paths, upgrade
-from leasehold.admission import gib
+from leasehold.admission import alone, gib
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.facts import meminfo
 
@@ -151,6 +151,40 @@ def check_hard_cpu(config) -> Check | None:
         "fill every CPU while it holds a lease",
         "to cap each contained command at its weight in CPUs, set `hard_cpu = true` under "
         "[contain] (it then cannot use idle CPUs either); see docs/reference.md, Containment",
+    )
+
+
+def check_headroom(config) -> Check | None:
+    """A warning naming each pool where a range alone on an idle machine is never granted more
+    than its least (`admission.alone`): the pool's own headroom fills it, or the machine's
+    headroom (the largest of its pools') and the other pools' reservations leave it no slot.
+    Only a pool a range could be asked for in is judged: one a `[commands]` rule with a range
+    (the built-in rules included) leases in, or one whose `headroom` the config sets. The
+    observed pool, which takes no requests, and a pool of 1 slot are not judged."""
+    if config is None:
+        return None
+    policy = config.policy()
+    ranged = {
+        config.rule_pool(rule) for _, rule in config.commands.rules() if rule.most > rule.weight
+    }
+    stuck = [
+        f"{name} (max {pool.max}, headroom {policy.pools[name].headroom})"
+        for name, pool in config.pool_set().pools.items()
+        if name != config.observed_pool
+        and pool.max > 1
+        and (name in ranged or pool.headroom != "auto")
+        and alone(policy, name, 1, pool.max) <= 1
+    ]
+    if not stuck:
+        return None
+    return Check(
+        "headroom",
+        "warn",
+        f"a range is never granted more than its least in {', '.join(stuck)}: the headroom "
+        "kept free in the pool and on the machine, with the other pools' reservations, leaves "
+        "no slot for extra slots",
+        "lower `headroom` in the pool, or in the pool with the largest headroom, or lower the "
+        "other pools' `reserved`",
     )
 
 
@@ -445,6 +479,7 @@ def run(
         check_memory(resolved, memory_bytes),
         check_rules(resolved, memory_bytes),
         check_hard_cpu(resolved),
+        check_headroom(resolved),
         check_guard_weights(resolved, memory_bytes),
         check_ledger(resolved),
     ):

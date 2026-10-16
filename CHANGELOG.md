@@ -50,6 +50,95 @@ here.
   `leasehold.commands.XDIST_ARGS` and `CommandRule.threads`. `leasehold.shell.Rule.threads`,
   `leasehold.shell.threads` and `leasehold.shell.Found`. `leasehold.shims.within_lease` and
   `WITHIN_LEASE_TIMEOUT_S`.
+- A request may ask for a range of slots, MIN-MAX. It waits in line for MIN, exactly as a
+  request of MIN would. When admitted, it is granted a size from MIN to MAX that it keeps for
+  its life (docs/reference.md, "Ranges: MIN-MAX slots"). A range is asked for by:
+  - a `[[commands.rule]]` `weight = "MIN-MAX"` (a count, `weight = 4`, is as before);
+  - `hold --weight MIN-MAX` and `acquire --weight MIN-MAX`;
+  - `POST /v1/acquire`'s new `max_weight` (at least `weight`, which stays the least);
+  - `LEASEHOLD_WANT=MIN-MAX` (or `=N`) in the environment of a command a PATH shim leases, which
+    replaces the matching rule's weight;
+  - the MCP server's `acquire_lease`, whose new optional `max_weight` makes a range.
+- Extra slots past MIN are dealt one at a time to the requests admitted together, each up to
+  its share of what the pool had free. A request that reaches its MAX leaves the rest of its
+  share to the others: a 1-2 and a 1-8 on an idle pool of 8 with no headroom get 2 and 6.
+  Every extra slot leaves room, in slots and in memory, for each request whose turn came in the
+  same decision but which did not fit, and never takes another pool's reservation. No extra
+  slot is dealt while the memory guard holds an allowance or holds the pools to their
+  reservations, or while memory is under pressure: each request then gets its MIN.
+- A waiting range keeps the MAX it asked for. Admission cuts it, when it admits the request, to
+  the most one lease could be granted then (`max`, overrides, standing work and the memory
+  ceiling), so a pool's `max` raised while it waits counts. Its queued answer, its `blocked`
+  text, the status and leases queue, `top` and events all give its MAX cut the same way.
+- A pool's new `headroom` (`[pools.<name>] headroom`, a count or `"auto"`) is how many slots
+  extra slots leave free in the pool for requests that arrive later. `"auto"`, the
+  default, is `max // 4`: 2 for a pool of 8, 1 for 4 to 7, 0 below 4, and 0 for the observed
+  pool. On the machine, extra slots leave free the largest headroom among the pools an extra
+  slot could land in. Those are the pools that are open, not capped and not observed, and
+  whose headroom is below the most they could hold. Extra slots also leave free the memory
+  that headroom would count, at `assumed_per_slot` or the range's own per-slot size if that
+  is larger. They never take another pool's unused reservation either. A lone 1-8 on an idle
+  pool of 8 gets 6. Headroom never holds back a MIN or a fixed weight, and helps only
+  requests whose MIN fits in it. A waiting range holds its place at the head of its pool's
+  queue by its MIN, as before, so a large MIN waits and the requests behind it wait too.
+  `GET /v1/status` gives each pool's `headroom` as a count, `leasehold status` shows it
+  beside the reservation when it is not 0, and `leasehold doctor` warns about a pool where a
+  range alone is never granted more than its MIN, judging only pools that a range rule
+  leases in or whose headroom the config sets.
+- `memory_per_slot`, a `[[commands.rule]]` key, `hold --memory-per-slot`,
+  `acquire --memory-per-slot` and a `POST /v1/acquire` field, declares memory for each slot
+  granted instead of a total. It counts as the size granted times it, and, when contained, the
+  command is held to that (`MemoryHigh`). A request gives `memory` or `memory_per_slot`, not
+  both. `[ceiling] memory` limits a per-slot request with or without a memory budget: MIN
+  times the size over it is refused, MAX is cut to fit it, and a rule whose MIN times the size
+  is over it is served as `never`. A per-slot lease's `memory_bytes` in the status and leases
+  is the total it was granted, its weight times the size.
+- A granted lease, in the acquire answer, `GET /v1/leases`, `GET /v1/status` (`leases` and
+  `queue`) and `acquire`'s JSON line, has `min_weight`, `max_weight` and
+  `memory_per_slot_bytes` beside `weight`, the size granted; a queued item's `weight` is its
+  least. A queued answer to `POST /v1/acquire` gives the `min_weight` and `max_weight` the
+  request waits with, its MAX cut as admission would cut it now. `POST /v1/renew` answers a
+  lease's `weight`, `min_weight`, `max_weight`, `pool` and `jobs`. Events carry `min_weight`
+  and `max_weight`. `GET /v1/commands` serves each rule's `max_weight`, `memory_per_slot`,
+  `ceiling` (the most one lease under the rule could ever be granted) and `hook_ceiling` (what
+  the rule's range alone would be granted on an idle machine), computed when served. The
+  status `schema` stays 2.
+- `leasehold top` shows a ranged lease's weight as `3/2-4` (granted 3 of 2-4) and a waiting
+  range as `needs 2-4 slots`; `leasehold leases` the same in its `W` column. A waiting range's
+  `blocked` says `this needs at least 2 (asks up to 4)`. `leasehold commands` shows each
+  rule's range and memory per slot.
+- A PATH shim that runs inside a Claude Code hook's lease (under `leasehold run`) sizes its
+  program to that lease: the hook notes the job count, the `threads` the command line gives
+  (`leasehold.shell.threads`: a count, "jobs", or an xdist run's share) and the size granted.
+  The shim sizes the variables `hold` would to the hook's lease, `LEASEHOLD_WEIGHT` among
+  them, and keeps a value the user set. A note from an older hook
+  with four fields gives no sizing, and the program runs as before. A note with six fields
+  gives the job count and threads but no weight, and the shim drops any `LEASEHOLD_WEIGHT`
+  the program would inherit.
+- The MCP server shows a lease's range only when the daemon's answer gives one, so a daemon
+  from before ranges shows the single weight it granted. A lease granted while the agent was
+  away takes its weight, range, pool and job count from the renewal.
+- Library: `leasehold.weights` (`parse`, `text`, `asked`, `ENV_WANT`);
+  `leasehold.admission.Grant` and `grants`; `Waiting.max_weight`, `Waiting.memory_per_slot`
+  and `Waiting.most`; `Held.memory_per_slot`; `PoolPolicy.headroom`;
+  `leasehold.admission.alone`; `AdmissionPolicy.most`, `lease_memory` and `observed`, which
+  `from_pools` takes, and `lease_memory`, which `leasehold.machine.MachineConfig.policy`
+  takes; `AdmissionPolicy.counted`, `refusal` and
+  `heaviest`, and `fits`, take `memory_per_slot`;
+  `leasehold.model.Pool.headroom` and `headroom_slots`;
+  `leasehold.ledger.LedgerItem.max_weight` and `memory_per_slot`; `Renewal.weight`,
+  `min_weight`, `max_weight` and `pool`; `leasehold.agent.AcquireRequest.max_weight` and
+  `memory_per_slot`; `leasehold.commands.CommandRule.max_weight`, `memory_per_slot` and
+  `most`; `leasehold.shell.Rule.max_weight`, `memory_per_slot`, `ceiling` and
+  `hook_ceiling`;
+  `leasehold.machine.rule_memory`; `leasehold.hold.hold`, `lease_request` and `run_leased`,
+  and `leasehold.handoff.acquire`, take `max_weight` and `memory_per_slot` (`run_leased` only
+  the latter); `leasehold.hold.own_env`; `leasehold.hooknotes.write` takes `jobs`,
+  `threads` and `weight`, and `leasehold.hooknotes.sizing` and `weight` read them;
+  `leasehold.hooknotes.under_agent`; `leasehold.machine.lease_memory_limit`; `leasehold.jobs.is_share`;
+  `leasehold.shims.covered_env`; `leasehold.doctor.check_headroom`;
+  `leasehold.mcp_server.Held.waiting`, and `Held.sizes` returns None when the daemon has said
+  no range; `leasehold.client.OPTIONAL`.
 
 ### Changed
 
@@ -78,6 +167,39 @@ here.
   `env`. `leasehold.hold.auto_size` takes `env` and `cwd`, and returns the matching
   `leasehold.shell.Rule` instead of a `(weight, memory)` pair. `leasehold.shell.programs`
   yields `Found` pairs.
+- `leasehold.admission.decide` is `grants` without the sizes. Admission, the ledger and every
+  view count a lease at the size it was granted (`leases.weight`), which is its least unless
+  it asked a range.
+- `hold` removes `LEASEHOLD_WANT` from its command's environment, with a lease or without one.
+- `LEASEHOLD_WANT` past the most a rule's lease could ever be granted is cut to it, and
+  leasehold says what it cut; a shim or the hook no longer has the command refused for it
+  (with a daemon that serves `ceiling`).
+- The Claude Code hook asks for a rule's range, or a range in `LEASEHOLD_WANT`, as a range,
+  with both ends cut to the rule's `hook_ceiling`. It waits for MIN only, and admission sizes
+  it like any other range. Its note records the size granted, the job count and the threads,
+  so a PATH shim the command runs through under `leasehold run` sizes the command to the
+  grant. Outside `leasehold run` the hook cannot size the command, which uses what it finds,
+  as under a fixed heavy rule in 0.3. When a range is granted less than its most, the hook
+  also tells the agent the size, as `additionalContext`: "leasehold: pytest was granted 3 of
+  2-6 slots; size it to 3 jobs (or run the agent under `leasehold run`)". A fixed weight, or
+  a range granted its most, tells it nothing, as in 0.3. When the hook cuts either end to
+  `hook_ceiling`, its log says so. A daemon from before ranges grants the hook its MIN, as it
+  does any range.
+- When a hook or shim gives up waiting, its busy message says it gave up its place in line
+  (`gave up its place in line (#1)`) where it said `queued #1`.
+- A request refused for asking more memory than one lease may be given gives the total in
+  GiB, and names the limit: `[ceiling] memory` when the config sets it, else the machine's
+  memory in GiB, where it gave the machine's size in bytes and called it `[ceiling]
+  memory`. A rule served as `never` for the same reason says the same.
+- A PATH shim run under an agent whose hook holds a lease now, for any program, ignores
+  `LEASEHOLD_WANT`: in the agent's environment it was what the hook asked for.
+- `leasehold.client.Client.acquire` asks a daemon that refuses any of `memory`, `max_weight`
+  and `memory_per_slot` as unknown again without them, one round per refusal, where it retried
+  only `memory` before.
+- Among one source's `[commands]` rules that match, the one with the greatest weight (the
+  least of a range) wins, the first of equals, as before; the docs now say so.
+- Asking again under a lease id already waiting keeps the first request's range: to change
+  it, give the place up and ask under a new id (docs/reference.md).
 
 ### Compatibility
 
@@ -92,6 +214,26 @@ here.
 - The xdist rule does not reach `python -m pytest` or a virtualenv's `pytest` that a script
   runs inside a lease, commands leased by the Claude Code plugin, or tox and nox environments,
   which do not pass these variables in by default.
+- The ledger's tables gain columns in place, at the same schema version (4), as 0.3 added
+  `memory`: `queue.max_weight` and `queue.memory_per_slot`; `leases.min_weight`,
+  `leases.max_weight` and `leases.memory_per_slot`, all NULL for rows written before. A 0.3
+  process sharing the ledger reads each lease's `weight` as the size it holds, and admits a
+  waiting range at its least. A lease that declares `memory_per_slot` also records the total
+  it was granted (its weight times the size) as `memory`, which is what a 0.3 process counts,
+  so both count the same bytes. `AdmissionPolicy.counted` takes the per-slot size when an item
+  has both. Two daemons on one ledger is unusual, but if a 0.3 process admits a queued
+  per-slot request, it writes no memory for it, and this version counts that lease at the
+  assumed size.
+- A client asking a daemon from before ranges is granted the least of its range; a
+  `memory_per_slot` is sent to it as the `memory` of that least. A client reading rules from
+  such a daemon (no `max_weight` served) asks for each rule's `weight` alone, and, with no
+  `ceiling` served, does not cut `LEASEHOLD_WANT`.
+- A rule that declares only `memory_per_slot` is also served a `memory`, its least weight's
+  worth, so a 0.3 client still declares memory for it. A newer client reads the
+  `memory_per_slot` and ignores that `memory`.
+- With every request asking a single weight (no range anywhere), admission decides exactly as
+  before, at the same sizes. Built-in rules and the configs `init` writes keep fixed weights.
+- A config from 0.3 has no `headroom`, so its pools get `"auto"`; that only affects ranges.
 
 ## [0.3.0]
 

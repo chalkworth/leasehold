@@ -298,8 +298,12 @@ def _random_case(rng: random.Random):
     return pool_set, held, waiting, served, closed, capped, standing
 
 
+#: The fields added since `admission_before_memory`: memory, and ranges of weight.
+_NEW_FIELDS = frozenset({"memory", "memory_per_slot", "max_weight"})
+
+
 def _old(cls, obj):
-    return cls(**{k: v for k, v in vars(obj).items() if k != "memory"})
+    return cls(**{k: v for k, v in vars(obj).items() if k not in _NEW_FIELDS})
 
 
 @pytest.mark.parametrize("block", range(4))
