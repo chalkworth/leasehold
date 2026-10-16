@@ -61,10 +61,11 @@ def waiting(name, weight, pool="work", **kw) -> Waiting:
     return Waiting(key=("s", name), pool=pool, user=name, weight=weight, order=(0.0, 0), **kw)
 
 
-def aimed(policy, leases, *, wait=(), fixed=(), eligible=None) -> dict[str, int]:
+def aimed(policy, leases, *, wait=(), fixed=(), eligible=None, headroom="keep") -> dict[str, int]:
     state = State(held=held(*leases, fixed=fixed), waiting=tuple(wait))
     every = {e.key for e in leases} if eligible is None else {("s", n) for n in eligible}
-    return {k[1]: t for k, t in targets(state, policy, leases, every).items()}
+    found = targets(state, policy, leases, every, headroom=headroom)
+    return {k[1]: t for k, t in found.items()}
 
 
 # --- growing ------------------------------------------------------------------------------------
@@ -88,10 +89,15 @@ def test_nothing_grows_while_an_item_waits_in_its_pool():
     ) == {"a": 2}
 
 
-def test_an_elastic_lease_grows_into_the_headroom_a_fixed_range_leaves():
+def test_growth_keeps_the_headroom_unless_told_to_leave_one_slot_or_use_it():
     policy = pools(slots=8, headroom=2)
     assert grants(State(waiting=(waiting("r", 1, max_weight=8),)), policy)[0].weight == 6
-    assert aimed(policy, [lease("a", 6, 1, 8)]) == {"a": 7}
+    six, seven = [lease("a", 6, 1, 8)], [lease("a", 7, 1, 8)]
+    assert aimed(policy, six) == {"a": 6}  # as a fixed range leaves it
+    assert aimed(policy, six, headroom="leave-one") == {"a": 7}
+    assert aimed(policy, seven, headroom="leave-one") == {"a": 7}
+    assert aimed(policy, seven, headroom="use") == {"a": 8}
+    assert aimed(pools(slots=8), seven, headroom="leave-one") == {"a": 8}  # none to leave
 
 
 def test_growth_stops_at_the_most_and_at_what_is_free():
@@ -117,6 +123,28 @@ def test_growth_fits_the_memory_budget_and_one_leases_ceiling():
     assert aimed(budget, [lease("a", 3, 2, 6, memory_per_slot=G)]) == {"a": 4}
     ceiling = pools(lease_memory=3 * G)
     assert aimed(ceiling, [lease("a", 3, 2, 6, memory_per_slot=G)]) == {"a": 3}
+
+
+def test_growth_counts_the_assumed_memory_against_one_leases_ceiling():
+    ceiling = pools(memory=20 * G, assumed_memory=G, lease_memory=3 * G)
+    assert ceiling.most("work", 2, 6) == 3
+    assert aimed(ceiling, [lease("a", 3, 2, 6)]) == {"a": 3}
+    assert aimed(ceiling, [lease("a", 2, 2, 6)]) == {"a": 3}
+
+
+def test_growth_beside_an_item_room_was_made_for_counts_that_item_once():
+    # Lowering a by one slot lets w in, counting its 7 GiB; b's slot fits in the 1 GiB left.
+    shape = {
+        "a": Pool(reserved=0, max=16, headroom=0),
+        "b": Pool(reserved=0, max=16, headroom=0, priority=1),
+    }
+    policy = AdmissionPolicy.from_pools(
+        PoolSet(slots=16, pools=shape), memory=20 * G, assumed_memory=G
+    )
+    a = lease("a", 6, 2, 6, pool="a", memory_per_slot=2 * G)
+    b = lease("b", 2, 1, 4, pool="b")
+    wait = [waiting("w", 1, pool="a", memory=7 * G)]
+    assert aimed(policy, [a, b], wait=wait) == {"a": 5, "b": 3}
 
 
 def test_nothing_grows_while_memory_is_short_or_the_pool_is_capped_or_closed():
@@ -282,6 +310,9 @@ def test_growth_never_overfills_slots_the_budget_or_one_leases_ceiling(block):
             assert after.used.get(e.pool, 0) <= top(policy, e.pool), seed
             free = policy.slots[MACHINE] - after.host_used.get(MACHINE, 0)
             assert free >= _owed(after, policy, e.pool), seed
+            # The default leaves the pool's headroom free.
+            room = top(policy, e.pool) - policy.pools[e.pool].headroom
+            assert after.used.get(e.pool, 0) <= room, seed
             limit = policy.lease_memory.get(MACHINE)
             if limit is not None and e.memory_per_slot and MACHINE in policy.memory:
                 assert target[e.key] * e.memory_per_slot <= limit, seed

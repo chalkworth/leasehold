@@ -23,9 +23,11 @@ sized exactly as `leasehold.admission.grants` says. After that, per host:
   hold-down: those whose size last changed long enough ago). It may grow one slot per
   decision, up to its most, into real slack: the slot rules hold with room kept for every
   stopped item, and the memory it counts fits the budget beside theirs, as for an extra slot
-  of a range (`admission._extra_fits`). Unlike that slot, it may use the pool's and the host's
-  `headroom`, which it gives back when an item arrives for it. Leases take turns by user, then
-  session, then lease, the least extra first.
+  of a range (`admission._extra_fits`). The `headroom` setting says how much of the pool's and
+  the host's `headroom` it leaves free: all of it ("keep", the default, as for that slot), one
+  slot of each ("leave-one"), or none ("use"), since it gives the slots back when an item
+  arrives for them. Leases take turns by user, then session, then lease, the least extra
+  first.
 
 A lease never goes below its least or above its most. Growth never fills a pool past its top,
 a host past its slots or into another pool's reservation, and never counts memory past the
@@ -36,6 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
+from typing import Literal, get_args
 
 from leasehold.admission import (
     AdmissionPolicy,
@@ -49,6 +52,15 @@ from leasehold.admission import (
     _Tally,
     fits,
 )
+
+#: How much of the headroom growth leaves free (the module docstring).
+Headroom = Literal["keep", "leave-one", "use"]
+
+#: The choices of `Headroom`.
+HEADROOM_MODES: tuple[str, ...] = get_args(Headroom)
+
+#: What growth leaves of the headroom unless told otherwise.
+DEFAULT_HEADROOM: Headroom = "keep"
 
 
 @dataclass(frozen=True)
@@ -77,9 +89,12 @@ def targets(
     policy: AdmissionPolicy,
     leases: Sequence[Elastic],
     eligible: Collection[ItemKey] = frozenset(),
+    *,
+    headroom: Headroom = DEFAULT_HEADROOM,
 ) -> dict[ItemKey, int]:
     """The size each of `leases` should have now (the module docstring). A lease in a pool the
-    policy does not have keeps its size. `eligible` are the leases that may grow."""
+    policy does not have keeps its size. `eligible` are the leases that may grow, leaving
+    `headroom` of the headroom free."""
     tally = _Tally.of(state, policy)
     # What admission would still let in counts as held (after a decision, nothing is).
     _, stopped = _admit_least(state, policy, tally)
@@ -97,10 +112,14 @@ def targets(
             lower(e, least)
         else:
             lower(e, max(least, _most(policy, e)))
+    # An item counted as admitted (`_make_room`) is in the tally; only the others are kept
+    # room for.
+    kept: dict[str, list[Waiting]] = {}
     for pool in _pools_in_order(policy):
         for head in stopped.get(pool, []):
-            _make_room(tally, policy, known, target, head)
-    _grow(state, policy, tally, known, target, eligible, _Kept.of(policy, stopped))
+            if not _make_room(tally, policy, known, target, head):
+                kept.setdefault(pool, []).append(head)
+    _grow(state, policy, tally, known, target, eligible, _Kept.of(policy, kept), headroom)
     return target
 
 
@@ -154,20 +173,21 @@ def _make_room(
     leases: Sequence[Elastic],
     target: dict[ItemKey, int],
     head: Waiting,
-) -> None:
+) -> bool:
     """Lower the elastic leases on `head`'s host, largest extra first, until `head` fits, when
     lowering them all to their least would do it; then count `head` as admitted in `tally`.
-    Nothing is lowered, and `head` is not counted, when that would not be enough."""
+    Nothing is lowered, and `head` is not counted, when that would not be enough. Whether it
+    was counted."""
     host = policy.pools[head.pool].host
     if host in policy.memory_pressing:
-        return
+        return False
     mine = [e for e in leases if e.host == host and target[e.key] > e.min_weight]
     if not _fits(tally, policy, head):
         trial = _copy(tally)
         for e in mine:
             _move(trial, policy, e, e.min_weight - target[e.key])
         if not _fits(trial, policy, head):
-            return
+            return False
         lowered: dict[ItemKey, int] = {}
         while not _fits(tally, policy, head):
             e = max(
@@ -193,6 +213,7 @@ def _make_room(
     tally.add(head.pool, host, head.user, head.session, head.weight, counted)
     if counted:
         tally.fresh_memory[host] = tally.fresh_memory.get(host, 0) + counted
+    return True
 
 
 @dataclass
@@ -225,6 +246,7 @@ def _grow(
     target: dict[ItemKey, int],
     eligible: Collection[ItemKey],
     kept: _Kept,
+    headroom: Headroom,
 ) -> None:
     """Grow each eligible lease by at most one slot into real slack (the module docstring)."""
     waiting = {w.pool for w in state.waiting}
@@ -247,7 +269,7 @@ def _grow(
         e = min(growing, key=lambda x: turns.order(x, target[x.key] - x.min_weight))
         growing.remove(e)
         memory = _slot_memory(policy, e)
-        if _extra_fits(tally, policy, e.pool, kept, memory, headroom=False):
+        if _extra_fits(tally, policy, e.pool, kept, memory, headroom=headroom):
             _move(tally, policy, e, 1)
             target[e.key] += 1
             turns.add(e, 1)

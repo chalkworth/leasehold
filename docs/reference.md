@@ -151,13 +151,14 @@ was granted as its `memory`, which is what leasehold 0.3 reads.
 
 ### Elastic leases
 
-A range may also ask to be elastic: `hold --elastic`, `elastic: true` in
-[`POST /v1/acquire`](#the-http-api), and by default any `hold --jobserver` with a range. An
-elastic lease is admitted and first sized exactly as any range is. After that its size can
-move between MIN and MAX while it is held. The holder makes two promises: it takes slots when
-they are offered, and it gives slots back when asked. Nothing is ever taken from it. A holder
-that keeps more than its target keeps those slots, no command is stopped, and only a `lend`
-lease is ever revoked, as before.
+A range may also be elastic. `hold --jobserver` with a range makes its lease elastic once the
+command's jobs take tokens from the jobserver, and an API client asks for one with
+`elastic: true` in [`POST /v1/acquire`](#the-http-api) or makes a held range elastic with
+`POST /v1/elastic`. An elastic lease is admitted and first sized exactly as any range is. After
+that its size can move between MIN and MAX while it is held. The holder makes two promises: it
+takes slots when they are offered, and it gives slots back when asked. Nothing is ever taken
+from it. A holder that keeps more than its target keeps those slots, no command is stopped,
+and only a `lend` lease is ever revoked, as before.
 
 The daemon works out each elastic lease's `target`, the size it should have now, in every
 decision, and every renewal answers with it. The holder moves toward it with
@@ -165,14 +166,16 @@ decision, and every renewal answers with it. The holder moves toward it with
 
 - up by one slot per decision, up to MAX, while nothing waits in the lease's pool, the pool is
   open and not held to its reservation, memory is neither short nor under pressure, and the
-  lease's size has not changed for `[elastic] settle_s` (15 s by default; giving slots back is
-  never held back). The slot must be free by the same rules an extra slot of a range follows,
-  room kept for any request whose turn came in another pool, with one difference: an elastic
-  lease may grow into the pool's and the machine's `headroom`, because it gives those slots
-  back when a request arrives for them. Its memory, at its own size per slot or the assumed
-  one, must fit the budget and `[ceiling] memory`. When several leases could grow and slots
-  are short, users take turns, then each user's sessions, the one with the fewest extra slots
-  first;
+  lease's size has not changed for `[elastic] settle_s` (15 s by default, and at least 1 s;
+  giving slots back is never held back). The slot must be free by the same rules an extra slot
+  of a range follows, with room kept for any request whose turn came in another pool. By
+  default it also leaves the pool's and the machine's `headroom` free, as a range does.
+  `[elastic] headroom` changes that: `"keep"` (the default) leaves all of it, `"leave-one"`
+  lets a lease grow into the headroom but leaves one slot of it free, and `"use"` lets it grow
+  into all of it, since an elastic lease gives those slots back when a request arrives for
+  them. Its memory, at its own size per slot or the assumed one, must fit the budget and
+  `[ceiling] memory`. When several leases could grow and slots are short, users take turns,
+  then each user's sessions, the one with the fewest extra slots first;
 - down, when a request whose turn has come does not fit, and lowering the elastic leases on the
   machine to their MIN would let it in. The largest extras are lowered first, one slot at a
   time, until the request fits, and a lease whose slots would not help it keeps them. A
@@ -185,30 +188,43 @@ A resize that gives slots back always succeeds, and the daemon admits whatever t
 same transaction. One that takes slots succeeds only up to the target, and only while the slots
 are still free: a request that arrived in between, or another elastic lease that took them
 first, gets them, and the resize is answered 409. The holder asks again after its next renewal.
-Every resize is checked in the ledger's transaction, so processes sharing the ledger never hold
-more than the pools allow.
+A refused resize changes only that lease's target. Every resize is checked in the ledger's
+transaction, so processes sharing the ledger never hold more than the pools allow. Status shows
+how many slots each lease is asked to give back (`giving_back`), and `top` says so beside it.
 
-`hold` is the reference holder. With a jobserver it starts with the job count of the size
-granted, so the jobserver holds that many tokens less one, and it renews at least every
-`settle_s`. When the target rises it asks for it, and once granted it puts the new jobs' tokens
+`hold` is the reference holder, and it follows a lease only through a jobserver: `--elastic`
+without `--jobserver` exits 2, because nothing would make the command's jobs follow the lease.
+It starts with the job count of the size granted, so the jobserver holds that many tokens less
+one, and it renews at least every `settle_s`. The lease is a plain range until a job takes a
+token, which shows the command's jobs follow the jobserver; `hold` then makes it elastic. A
+command that never takes one keeps the size it was granted, neither growing nor giving any
+back. When the target rises `hold` asks for it, and once granted it puts the new jobs' tokens
 in the jobserver and sets the scope's `CPUWeight` (and, with a memory per slot, `MemoryHigh`)
-for the new size with `systemctl --user set-property --runtime`. When the target falls it takes
-free tokens out of the jobserver as jobs give them back, so no running job is stopped, and
-gives the slots back once no more jobs can run than the target allows. A scope that cannot be
-resized is reported, and the lease moves anyway.
+for the new size with `systemctl --user set-property --runtime`. When the target falls, a
+thread blocked reading the jobserver takes each token a job gives back until the jobs left fit
+the target, so no running job is stopped, and `hold` then gives the slots back. A job killed
+while it held a token never gives it back, so after 120 s the tokens still out are taken as
+lost and the slots are given back anyway. A scope that cannot be resized is reported, and the
+lease moves anyway. The calls `hold` makes for this wait no longer than a renewal interval, so
+they never hold a renewal up.
 
 Only jobserver clients see the size change: make, ninja 1.13 and later, cargo and rustc, and
 GCC's LTO take a token before each extra job, so the number of jobs they run follows the
-tokens. The job and thread variables (`LEASEHOLD_JOBS`, `CARGO_BUILD_JOBS`, `OMP_NUM_THREADS`
-and the others), the `-jN` in `MAKEFLAGS` and `LEASEHOLD_WEIGHT` keep the values the command
-started with, because a running process's environment cannot be changed from outside. A command
-that reads only those runs at its first size. The Claude Code hooks, the MCP server and the
-PATH shims never ask for elastic leases.
+tokens. The job and thread variables (`LEASEHOLD_JOBS`, `OMP_NUM_THREADS` and the others), the
+`-jN` in `MAKEFLAGS` and `LEASEHOLD_WEIGHT` keep the values the command started with, because a
+running process's environment cannot be changed from outside. Two variables differ for an
+elastic lease. `CMAKE_BUILD_PARALLEL_LEVEL` is not set, since `cmake --build` passes it to make
+as `-jN`, and `CARGO_BUILD_JOBS` is the job count of MAX, since cargo also takes a token for
+each job. A `make -jN` given its own count, on the command line or in a recipe, leaves the
+jobserver and runs its own: it runs N jobs whatever the lease holds, and the lease keeps its
+size. `hold` warns when the command line gives a `-j` with a number. The Claude Code hooks,
+the MCP server and the PATH shims never ask for elastic leases.
 
 For example, a `work` pool of 4 slots with no headroom, where a test run holds 2:
 
 1. `leasehold hold --weight 2-4 --jobserver -- make` is granted 2, the 2 left. make runs 2
-   jobs: its own, and one more on the jobserver's one token.
+   jobs: its own, and one more on the jobserver's one token. Taking that token makes the lease
+   elastic.
 2. The test run ends. After `settle_s`, the next decision sets the build's target to 3; `hold`
    sees it on its next renewal, resizes to 3, and adds a token, so make runs 3 jobs. After
    another `settle_s` it grows to 4 the same way.
@@ -219,8 +235,9 @@ For example, a `work` pool of 4 slots with no headroom, where a test run holds 2
 
 A daemon from before elastic leases refuses the `elastic` field; `leasehold.client.Client` then
 asks again without it, and the lease is a range of the size granted, fixed as before. It has
-no `/v1/resize` either, and a holder treats the 404 as "not now". A client from before elastic
-leases never asks for one, and sees elastic leases' `weight` as their size now.
+no `/v1/elastic` or `/v1/resize` either, and `hold` keeps such a lease at its size. A client
+from before elastic leases never asks for one, and sees elastic leases' `weight` as their size
+now.
 
 ### Memory
 
@@ -512,7 +529,8 @@ an example machine. An unknown key is an error.
 | `[commands]` | the built-in rules | see [`[commands]`](#which-commands-take-a-lease-commands): `defaults`, `[[commands.rule]]`, `heavy_weight` (4), `light_weight` (2), `wait_s`, `when_busy` |
 | `[memory]` | none: no memory counted | see [Memory](#memory): `budget` (`"auto"`), `kept` (`"25%"`), `assumed_per_slot` (`"auto"`) |
 | `[guard]` | on for your own daemon | see [Memory guard](#memory-guard): `enabled`, `memory_pressure_on` (20), `memory_pressure_off` (5), `min_available` (5% of memory, at least 512 MiB), `settle_s` (30) |
-| `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again |
+| `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again; at least 1 |
+| `[elastic] headroom` | `"keep"` | how much of the pools' and the machine's headroom an [elastic lease](#elastic-leases) leaves free as it grows: `"keep"` all of it, `"leave-one"` one slot, `"use"` none |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
 
 The ceiling clamps the pools: a pool's `max` is clamped to what the pool could ever hold, the
@@ -537,9 +555,9 @@ a range), and anything they do not name as 1 slot. A training script or other si
 that runs many threads weighs 1 slot unless a rule names it, so give it `--weight N` for the
 N slots it uses. `--weight 2-4` asks for a [range](#ranges-min-max-slots) and runs the
 command sized to the weight granted. With `--jobserver` the range is
-[elastic](#elastic-leases) unless `--no-elastic` is given: its jobserver's tokens and its
-scope follow the lease as it grows and shrinks. `--elastic` asks for that without a jobserver,
-where only the scope follows. `--memory 6g` declares the memory it will use (default:
+[elastic](#elastic-leases) unless `--no-elastic` is given: once the command's jobs take
+jobserver tokens, its jobserver's tokens and its scope follow the lease as it grows and
+shrinks. `--elastic` needs `--jobserver`, and exits 2 without it. `--memory 6g` declares the memory it will use (default:
 its rule's `memory`), counted against the [memory budget](#memory) and held to when
 contained; `--memory-per-slot 2g` declares it per slot granted instead (default: its rule's
 `memory_per_slot`).
@@ -763,7 +781,8 @@ was. Some runs are not covered:
 fewer than the job count, announced in `MAKEFLAGS` as `--jobserver-auth=fifo:PATH` (the protocol
 of GNU make 4.4). make, ninja 1.13 and later, cargo and rustc, and GCC's LTO take a token before
 each extra job, so a whole tree of builds, sub-makes included, runs at most that many jobs at
-once. The command must not pass its own `-jN`: make then runs its own jobserver instead. A tool
+once. The command must not pass its own `-jN`, on its command line or in a recipe: make then
+runs its own jobserver instead, and `hold` warns when the command line gives one. A tool
 that does not speak the protocol, or make before 4.4, still has the variables. steve and
 guildmaster run one jobserver for a whole machine; here it is one per lease. Under an
 [elastic lease](#elastic-leases) the jobserver's tokens follow the lease's size, while the
@@ -1104,9 +1123,10 @@ client for it.
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
 | `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, and `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it); a rule no lease could ever be granted for carries `never`, the reason |
-| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic` | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings), `queued` (with `position`, `blocked`, and the `min_weight` and `max_weight` it waits with, as admission would cut them now) or `refused` (with `reason`) |
+| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic` | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings; the lease has `max_jobs`, the job count of its `max_weight`), `queued` (with `position`, `blocked`, and the `min_weight` and `max_weight` it waits with, as admission would cut them now) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs` |
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
+| `POST /v1/elastic` | `lease_id` | `elastic`, with the lease's `weight`, `jobs`, `target` and `target_jobs`: a held range is elastic from now on; 409 `conflict` when it is not held, 400 for a lease with no range |
 | `POST /v1/release` | `lease_id` | `released` |
 | `POST /v1/lend` | `open`: true or false | the lend state; administrators only |
 | `POST /v1/pools/<name>` | `max`: a number, or null to reset | the pool; administrators only |
@@ -1131,9 +1151,10 @@ above `weight`) may ask for one: otherwise it is a 400 `bad_request`. A granted 
 `elastic`, and `target`, the size it is asked to move to (its `weight` for a lease that is not
 elastic), with `target_jobs`, the job count of that size. `POST /v1/resize` moves an elastic
 lease to `weight`: below its size to give slots back, which always succeeds, or up to its
-`target` to take the slots offered, which succeeds only while they are still free. A daemon
-from before elastic leases does not take `elastic`; `leasehold.client.Client` then asks again
-without it, and the lease is fixed.
+`target` to take the slots offered, which succeeds only while they are still free.
+`POST /v1/elastic` makes a range already held elastic, which is how `hold` asks once its
+command's jobs take jobserver tokens. A daemon from before elastic leases does not take
+`elastic`; `leasehold.client.Client` then asks again without it, and the lease is fixed.
 
 An acquire naming a pool that does not exist is `refused` with `reason` `there is no pool
 'NAME'`.
@@ -1190,8 +1211,10 @@ when a field is removed or changes meaning:
   item's the least it needs, and `min_weight` and `max_weight` are the
   [range](#ranges-min-max-slots) asked (both `weight` for a lease from before ranges). Each
   also has `elastic`, and each lease its `target`, the size it is asked to move to (its
-  `weight` unless it is [elastic](#elastic-leases)); `top` shows a target that differs from
-  the weight as `3>4`. A pool's `held_weight` counts the sizes held.
+  `weight` unless it is [elastic](#elastic-leases)), and `giving_back`, how far the target is
+  below the weight: the slots it is asked to give back, and will once its jobs finish. `top`
+  shows a target that differs from the weight as `3>4`, and a lease giving slots back says so
+  beside it. A pool's `held_weight` counts the sizes held.
 
 ## The command line
 

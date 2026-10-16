@@ -164,6 +164,7 @@ class MachineAgent:
         self._cpus = cpus
         self.ledger = ledger if ledger is not None else Ledger(config.ledger_path, now=clock)
         self.ledger.settle_s = config.elastic.settle_s
+        self.ledger.headroom = config.elastic.headroom
         slices = list(dict.fromkeys(config.load.slices))
         self.loader = load if load is not None else LoadReader(slices)
         self._clock = clock
@@ -590,6 +591,7 @@ class MachineAgent:
             if lease is not None:
                 lease["jobs"] = self.config.jobs.for_weight(lease["weight"])
                 lease["target_jobs"] = self.config.jobs.for_weight(lease["target"])
+                lease["max_jobs"] = self.config.jobs.for_weight(lease["max_weight"])
             return {
                 "status": "granted",
                 "lease": lease,
@@ -678,6 +680,30 @@ class MachineAgent:
         return {
             "status": "resized",
             "lease_id": lease_id,
+            "weight": done.weight,
+            "target": done.target,
+            "jobs": self.config.jobs.for_weight(done.weight),
+            "target_jobs": self.config.jobs.for_weight(done.target),
+        }
+
+    def make_elastic(self, lease_id: str, *, user: str | None) -> dict:
+        """Make the held range `lease_id` elastic from now on (`Ledger.make_elastic`): its
+        weight and target, and their job counts. A lease no longer held is a `Conflict`; one
+        with no range, a ValueError."""
+        with self._lock:
+            self._check_owner(lease_id, user)
+            done = self.ledger.make_elastic((SCOPE, lease_id), self.policy())
+            if done.status == "resized":
+                self.ledger.settle(self.policy())
+                self._record()
+        if done.status == "unknown":
+            raise Conflict(f"lease {lease_id} is not held")
+        self._notify()
+        assert done.weight is not None and done.target is not None
+        return {
+            "status": "elastic",
+            "lease_id": lease_id,
+            "elastic": True,
             "weight": done.weight,
             "target": done.target,
             "jobs": self.config.jobs.for_weight(done.weight),

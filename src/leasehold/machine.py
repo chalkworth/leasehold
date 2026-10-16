@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from leasehold.admission import AdmissionPolicy
 from leasehold.commands import CommandRule, CommandSettings
+from leasehold.elastic import DEFAULT_HEADROOM, Headroom
 from leasehold.kinds import KINDS, PREEMPTIBLE
 from leasehold.ledger import FILENAME
 from leasehold.model import Name, Pool, PoolSet
@@ -245,8 +246,12 @@ class ElasticSettings(_Strict):
     """How elastic leases move (`leasehold.elastic`)."""
 
     #: How long an elastic lease's size stays put after it last changed (or after it was
-    #: granted) before it may grow again. Giving slots back is never held back.
-    settle_s: float = Field(15.0, ge=0)
+    #: granted) before it may grow again, at least a second: its holder renews this often, and
+    #: so hears of growth. Giving slots back is never held back.
+    settle_s: float = Field(15.0, ge=1)
+    #: How much of the pools' and the machine's headroom growth leaves free: "keep" all of it,
+    #: "leave-one" one slot, "use" none (the slots are given back when work arrives).
+    headroom: Headroom = DEFAULT_HEADROOM
 
 
 class Standing(_Strict):

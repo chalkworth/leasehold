@@ -102,6 +102,12 @@ class Client:
         leases) has no such route."""
         return self.request("POST", "/v1/resize", {"lease_id": lease_id, "weight": weight})
 
+    def make_elastic(self, lease_id: str) -> dict:
+        """Make a held range elastic from now on (`POST /v1/elastic`): its weight and target.
+        An `ApiError` with a status under 500 means it cannot be: the lease has no range or is
+        gone, or the daemon (one from before elastic leases) has no such route."""
+        return self.request("POST", "/v1/elastic", {"lease_id": lease_id})
+
     def lend(self, open: bool) -> dict:
         return self.request("POST", "/v1/lend", {"open": open})
 

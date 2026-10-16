@@ -51,7 +51,7 @@ from leasehold.admission import (
     grants,
     positions,
 )
-from leasehold.elastic import Elastic, targets
+from leasehold.elastic import DEFAULT_HEADROOM, Elastic, Headroom, targets
 from leasehold.process import pid_namespace, process_birth, process_matches
 from leasehold.units import MEMORY_MAX
 
@@ -326,11 +326,21 @@ class Ledger:
     directory must exist and be writable: it is never created, since a directory made by the
     wrong user would hide the mistake."""
 
-    def __init__(self, path: Path, *, now=time.time, settle_s: float = ELASTIC_SETTLE_S) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        now=time.time,
+        settle_s: float = ELASTIC_SETTLE_S,
+        headroom: Headroom = DEFAULT_HEADROOM,
+    ) -> None:
         self.path = Path(path)
         self._now = now
         #: How long an elastic lease's size stays put after it changed before it may grow.
         self.settle_s = settle_s
+        #: How much of the headroom an elastic lease's growth leaves free
+        #: (`leasehold.elastic`).
+        self.headroom: Headroom = headroom
         directory = self.path.parent
         if not directory.is_dir():
             raise LedgerUnavailable(
@@ -620,15 +630,21 @@ class Ledger:
     ) -> dict[ItemKey, int]:
         """Work out and store every elastic lease's target (`leasehold.elastic.targets`). The
         leases that may grow are `eligible`; by default, those whose size last changed at least
-        `settle_s` ago. The targets."""
+        `settle_s` ago. With `eligible` given, only the targets of those leases are stored: the
+        others' were worked out with every lease that may grow, and stay. The targets."""
         found = self._elastic(conn)
         if not found:
             return {}
+        stored = None if eligible is None else eligible
         if eligible is None:
             since = self._now() - self.settle_s
             eligible = frozenset(e.key for e, changed in found if changed <= since)
-        worked = targets(self._state(conn), policy, [e for e, _ in found], eligible)
+        worked = targets(
+            self._state(conn), policy, [e for e, _ in found], eligible, headroom=self.headroom
+        )
         for (scope, item_id), target in worked.items():
+            if stored is not None and (scope, item_id) not in stored:
+                continue
             conn.execute(
                 "UPDATE leases SET target = ? WHERE scope = ? AND item_id = ? AND target IS NOT ?",
                 (target, scope, item_id, target),
@@ -861,6 +877,35 @@ class Ledger:
                 "SELECT weight, target, elastic FROM leases WHERE scope = ? AND item_id = ?", key
             ).fetchone()
             return Resize("resized", weight, _target(row)[0])
+
+    def make_elastic(self, item: LedgerItem | ItemKey, policy: AdmissionPolicy) -> Resize:
+        """Make a held range elastic, from now on, in one transaction that then works the
+        targets out again: `resized` with its weight and target, or `unknown` when it is not
+        held. A lease whose range is a single size is a ValueError."""
+        key = item.key if isinstance(item, LedgerItem) else item
+        with self._tx() as conn:
+            self._reclaim(conn)
+            row = conn.execute(
+                "SELECT weight, min_weight, max_weight, target, elastic FROM leases "
+                "WHERE scope = ? AND item_id = ?",
+                key,
+            ).fetchone()
+            if row is None:
+                return Resize("unknown")
+            current, least, most = _sizes(row)
+            if least >= most:
+                raise ValueError(f"lease {key[1]} has no range ({least}): its size is fixed")
+            if not row["elastic"]:
+                conn.execute(
+                    "UPDATE leases SET elastic = 1, target = weight "
+                    "WHERE scope = ? AND item_id = ?",
+                    key,
+                )
+                self._admit(conn, policy)
+            row = conn.execute(
+                "SELECT weight, target, elastic FROM leases WHERE scope = ? AND item_id = ?", key
+            ).fetchone()
+            return Resize("resized", current, _target(row)[0])
 
     def revoke(self, *, kind: str, reason: str, grace_s: float) -> list[ItemKey]:
         """Revoke every live lease of `kind` not revoked already: each keeps its weight while

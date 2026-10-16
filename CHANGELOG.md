@@ -139,38 +139,54 @@ here.
   `leasehold.shims.covered_env`; `leasehold.doctor.check_headroom`;
   `leasehold.mcp_server.Held.waiting`, and `Held.sizes` returns None when the daemon has said
   no range; `leasehold.client.OPTIONAL`.
-- Elastic leases: a range can ask to grow and shrink after it is admitted (`elastic: true` in
-  `POST /v1/acquire`, `hold --elastic`). Its holder promises to take slots when they are
-  offered and to give them back when asked. The daemon works out each one's `target` in every
-  decision. The target rises by one slot per decision, up to the range's most, while nothing
-  waits in its pool and memory is neither short nor under pressure, once the lease's size has
-  stayed put for `[elastic] settle_s` (new, 15 s by default). It may rise into the pools'
-  `headroom`. It falls, largest extras first, when a request whose turn has come would then
-  fit, and falls to the least for every elastic lease while memory is under pressure.
-  Nothing is taken from a lease that ignores its target, and nothing is killed
+- Elastic leases: a range can grow and shrink after it is admitted (`elastic: true` in
+  `POST /v1/acquire`, or `POST /v1/elastic` for a range already held). Its holder promises to
+  take slots when they are offered and to give them back when asked. The daemon works out
+  each one's `target` in every decision. The target rises by one slot per decision, up to the
+  range's most, while nothing waits in its pool and memory is neither short nor under
+  pressure, once the lease's size has stayed put for `[elastic] settle_s` (new, 15 s by
+  default, at least 1 s). How much of the pools' `headroom` it leaves free is
+  `[elastic] headroom` (new): `"keep"` all of it (the default), `"leave-one"` one slot, or
+  `"use"` none. The target falls, largest extras first, when a request whose turn has come
+  would then fit, and falls to the least for every elastic lease while memory is under
+  pressure. Nothing is taken from a lease that ignores its target, and nothing is killed
   (docs/reference.md, "Elastic leases").
 - `POST /v1/resize` (`lease_id`, `weight`) moves an elastic lease: giving slots back always
   succeeds and admits whatever then fits; taking slots succeeds up to the target while they
-  are still free, and is answered 409 `conflict` (a new error code) otherwise.
-  `leasehold.client.Client.resize`.
-- `hold --jobserver` with a range asks for an elastic lease unless `--no-elastic` is given.
-  It renews at least every `settle_s`, puts tokens in its jobserver and resizes its scope as
-  the lease grows, and takes free tokens out as jobs give them back before it gives slots
-  back. Only jobserver clients (make, ninja 1.13 and later, cargo and rustc, GCC's LTO) see
-  the size change: the job and thread variables keep their first values.
+  are still free, and is answered 409 `conflict` (a new error code) otherwise. A refused
+  resize changes only that lease's target. `POST /v1/elastic` (`lease_id`) makes a held range
+  elastic, and is answered 409 `conflict` for a lease not held and 400 for one with no range.
+  `leasehold.client.Client.resize` and `make_elastic`.
+- `hold --jobserver` with a range is elastic unless `--no-elastic` is given. It asks for a
+  plain range and makes the lease elastic once a job takes a jobserver token, so a command
+  that never takes one (a `make -jN`, which runs its own jobserver) keeps its size. It renews
+  at least every `settle_s`, puts tokens in its jobserver and resizes its scope as the lease
+  grows. When the lease shrinks, a thread blocked reading the jobserver takes each token a
+  job gives back until the jobs left fit, and the slots are given back then; tokens that do
+  not come back in 120 s (a job killed while it held one) are taken as lost. Its calls to the
+  daemon for this wait at most a renewal interval. Only jobserver clients (make, ninja 1.13
+  and later, cargo and rustc, GCC's LTO) see the size change: the job and thread variables
+  keep their first values, except that an elastic lease sets no `CMAKE_BUILD_PARALLEL_LEVEL`
+  and sets `CARGO_BUILD_JOBS` to the job count of its most. `hold --jobserver` warns when
+  the command line gives its own `-j` with a number.
+- `hold --elastic` without `--jobserver` is refused and exits 2.
 - The grant and the renewal answers carry `elastic`, `target` and `target_jobs`, and the grant
-  the daemon's `[elastic]` settings; the status object's leases carry `elastic` and `target`,
-  and its queued items `elastic` (`schema` stays 2). A new event, `resized`, carries the
-  lease's new `weight` and its `previous_weight`. `top` shows a target that differs from the
-  weight as `3>4/2-4`.
-- Library: `leasehold.elastic` (`Elastic`, `targets`); `leasehold.follow.Follower`;
-  `leasehold.jobs.Jobserver`; `leasehold.contain.update_scope`, `scope_properties` and
-  `lease_unit`; `leasehold.ledger.Ledger.resize`, `Resize`, `ELASTIC_SETTLE_S` and
-  `Ledger.settle_s` (a constructor argument); `LedgerItem.elastic`; `Renewal.target` and
-  `elastic`; `leasehold.agent.AcquireRequest.elastic`, `MachineAgent.resize` and `Conflict`;
-  `leasehold.machine.ElasticSettings` and `MachineConfig.elastic`;
-  `leasehold.events.EventType.RESIZED`; `leasehold.hold.hold` and `lease_request` take
-  `elastic`.
+  the daemon's `[elastic]` settings and the lease's `max_jobs`; the status object's leases
+  carry `elastic`, `target` and `giving_back` (the slots asked back and not yet given), and
+  its queued items `elastic` (`schema` stays 2). A new event, `resized`, carries the lease's
+  new `weight` and its `previous_weight`. `top` shows a target that differs from the weight
+  as `3>4/2-4`, and a lease giving slots back says so beside it.
+- Library: `leasehold.elastic` (`Elastic`, `targets`, `Headroom`, `HEADROOM_MODES`,
+  `DEFAULT_HEADROOM`); `leasehold.follow.Follower` and `GIVE_BACK_S`;
+  `leasehold.jobs.Jobserver`, `own_job_count`, `ELASTIC_SKIPPED` and `ELASTIC_MOST`, and
+  `job_env` and `sized_env` take `elastic_jobs`; `leasehold.contain.update_scope`,
+  `scope_properties` and `lease_unit`; `leasehold.ledger.Ledger.resize`, `make_elastic`,
+  `Resize`, `ELASTIC_SETTLE_S`, and `Ledger.settle_s` and `Ledger.headroom` (constructor
+  arguments); `LedgerItem.elastic`; `Renewal.target` and `elastic`;
+  `leasehold.agent.AcquireRequest.elastic`, `MachineAgent.resize`, `make_elastic` and
+  `Conflict`; `leasehold.machine.ElasticSettings` and `MachineConfig.elastic`;
+  `leasehold.events.EventType.RESIZED`; `leasehold.hold.hold` and `run_leased` take
+  `elastic`, and `child_env` takes `elastic_jobs`.
 
 ### Changed
 
@@ -236,6 +252,9 @@ here.
   the ledger, the status object and events sees the size it holds. A lease that is not
   elastic keeps the size it was granted, as before.
 - `leasehold.client.OPTIONAL` includes `elastic`.
+- `AdmissionPolicy.most` cuts a range that declares no memory, on a machine with a memory
+  budget, to the slots whose assumed memory fits `[ceiling] memory`, as it already cut a
+  range declaring memory per slot.
 
 ### Compatibility
 
@@ -271,8 +290,8 @@ here.
   before, at the same sizes. Built-in rules and the configs `init` writes keep fixed weights.
 - A config from 0.3 has no `headroom`, so its pools get `"auto"`; that only affects ranges.
 - A daemon from before elastic leases refuses `elastic`; `Client.acquire` asks again without
-  it, and the lease keeps the size it is granted. Such a daemon has no `/v1/resize`, and
-  `hold` takes its 404 as "not now". A client from before elastic leases never asks for one,
+  it, and the lease keeps the size it is granted. Such a daemon has no `/v1/resize` or
+  `/v1/elastic`, and `hold` keeps the lease at its size. A client from before elastic leases never asks for one,
   and reads an elastic lease's `weight` as the size it holds.
 - The ledger gains more columns in place, at the same schema version (4):
   `queue.elastic`, and `leases.elastic`, `leases.target` and `leases.resized_at`, all NULL for

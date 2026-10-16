@@ -104,9 +104,10 @@ def register(sub) -> None:
         "--elastic",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="ask for an elastic lease: one that grows into free slots and gives them back "
-        "when asked, between the --weight range's MIN and MAX. Only the jobserver's tokens "
-        "and the command's scope follow it. Default: on for a range with --jobserver",
+        help="make the lease elastic: it grows into free slots and gives them back when "
+        "asked, between the --weight range's MIN and MAX, once the command's jobs take "
+        "jobserver tokens. Only the jobserver's tokens and the command's scope follow it. "
+        "Needs --jobserver (exit 2 without it). Default: on for a range with --jobserver",
     )
     s.add_argument(
         "--no-job-env",

@@ -666,6 +666,9 @@ def _leases(v: _View) -> _Section:
         row.put(x.get("lease_id"))
         if x.get("revoked"):
             row.put(f"  revoked: {x.get('revoke_reason') or ''}", "bad")
+        elif x.get("giving_back"):
+            back = x.get("giving_back")
+            row.put(f"  giving back {_slots(back)}: waiting for its jobs to finish", "warn")
         what = _what(x.get("labels"))
         if what:
             row.put(f"  {what}", "dim")

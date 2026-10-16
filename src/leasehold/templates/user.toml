@@ -59,10 +59,10 @@ memory_pressure_off = 5.0
 settle_s = 30
 
 # An elastic lease (a range run with `hold --jobserver`) grows one slot at a time into free
-# slots and gives them back when a request waits for them. After its size changes, it waits
-# this long before it grows again.
+# slots and gives them back when a request waits for them.
 [elastic]
-settle_s = 15
+settle_s = 15            # after its size changes, it waits this long before it grows again
+headroom = "keep"        # the pools' headroom it leaves free: "keep", "leave-one" or "use"
 
 # Which commands take a lease when an agent (or you, through the shims) runs them. The built-in
 # rules cover common builds and test runs; `leasehold commands` lists them.

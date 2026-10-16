@@ -55,6 +55,12 @@ class _ResizeRequest(BaseModel):
     weight: int = Field(ge=1)
 
 
+class _ElasticRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    lease_id: str = Field(min_length=1, max_length=64)
+
+
 class _EventsRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     since: int = Field(0, ge=0)
@@ -132,6 +138,10 @@ def _resize(agent: MachineAgent, req: _ResizeRequest, peer: Peer, rest: str) -> 
     return agent.resize(req.lease_id, req.weight, user=peer.user)
 
 
+def _elastic(agent: MachineAgent, req: _ElasticRequest, peer: Peer, rest: str) -> dict:
+    return agent.make_elastic(req.lease_id, user=peer.user)
+
+
 def _lend(agent: MachineAgent, req: _LendRequest, peer: Peer, rest: str) -> dict:
     return agent.set_lend(req.open)
 
@@ -150,6 +160,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/v1/renew"): Route(_LeaseRequest, _renew),
     ("POST", "/v1/release"): Route(_LeaseRequest, _release),
     ("POST", "/v1/resize"): Route(_ResizeRequest, _resize),
+    ("POST", "/v1/elastic"): Route(_ElasticRequest, _elastic),
     ("POST", "/v1/lend"): Route(_LendRequest, _lend, admin=True),
     ("POST", "/v1/pools/<name>"): Route(_PoolRequest, _pool, admin=True, prefix=True),
 }
