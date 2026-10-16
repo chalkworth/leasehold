@@ -297,15 +297,13 @@ def hold(
     given. `memory` is also declared with the request, so a daemon with a memory budget counts
     it. With no `weight`, the command is weighed as the daemon's `[commands]` rules weigh it
     (`auto_size`); with no `threads`, its thread count is the matching rule's `threads`, and
-    "jobs" when no rule matches. Inside another lease, a thread count from the rules only
-    lowers the thread variables that lease set; a given `threads` sets them.
+    "jobs" when no rule matches.
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`."""
     if not argv:
         _say("no command given (leasehold hold [options] -- cmd ...)")
         return 2
     request = None
-    explicit = threads is not None
     try:
         with _interruptible():
             # Rules are read for the weight, or for the threads the job variables use.
@@ -353,7 +351,6 @@ def hold(
                 jobserver=jobserver,
                 memory=memory,
                 threads=threads,
-                explicit_threads=explicit,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -437,7 +434,6 @@ def run_leased(
     jobserver: bool = False,
     memory: str | None = None,
     threads: jobs.Threads = "jobs",
-    explicit_threads: bool = False,
 ) -> int:
     """`hold` once `request` is granted (`answer`): run `argv` sized to the lease (its thread
     pools to `threads`, `jobs.thread_count`; `child_env`), renewing it, and release it when
@@ -456,7 +452,6 @@ def run_leased(
             count,
             job_env=job_env,
             threads=threads,
-            explicit_threads=explicit_threads,
         )
         if jobserver:
             try:
@@ -616,24 +611,23 @@ def child_env(
     *,
     job_env: bool,
     threads: jobs.Threads = "jobs",
-    explicit_threads: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """The command's environment: ours, the lease's `LEASEHOLD_*` variables, and with
-    `job_env` the job-count and thread-count variables (`jobs.sized_env`). Inside an enclosing
-    lease, a thread variable it set is only lowered, unless `explicit_threads` (`hold
-    --threads`) says to set it. Without `job_env`, the enclosing lease's sizing is removed
-    (`jobs.unsized_env`): every variable it set that still has the value it set, so a tool
-    reads its own default and no stale count reaches a shim the command runs."""
-    env = {
-        **os.environ,
+    """The command's environment: `env` (default ours) with the lease's `LEASEHOLD_*`
+    variables, and with `job_env` the job-count and thread-count variables for this lease
+    (`jobs.sized_env`). Without `job_env`, the enclosing lease's sizing is removed
+    (`jobs.unsized_env`). Which variables an enclosing lease set is read from `env` before this
+    lease's id is added, so it counts only when `env` holds a `LEASEHOLD_LEASE_ID`."""
+    outer = dict(os.environ if env is None else env)
+    lease = {
         "LEASEHOLD_LEASE_ID": lease_id,
         "LEASEHOLD_GRANT": str(granted["grant"]),
         "LEASEHOLD_POOL": granted["pool"],
         "LEASEHOLD_WEIGHT": str(granted["weight"]),
     }
     if job_env:
-        return jobs.sized_env(env, count, threads, cap=not explicit_threads)
-    return jobs.unsized_env(env)
+        return {**jobs.sized_env(outer, count, threads), **lease}
+    return {**jobs.unsized_env(outer), **lease}
 
 
 def jobserver_env(env: Mapping[str, str], count: int, fifo: Path) -> dict[str, str]:

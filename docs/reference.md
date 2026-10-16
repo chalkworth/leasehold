@@ -470,39 +470,56 @@ it. With the default every variable gets the job count, as in 0.3.0.
 
 A variable already set when `hold` starts is yours, and `hold` leaves it alone unless the
 lease the command runs in set it to the value it still has. `hold` records each name it set,
-with its value, in `LEASEHOLD_SET` (`OMP_NUM_THREADS=4,GOMAXPROCS=4`), and reads it only
-beside `LEASEHOLD_LEASE_ID`. A name you changed since is yours again, whether you exported it
-inside the lease (`export OMP_NUM_THREADS=3`) or set it for one command
+with its value, in `LEASEHOLD_SET` (`OMP_NUM_THREADS=4,GOMAXPROCS=4`). The record counts only
+when the environment `hold` starts in has a `LEASEHOLD_LEASE_ID`, and only for the variables
+in the tables above. A name you changed since is yours again, whether you exported it inside
+the lease (`export OMP_NUM_THREADS=3`) or set it for one command
 (`OMP_NUM_THREADS=3 leasehold hold ...`). A name you unset is set again. A value you set equal
 to the lease's cannot be told from it. A lease started by leasehold 0.3.0 records nothing, so
 a `hold` inside it takes its values for yours.
 
-A `hold` inside a lease sets the recorded names to its own lease's values. When its thread
-count comes from the rules, it only lowers the enclosing lease's thread variables, each to the
-smaller of its current value and the new count, so a nested command never gets more threads
-than the lease around it allowed. `hold --threads N` sets them to N either way.
+A `hold` inside a lease takes a lease of its own, and sets the recorded names to that lease's
+counts, larger or smaller than the enclosing lease's. A PATH shim inside a lease takes no lease
+of its own. It only lowers the lease's thread variables, each to the smaller of its current
+value and the count the shim's rule gives, so a program run through a shim never gets more
+threads than the lease around it.
 
 When you set `OMP_NUM_THREADS` to a plain count, `hold` gives `OPENBLAS_NUM_THREADS` and
 `MKL_NUM_THREADS` the same value unless you set them too. OpenBLAS reads its own variable
 before `OMP_NUM_THREADS`, and PyTorch lets `MKL_NUM_THREADS` override it, so a different value
-there would undo yours. Your own `OPENBLAS_NUM_THREADS` or `MKL_NUM_THREADS` is left alone and
-copied nowhere. When your `OMP_NUM_THREADS` is not a plain count (`4,2`), it is not copied, and
-an enclosing lease's count in the other two stays. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are
+there would undo yours. A shim lowering a lease's count never raises those two above what the
+lease set. Your own `OPENBLAS_NUM_THREADS` or `MKL_NUM_THREADS` is left alone and copied
+nowhere. When your `OMP_NUM_THREADS` is not a plain count (`4,2`), it is not copied, and an
+enclosing lease's count in the other two stays. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are
 always the counts leasehold chose for this lease. A count of more than 6 digits is never read
 as a count.
 
 A command whose jobs are worker processes would, with the job count in both groups, let each
-of N workers start an N-thread BLAS or OpenMP pool: N × N threads on N jobs' worth of CPU. The
-built-in xdist rule gives a pytest run that starts xdist workers `threads = 1`. leasehold reads
-the config file's `addopts`, then `PYTEST_ADDOPTS`, then the command line, as pytest does. The
-run starts workers when the last `-n` or `--numprocesses` is above 0, `auto` or `logical`, or
-when `--tx` is given. `-nN`, `-n=N`, `--numprocesses=N` and `-vn 4` all count. `-p no:xdist`
-anywhere turns xdist off.
+of N workers start an N-thread BLAS or OpenMP pool: N × N threads on N jobs' worth of CPU. A
+pytest run that starts xdist workers shares the job count among them instead. With `-n N`, each
+worker gets the job count divided by N, and at least 1, so `-n 1` on 8 jobs gets 8 threads and
+`-n 4` gets 2. With `-n auto` or `-n logical`, xdist starts as many workers as
+`PYTEST_XDIST_AUTO_NUM_WORKERS`, the job count, so each gets the built-in xdist rule's
+`threads = 1`.
+
+leasehold reads the config file's `addopts`, then `PYTEST_ADDOPTS`, then the command line, as
+pytest does, and decides as pytest-xdist 3 does:
+
+- Workers start when the last `-n` or `--numprocesses` is above 0, `auto` or `logical`.
+  `--maxprocesses M` limits a count to M. `-nN`, `-n=N`, `--numprocesses=N`, `-vn 4` and
+  `-vn=4` all count.
+- `--tx` starts workers only with `--dist` (other than `no`) or `-d`. `4*popen` counts as 4.
+  `-n 0` clears `--tx`.
+- `--collect-only` (`--co`) starts none. `--pdb` with `-n auto` runs serially, and `--pdb`
+  with any other workers is an error, so neither counts.
+- The last of `-p no:xdist`, `-p xdist` and `-p xdist.plugin` decides whether xdist is
+  loaded at all.
 
 Arguments are read one word at a time, the way pytest's argument parser reads them. An option
 that takes a value takes the next word unless that word starts with `-`, so `-k '-n 4'` starts
-no workers and `--cov -n 4` does. Nothing after `--` counts. A count of more than 6 digits is
-not read.
+no workers and `--cov -n 4` does. Nothing after `--` counts. A word `@FILE` stands for the
+lines of FILE, one argument each, when FILE is a regular file of at most 1 MiB. A count of more
+than 6 digits is not read.
 
 The config file is located the way pytest 9 does it. The last `-c` or `--config-file`, from
 `PYTEST_ADDOPTS` or the command line, names it. Otherwise the search starts at the common
@@ -514,7 +531,11 @@ with `[tool:pytest]`. A `pytest.toml` or `pytest.ini` stops the search even when
 `-o addopts=...` or `--override-ini addopts=...` replaces the file's `addopts`. A file pytest
 would refuse, or that cannot be read, adds nothing.
 
-leasehold's search differs from pytest's in a few cases:
+The directory the command runs in is `hold`'s own, or the one `uv --directory DIR` names.
+leasehold does not follow a `cd` inside the command, so `hold -- sh -c 'cd sub && pytest'`
+reads the config found from `hold`'s directory.
+
+leasehold's search differs from pytest's in a few other cases:
 
 - ini files are parsed with Python's `configparser` and pytest uses `iniconfig`, so unusual
   syntax can read differently.
@@ -526,11 +547,10 @@ leasehold's search differs from pytest's in a few cases:
 A serial `pytest`, tox, nox and every other built-in rule have the job count.
 
 This covers a pytest run started by `hold` itself, by a PATH shim, and by a PATH shim inside
-another lease. Under `hold -- make test`, the pytest shim takes no second lease and gives
-`pytest -n 4` one thread per worker within it. It only ever lowers the lease's thread
-variables, and it waits at most 0.3 s for the daemon's rules. If anything goes wrong while
-the shim works out the thread count, the program runs with its environment unchanged. Some
-runs are not covered:
+another lease. Under `hold -- make test`, the pytest shim takes no second lease and shares the
+lease's job count among the workers of `pytest -n 4`. It waits at most 0.3 s for the daemon's
+rules. If working out the thread count fails, the program runs with its environment as it
+was. Some runs are not covered:
 
 - `python -m pytest`, or a virtualenv's own `pytest`, run by a script or makefile inside a
   lease passes through no shim. Only `hold` itself (`hold -- python -m pytest -n 4`) and a shim
@@ -694,8 +714,8 @@ builds and test runs weigh `heavy_weight` (4), the JavaScript tooling `light_wei
 them to run more at once ([two at once](#your-own-daemon), opt-in).
 A weight is both what a command costs in slots and the job count it is given. A rule's
 `threads` sets the parallelism inside each process ([sizing](#sizing-the-command-to-its-lease)):
-`"jobs"`, the job count (the default), or a count of at least 1; the built-in xdist rule has
-1. A config rule for pytest without `args` is tried before it, so give such a rule
+`"jobs"`, the job count (the default), or a count of at least 1. The built-in xdist rule has
+1, and a run with `-n N` shares the job count among its N workers. A config rule for pytest without `args` is tried before it, so give such a rule
 `threads = 1` if its runs use xdist ([sizing](#sizing-the-command-to-its-lease)). Among
 one source's rules the heaviest match wins. The daemon clamps each weight to the most its pool
 could ever grant one lease, beside the other pools' reservations and standing work. `leasehold commands` lists the rules; `leasehold commands --test "CMD"` says which

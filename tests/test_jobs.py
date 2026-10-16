@@ -313,3 +313,29 @@ def test_makeflags_keeps_assignments_and_escaped_spaces(tmp_path):
     assert jobs.makeflags(given, 3, fifo) == (
         rf"-k -j3 --jobserver-auth=fifo:{fifo} -- CFLAGS=-O2\ -g NAME=a\ b"
     )
+
+
+def test_resizing_never_copies_the_users_omp_above_what_the_lease_recorded():
+    outer = jobs.sized_env(LEASED, 4, threads=2)
+    inside = jobs.resized(outer | {"OMP_NUM_THREADS": "8"}, 1)
+    assert inside["OPENBLAS_NUM_THREADS"] == inside["MKL_NUM_THREADS"] == "1"
+    assert inside["OMP_NUM_THREADS"] == "8"  # the user's own
+    unset = {k: v for k, v in outer.items() if k != "MKL_NUM_THREADS"}
+    filled = jobs.resized(unset | {"OMP_NUM_THREADS": "8"}, 1)
+    assert filled["MKL_NUM_THREADS"] == "8"  # unset: the user's value fills it, as always
+
+
+def test_a_record_of_names_that_are_not_job_variables_is_not_believed():
+    env = LEASED | {"LEASEHOLD_SET": "HOME_COUNT=3,OMP_NUM_THREADS=4", "HOME_COUNT": "3",
+                    "OMP_NUM_THREADS": "4"}  # fmt: skip
+    assert jobs.recorded(env) == {"OMP_NUM_THREADS": "4"}
+    bare = jobs.unsized_env(env)
+    assert bare["HOME_COUNT"] == "3" and "OMP_NUM_THREADS" not in bare
+
+
+@pytest.mark.parametrize(
+    ("threads", "count"),
+    [("jobs/1", 8), ("jobs/4", 2), ("jobs/16", 1), ("jobs/4:3", 3), ("jobs/2:1", 4)],
+)
+def test_a_share_of_the_jobs_divides_them_among_workers(threads, count):
+    assert jobs.thread_count(threads, 8) == count

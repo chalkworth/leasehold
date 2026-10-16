@@ -175,7 +175,7 @@ def test_python_running_a_script_or_a_command_is_not_pytest(command):
 @pytest.mark.parametrize(
     "command",
     ["pytest --cov -n auto", "pytest --cov -n 4 tests", "pytest --pyargs -n 4 pkg",
-     "pytest --tx 4*popen", "pytest --maxfail -n 2"],
+     "pytest -d --tx 4*popen", "pytest --maxfail -n 2"],
 )  # fmt: skip
 def test_an_option_never_takes_a_following_option_as_its_value(command):
     assert match(DEFAULTS, command).rule.threads == 1
@@ -190,7 +190,8 @@ def test_uv_run_options_that_take_a_value_are_not_the_program():
 def test_several_programs_take_the_most_threads_any_of_them_needs():
     rules = DEFAULTS.shell_rules()
     assert shell.threads(rules, list(shell.programs("cargo test && pytest -n 4"))) == "jobs"
-    assert shell.threads(rules, list(shell.programs("pytest -n 4; pytest -n2 x"))) == 1
+    assert shell.threads(rules, list(shell.programs("pytest -n 4; pytest -n2 x"))) == "jobs/2"
+    assert shell.threads(rules, list(shell.programs("pytest -n auto; pytest -n 2"))) == "jobs/2:1"
     assert shell.threads(rules, list(shell.programs("ls -l"))) is None
 
 
@@ -281,3 +282,28 @@ def test_the_built_in_weights_come_from_the_config():
     assert [template.weights(n) for n in (1, 3, 4, 6, 14)] == [
         (1, 1), (3, 2), (2, 1), (3, 2), (7, 4),
     ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["uv --directory p run pytest -n 2", "uv --project p run pytest -n 2", "uv -q run pytest -n 2",
+     "uv --color never --offline run pytest -n 2", "uv --directory=p run --with x pytest -n 2",
+     "uv --cache-dir /c tool run pytest -n 2", "python3.13t -m pytest -n 2",
+     "python3t -m pytest -n 2", "pypy3 -m pytest -n 2", "pypy -m pytest -n 2"],
+)  # fmt: skip
+def test_uvs_global_options_and_more_pythons_still_find_pytest(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.weight) == ("pytest", 4)
+
+
+def test_uvs_directory_is_where_the_config_is_read(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "pytest.ini").write_text("[pytest]\naddopts = -n 2\n")
+    rules = DEFAULTS.shell_rules()
+    for command in ("uv --directory sub run pytest", "uv run --directory sub pytest",
+                    "uv --directory=sub run pytest"):  # fmt: skip
+        found = list(shell.programs(command))
+        assert shell.threads(rules, found, env={}, cwd=tmp_path) == "jobs/2", command
+    assert shell.threads(rules, list(shell.programs("uv run pytest")), env={}, cwd=tmp_path) == (
+        "jobs"
+    )

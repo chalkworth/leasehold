@@ -10,20 +10,18 @@ per slot). `hold` tells its command in two ways:
   the parallelism inside each process (OpenMP and BLAS pools, Go, Polars, rayon, Numba,
   process pools sized from the CPU count), and are set to the thread count: the job count,
   unless the command's `threads` setting (a `[commands]` rule's, or `hold --threads`) gives
-  fewer. A command whose jobs are worker processes, as `pytest -n` runs, takes `threads = 1`,
-  so its N workers run N threads between them rather than N each.
+  fewer. A pytest run with N xdist workers takes the job count divided by N, so the workers
+  share the lease's threads.
 
-  A variable already set is the user's, and is left alone, unless the lease this command runs
-  in set it to the value it still has. `LEASEHOLD_SET` records each name a lease set with its
-  value (`OMP_NUM_THREADS=4,GOMAXPROCS=4`), and is read only beside `LEASEHOLD_LEASE_ID`. A
-  user value equal to the recorded one cannot be told from the lease's. A nested lease sets the
-  recorded names to its own values. When its thread count comes from the rules, it lowers each
-  recorded thread variable to its own count and never raises one (`cap`); `hold --threads`
-  sets its own count either way.
+  A variable already set is the user's, and is left alone, unless the enclosing lease set it to
+  the value it still has. `LEASEHOLD_SET` records each name a lease set with its value
+  (`OMP_NUM_THREADS=4,GOMAXPROCS=4`). It is read only when the environment holds a
+  `LEASEHOLD_LEASE_ID`, and only names in `JOB_VARIABLES` count. A user value equal to the
+  recorded one cannot be told from the lease's. A nested lease sets the recorded names to its
+  own values. A shim inside a lease takes no lease of its own, and only lowers them (`resized`).
 
-  A user's `OMP_NUM_THREADS` is copied to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` where
-  the user left them unset, because OpenBLAS and MKL read their own variable before
-  `OMP_NUM_THREADS`. Only a plain count is copied. A user's `OPENBLAS_NUM_THREADS` or
+  A user's `OMP_NUM_THREADS`, when it is a plain count, is copied to `OPENBLAS_NUM_THREADS`
+  and `MKL_NUM_THREADS` where the user left them unset. A user's `OPENBLAS_NUM_THREADS` or
   `MKL_NUM_THREADS` is left alone and changes nothing else. `LEASEHOLD_JOBS` and
   `LEASEHOLD_THREADS` are always the job count and the thread count this lease chose.
 * **A jobserver** (`hold --jobserver`): a named pipe holding `jobs - 1` tokens, announced in
@@ -47,7 +45,6 @@ import stat
 import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Literal
 
 #: Variables set to the job count, and who reads each: how many jobs or worker processes a
 #: tool fans out to.
@@ -100,17 +97,23 @@ MAX_DIGITS = 6
 #: One `LEASEHOLD_SET` pair: leasehold only ever sets counts.
 _PAIR = re.compile(rf"([A-Z_][A-Z0-9_]*)=([0-9]{{1,{MAX_DIGITS}}})")
 
-#: A command's `threads` setting: "jobs" (the job count) or a count of at least 1.
-Threads = int | Literal["jobs"]
+#: A command's `threads` setting: "jobs" (the job count), a count of at least 1, or "jobs/N",
+#: the job count divided among N worker processes (`thread_count`).
+Threads = int | str
 
 _JOBSERVER_FLAGS = ("--jobserver-auth=", "--jobserver-fds=")
 
 
 def thread_count(threads: Threads, jobs: int) -> int:
-    """The thread count `threads` gives a lease of `jobs` jobs: `jobs` for "jobs", else
-    `threads`, never more than `jobs`."""
+    """The thread count `threads` gives a lease of `jobs` jobs, never more than `jobs` nor
+    less than 1: `jobs` for "jobs"; `jobs // N` for "jobs/N", or at least K for "jobs/N:K";
+    else `threads`."""
     if threads == "jobs":
         return jobs
+    if isinstance(threads, str) and threads.startswith("jobs/"):
+        share, _, least = threads[5:].partition(":")
+        count = max(jobs // (count_of(share) or 1), count_of(least) or 1)
+        return max(1, min(count, jobs))
     return max(1, min(int(threads), jobs))
 
 
@@ -124,8 +127,9 @@ def count_of(value: str | None) -> int | None:
 
 
 def recorded(env: Mapping[str, str]) -> dict[str, str]:
-    """The names and values `env`'s `LEASEHOLD_SET` records, read only beside
-    `LEASEHOLD_LEASE_ID`; empty when it is missing or any part of it is malformed."""
+    """The names in `JOB_VARIABLES` and values `env`'s `LEASEHOLD_SET` records, read only when
+    `env` holds a `LEASEHOLD_LEASE_ID`. Empty when it is missing or any part of it is
+    malformed; other names are not believed."""
     if not env.get("LEASEHOLD_LEASE_ID"):
         return {}
     out: dict[str, str] = {}
@@ -135,7 +139,8 @@ def recorded(env: Mapping[str, str]) -> dict[str, str]:
         pair = _PAIR.fullmatch(part)
         if pair is None:
             return {}
-        out[pair[1]] = pair[2]
+        if pair[1] in JOB_VARIABLES and pair[1] not in _OWN:
+            out[pair[1]] = pair[2]
     return out
 
 
@@ -151,7 +156,8 @@ def job_env(
     and each of `THREAD_VARIABLES` to `thread_count(threads, jobs)`, but not one the user set
     (present, and not at the value its lease recorded). The user's `OMP_NUM_THREADS`, when it
     is a plain count, goes to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` instead. With `cap`,
-    a thread variable the enclosing lease set keeps its value when that is lower.
+    each thread variable the enclosing lease set gets the lowest of its value, the new count
+    and, for those two, the user's `OMP_NUM_THREADS`.
     `LEASEHOLD_JOBS`, `LEASEHOLD_THREADS` and `LEASEHOLD_SET` are always set."""
     count = thread_count(threads, jobs)
     ours = leasehold_set(env)
@@ -172,7 +178,9 @@ def job_env(
             out[name] = str(jobs)
         elif omp is not None and name in BLAS_FAMILY:
             copied = count_of(omp)
-            if copied is not None:
+            if copied is not None and cap and name in ours:
+                out[name] = str(min(copied, capped(env[name])))
+            elif copied is not None:
                 out[name] = str(copied)
             elif name in ours:
                 out[name] = env[name]  # still the lease's: kept, and still recorded

@@ -14,6 +14,7 @@ config's `[commands]` (`leasehold.commands`).
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -64,8 +65,13 @@ _UV_RUN_VALUES = frozenset(
         "--config-file",
     }
 )  # fmt: skip
-#: For each runner, its options that take the next word as their value.
-_RUNNER_VALUES: dict[str, frozenset[str]] = {"uv": _UV_RUN_VALUES}
+#: uv's global options, given before its command, that take the next word as their value.
+_UV_GLOBAL_VALUES = frozenset(
+    {"--color", "--allow-insecure-host", "--directory", "--project", "--config-file",
+     "--cache-dir", "--python-preference"}
+)  # fmt: skip
+#: Python interpreters, free-threaded builds and PyPy included.
+_PYTHON = re.compile(r"(python|pypy)(\d(\.\d+)?)?t?")
 #: Options of `uvx` (`uv tool run`) that take the next word as their value.
 _UVX_VALUES = _UV_RUN_VALUES | {"--from"}
 #: `<runner> <verb> program ...`: run a project's tool inside its environment.
@@ -272,14 +278,25 @@ def _unwrap(words: list[str], depth: int) -> Iterator[tuple[str, list[str]]]:
     if program in _WRAPPERS:
         yield from _unwrap(_after_options(program, rest), depth)
         return
+    if program == "uv":
+        directory, rest = _uv_options(rest, _UV_GLOBAL_VALUES)
+        if rest[:1] == ["run"]:
+            more, rest = _uv_options(rest[1:], _UV_RUN_VALUES)
+        elif rest[:2] == ["tool", "run"]:
+            more, rest = _uv_options(rest[2:], _UVX_VALUES)
+        else:
+            yield Found(program, rest)
+            return
+        yield from _within(_join(directory, more), _unwrap(rest, depth))
+        return
+    if program == "uvx":
+        directory, rest = _uv_options(rest, _UVX_VALUES)
+        yield from _within(directory, _unwrap(rest, depth))
+        return
     if _RUNNERS.get(program) and rest[:1] == [_RUNNERS[program]]:
-        yield from _unwrap(_past_options(rest[1:], _RUNNER_VALUES.get(program, frozenset())), depth)
+        yield from _unwrap(_past_options(rest[1:], frozenset()), depth)
         return
-    if program == "uvx" or (program == "uv" and rest[:2] == ["tool", "run"]):
-        rest = rest if program == "uvx" else rest[2:]
-        yield from _unwrap(_past_options(rest, _UVX_VALUES), depth)
-        return
-    if re.fullmatch(r"python(\d(\.\d+)?)?", program):
+    if _PYTHON.fullmatch(program):
         module = _python_module(rest)
         if module is not None:
             yield module
@@ -289,7 +306,48 @@ def _unwrap(words: list[str], depth: int) -> Iterator[tuple[str, list[str]]]:
         if script is not None:
             yield from programs(script, depth=depth + 1)
             return
-    yield program, rest
+    yield Found(program, rest)
+
+
+class Found(tuple):
+    """A (program, arguments) pair `programs` found, and the directory it runs in relative
+    to the command line's (`uv --directory`), or None for the same one."""
+
+    directory: str | None
+
+    def __new__(cls, program: str, args: list[str], directory: str | None = None) -> Found:
+        found = super().__new__(cls, (program, args))
+        found.directory = directory
+        return found
+
+
+def _join(outer: str | None, inner: str | None) -> str | None:
+    if outer is None or inner is None:
+        return outer if inner is None else inner
+    return os.path.join(outer, inner)
+
+
+def _within(
+    directory: str | None, found: Iterable[tuple[str, list[str]]]
+) -> Iterator[tuple[str, list[str]]]:
+    """`found`, each running in `directory` (relative to its own)."""
+    for item in found:
+        if directory is None:
+            yield item
+        else:
+            yield Found(item[0], item[1], _join(directory, getattr(item, "directory", None)))
+
+
+def _uv_options(words: list[str], takes: frozenset[str]) -> tuple[str | None, list[str]]:
+    """The last `--directory` among uv's options at the start of `words`, and the words past
+    them (`_past_options`)."""
+    directory = None
+    while words and words[0].startswith("-") and words[0] != "--":
+        name, eq, value = words[0].partition("=")
+        if name == "--directory":
+            directory = value if eq else (words[1] if len(words) > 1 else None)
+        words = words[2:] if not eq and name in takes else words[1:]
+    return directory, words[1:] if words[:1] == ["--"] else words
 
 
 def _past_options(words: list[str], takes: frozenset[str]) -> list[str]:
@@ -394,40 +452,59 @@ def threads(
     env: Mapping[str, str] | None = None,
     cwd: Path | Callable[[], Path] | None = None,
 ) -> int | str | None:
-    """The thread count for a command line running the programs `found`: the largest of
-    their own rules' `threads`, "jobs" when any rule has it, and None when no rule matches.
-    With `env` and `cwd` (a directory, or a function giving it, called only for pytest), a
-    pytest run that a built-in rule gives the job count takes the built-in xdist rule's
-    `threads` when `PYTEST_ADDOPTS` or its config's `addopts` start xdist workers
-    (`xdist.run_starts_workers`)."""
+    """The thread count for a command line running the programs `found`, as a `threads`
+    setting (`jobs.thread_count`): the largest of their own rules' `threads`, "jobs" when any
+    rule has it, and None when no rule matches.
+
+    A pytest run under a built-in rule that starts xdist workers takes the built-in xdist
+    rule's `threads` for `-n auto` or `logical`, and "jobs/N", the job count divided among
+    its workers, for N workers. Its arguments say whether it does (`xdist.in_args`); with
+    `env` and `cwd`, so do `PYTEST_ADDOPTS` and its config's `addopts` (`xdist.workers`).
+    `cwd` is a directory, or a function giving it, called only for pytest."""
     rules = list(rules)
     chosen: list[int | str] = []
-    for program, args in found:
+    for item in found:
+        program, args = item
         own = match_programs(rules, [(program, args)])
         if own is None:
             continue
         count = own.rule.threads
         name = program.rsplit("/", 1)[-1]
-        if (
-            count == "jobs"
-            and own.rule.source == "default"
-            and name in _PYTEST
-            and env is not None
-            and cwd is not None
-        ):
-            workers = next(
-                (r for r in rules if r.source == "default" and r.args == xdist.XDIST_ARGS
-                 and name in r.programs),
-                None,
-            )  # fmt: skip
-            if workers is not None and xdist.run_starts_workers(args, env, cwd):
-                count = workers.threads
+        builtin = next(
+            (r for r in rules if r.source == "default" and r.args == xdist.XDIST_ARGS
+             and name in r.programs),
+            None,
+        )  # fmt: skip
+        if builtin is not None and own.rule.source == "default" and name in _PYTEST:
+            if env is not None and cwd is not None:
+                here = _directory(cwd, getattr(item, "directory", None))
+                workers = xdist.workers(args, env, here)
+            else:
+                workers = xdist.workers_in_args(args)
+            if workers == "auto":
+                count = builtin.threads
+            elif workers is not None:
+                count = f"jobs/{workers}"
         chosen.append(count)
     if not chosen:
         return None
     if "jobs" in chosen:
         return "jobs"
-    return max(int(c) for c in chosen)
+    shares = [int(str(c)[5:]) for c in chosen if str(c).startswith("jobs/")]
+    counts = [int(c) for c in chosen if not str(c).startswith("jobs/")]
+    if not shares:
+        return max(counts)
+    return f"jobs/{min(shares)}" + (f":{max(counts)}" if counts else "")
+
+
+def _directory(cwd: Path | Callable[[], Path], relative: str | None) -> Callable[[], Path]:
+    """The directory a program runs in: `relative` to the command line's `cwd`."""
+
+    def directory() -> Path:
+        base = cwd() if callable(cwd) else cwd
+        return base if relative is None else Path(os.path.normpath(base / relative))
+
+    return directory
 
 
 def match_programs(

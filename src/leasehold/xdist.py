@@ -75,6 +75,15 @@ MAX_CONFIG_BYTES = 1 << 20
 #: The longest `-n` count read; a longer one is not a count.
 _MAX_DIGITS = 6
 _NEGATIVE = re.compile(r"-\d+$|-\d*\.\d+$")
+#: How deep `@file` arguments may name further `@file` arguments.
+_MAX_FILE_DEPTH = 8
+#: pytest-xdist's `--tx` spec with a count: `4*popen`.
+_TX_COUNT = re.compile(r"([0-9]+)\*")
+#: The `-p` values that load pytest-xdist's plugin, and the one that blocks it.
+_XDIST_ON = frozenset({"xdist", "xdist.plugin"})
+_XDIST_OFF = "no:xdist"
+#: Long options that collect tests only: pytest-xdist then starts no workers.
+_COLLECT_ONLY = frozenset({"--collect-only", "--collectonly", "--co"})
 
 
 class _Unreadable(Exception):
@@ -86,29 +95,63 @@ def _option_like(word: str) -> bool:
     return word.startswith("-") and word != "-" and " " not in word and not _NEGATIVE.match(word)
 
 
-def _count(value: str) -> bool | None:
-    """Whether an `-n` value starts workers; None when it is not one."""
+def _count(value: str) -> int | str | None:
+    """An `-n` value: "auto" for `auto` and `logical`, a count of at most `_MAX_DIGITS`
+    digits, or None when it is neither."""
     if value in ("auto", "logical"):
-        return True
+        return "auto"
     if value.isascii() and value.isdigit() and len(value) <= _MAX_DIGITS:
-        return int(value) > 0
+        return int(value)
     return None
 
 
 @dataclass
 class _Read:
-    """What a list of pytest words says: whether they start workers (None: they do not say),
-    the last config file and `--rootdir` named, the `-o` overrides, and the free arguments."""
+    """What a list of pytest words sets: the xdist options, `--pdb` and `--collect-only`, the
+    last config file and `--rootdir` named, the `-o` overrides, and the free arguments.
+    `plugin` is the last `-p` that loads or blocks xdist; `seen` whether any xdist option or
+    such a `-p` was given."""
 
-    workers: bool | None = None
-    disabled: bool = False
+    numprocesses: int | str | None = None
+    maxprocesses: int | None = None
+    dist: str = "no"
+    distload: bool = False
+    tx: list[str] = field(default_factory=list)
+    usepdb: bool = False
+    collectonly: bool = False
+    plugin: bool | None = None
+    seen: bool = False
     config: str | None = None
     rootdir: str | None = None
     overrides: list[str] = field(default_factory=list)
     free: list[str] = field(default_factory=list)
 
 
-def _read_words(words: Sequence[str]) -> _Read:
+def _expand(
+    words: Sequence[str], cwd: Path | Callable[[], Path] | None, depth: int = 0
+) -> list[str]:
+    """`words` with each `@file` replaced by the file's lines, one word each, as argparse does
+    for pytest (`fromfile_prefix_chars="@"`). A file that is not a regular file of at most
+    `MAX_CONFIG_BYTES`, or cannot be read, leaves its word as it is."""
+    out: list[str] = []
+    base: Path | None = None
+    for word in words:
+        if not word.startswith("@") or depth >= _MAX_FILE_DEPTH:
+            out.append(word)
+            continue
+        try:
+            if base is None:
+                base = Path.cwd() if cwd is None else cwd() if callable(cwd) else cwd
+            lines = _text(_absolute(base, word[1:])).splitlines()
+        except (_Unreadable, OSError, ValueError):
+            out.append(word)
+            continue
+        out += _expand(lines, base, depth + 1)
+    return out
+
+
+def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = None) -> _Read:
+    words = _expand(words, cwd)
     read = _Read()
     i = 0
 
@@ -125,17 +168,26 @@ def _read_words(words: Sequence[str]) -> _Read:
         if name in ("-n", "--numprocesses"):
             found = _count(value)
             if found is not None:
-                read.workers = found
+                read.numprocesses, read.seen = found, True
+        elif name == "--maxprocesses":
+            read.maxprocesses = _count(value) if value.isdigit() else None
+        elif name == "--dist":
+            read.dist, read.seen = value, True
         elif name == "--tx":
-            read.workers = True
-        elif name == "-p" and value == "no:xdist":
-            read.disabled = True
+            read.tx.append(value)
+            read.seen = True
         elif name in ("-c", "--config-file"):
             read.config = value
         elif name == "--rootdir":
             read.rootdir = value
         elif name in ("-o", "--override-ini"):
             read.overrides.append(value)
+
+    def plugin(value: str | None) -> None:
+        """`-p` as pytest's plugin manager reads it: only `-p NAME` and `-pNAME`."""
+        name = (value or "").strip()
+        if name in _XDIST_ON or name == _XDIST_OFF:
+            read.plugin, read.seen = name != _XDIST_OFF, True
 
     while i < len(words):
         word = words[i]
@@ -147,30 +199,69 @@ def _read_words(words: Sequence[str]) -> _Read:
             read.free.append(word)
         elif word.startswith("--"):
             name, eq, attached = word.partition("=")
-            if eq:
+            if name == "--pdb":
+                read.usepdb = True
+            elif name in _COLLECT_ONLY:
+                read.collectonly = True
+            elif eq:
                 take(name, attached)
             elif name in _LONG_VALUE or name in _LONG_OPTIONAL:
                 take(name, value_after())
+        elif word == "-p":
+            plugin(value_after())
+        elif word.startswith("-p"):
+            plugin(word[2:])
         else:
             letters = word[1:]
             for at, letter in enumerate(letters):
+                if letter == "d":
+                    read.distload, read.seen = True, True
                 if letter not in _SHORT_VALUE:
                     continue
                 rest = letters[at + 1 :]
-                if rest.startswith("=") and at == 0:
+                if rest.startswith("="):
                     rest = rest[1:]
                 take(f"-{letter}", rest if rest else value_after())
                 break
-    if read.disabled:
-        read.workers = False
     return read
 
 
+def _workers(read: _Read) -> int | str | None:
+    """How many xdist workers pytest starts, as pytest-xdist 3 decides it
+    (`pytest_cmdline_main`, `pytest_configure`): a count, "auto" for `-n auto` or
+    `logical`, or None when it starts none."""
+    if read.plugin is False:
+        return None
+    numprocesses = read.numprocesses
+    dist = "load" if read.distload else read.dist
+    tx = list(read.tx)
+    if numprocesses == "auto" and read.usepdb:
+        numprocesses, dist = 0, "no"
+    if numprocesses:
+        dist = "load" if dist == "no" else dist
+        if numprocesses != "auto" and read.maxprocesses:
+            numprocesses = min(int(numprocesses), int(read.maxprocesses))
+        tx = ["popen"] * (1 if numprocesses == "auto" else int(numprocesses))
+    if numprocesses == 0:
+        dist, tx = "no", []
+    if read.collectonly or dist == "no" or not tx or read.usepdb:
+        return None  # collecting only, not distributing, or a usage error with --pdb
+    if numprocesses:
+        return numprocesses
+    return sum(int(m[1]) if (m := _TX_COUNT.match(spec)) and len(m[1]) <= _MAX_DIGITS else 1
+               for spec in tx)  # fmt: skip
+
+
+def workers_in_args(args: Sequence[str]) -> int | str | None:
+    """How many xdist workers `args` alone start (`_workers`): a count, "auto", or None."""
+    return _workers(_read_words(args))
+
+
 def in_args(args: Sequence[str]) -> bool | None:
-    """Whether `args` (pytest's arguments, one element each) start xdist workers: False
-    with `-p no:xdist` anywhere, else True or False as the last `-n` or `--tx` says, and None
-    when they say nothing."""
-    return _read_words(args).workers
+    """Whether `args` (pytest's arguments, one element each) start xdist workers (`_workers`);
+    None when they give no xdist option."""
+    read = _read_words(args)
+    return (_workers(read) is not None) if read.seen else None
 
 
 def _text(path: Path) -> str:
@@ -340,7 +431,7 @@ def config_addopts(args: Sequence[str], cwd: Path | Callable[[], Path]) -> list[
     `cwd` takes from its config: the last `-o addopts=...`, else the config file's (`locate`).
     Empty when there is none or it cannot be read; `cwd` is called only when needed."""
     try:
-        read = _read_words(args)
+        read = _read_words(args, cwd)
         addopts = _overridden(read.overrides)
         if addopts is None:
             directory = cwd() if callable(cwd) else cwd
@@ -350,15 +441,23 @@ def config_addopts(args: Sequence[str], cwd: Path | Callable[[], Path]) -> list[
     return addopts
 
 
-def run_starts_workers(
+def workers(
     args: Sequence[str], env: Mapping[str, str], cwd: Path | Callable[[], Path]
-) -> bool:
-    """Whether pytest run with `args` in `cwd` (or the directory `cwd()` gives, asked only
-    when needed), under `env`, starts xdist workers. A `PYTEST_ADDOPTS` or config that cannot
-    be read adds nothing."""
+) -> int | str | None:
+    """How many xdist workers pytest run with `args` in `cwd` (or the directory `cwd()` gives,
+    asked only when needed), under `env`, starts: a count, "auto", or None for none. Reads the
+    config's `addopts`, then `PYTEST_ADDOPTS`, then `args`. A `PYTEST_ADDOPTS` or config that
+    cannot be read adds nothing."""
     try:
         extra = shlex.split(env.get("PYTEST_ADDOPTS", ""))
     except ValueError:
         extra = []
     addopts = config_addopts([*extra, *args], cwd)
-    return _read_words([*addopts, *extra, *args]).workers is True
+    return _workers(_read_words([*addopts, *extra, *args], cwd))
+
+
+def run_starts_workers(
+    args: Sequence[str], env: Mapping[str, str], cwd: Path | Callable[[], Path]
+) -> bool:
+    """Whether pytest run with `args` in `cwd` under `env` starts xdist workers (`workers`)."""
+    return workers(args, env, cwd) is not None

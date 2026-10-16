@@ -202,7 +202,7 @@ def test_within_a_lease_each_thread_variable_is_lowered_and_never_raised(
     monkeypatch.setattr(shims, "Client", _Served(_defaults()))
     monkeypatch.chdir(tmp_path)
     base = {"LEASEHOLD_LEASE_ID": "outer", "OMP_NUM_THREADS": omp, "LEASEHOLD_SOCKET": "/x"}
-    workers = shims.within_lease("pytest", ["-n", "2"], jobs.sized_env(base, 4))
+    workers = shims.within_lease("pytest", ["-n", "auto"], jobs.sized_env(base, 4))
     assert workers["GOMAXPROCS"] == workers["LOKY_MAX_CPU_COUNT"] == "1"
     assert workers["RAYON_NUM_THREADS"] == workers["LEASEHOLD_THREADS"] == "1"
     assert workers["OMP_NUM_THREADS"] == omp
@@ -233,7 +233,8 @@ def test_within_a_lease_no_directory_or_config_stops_the_program(monkeypatch, tm
     monkeypatch.chdir(gone)
     gone.rmdir()
     assert shims.within_lease("pytest", [], env)["GOMAXPROCS"] == "4"
-    assert shims.within_lease("pytest", ["-n", "2"], env)["GOMAXPROCS"] == "1"
+    assert shims.within_lease("pytest", ["-n", "auto"], env)["GOMAXPROCS"] == "1"
+    assert shims.within_lease("pytest", ["-n", "2"], env)["GOMAXPROCS"] == "2"
 
 
 def test_a_fault_sizing_threads_runs_the_program_as_it_is(monkeypatch):
@@ -246,6 +247,15 @@ def test_a_fault_sizing_threads_runs_the_program_as_it_is(monkeypatch):
     env = _leased(LEASEHOLD_SOCKET="/x")
     assert shims.within_lease("pytest", ["-n", "2"], env) == env
     assert shims._threads([], "pytest", [], env) is None
+
+
+def test_a_shim_divides_the_leases_jobs_among_its_workers(monkeypatch, tmp_path):
+    monkeypatch.setattr(shims, "Client", _Served(_defaults()))
+    monkeypatch.chdir(tmp_path)
+    env = jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer", "LEASEHOLD_SOCKET": "/x"}, 8)
+    assert shims.within_lease("pytest", ["-n", "4"], env)["GOMAXPROCS"] == "2"
+    assert shims.within_lease("pytest", ["-n", "1"], env)["GOMAXPROCS"] == "8"
+    assert shims.within_lease("pytest", ["-n", "16"], env)["GOMAXPROCS"] == "1"
 
 
 def test_it_passes_through_when_it_should(setup):

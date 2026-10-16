@@ -110,8 +110,8 @@ def test_a_config_that_cannot_be_read_counts_as_none(tmp_path, name, text):
 @pytest.mark.parametrize(
     "args",
     [["--cov", "-n", "auto"], ["--cov", "-n", "4", "tests"], ["--pyargs", "-n", "4", "pkg"],
-     ["--cache-show", "-n", "2"], ["--tx", "4*popen"], ["--tx=popen"], ["-k", "x", "-n", "2"],
-     ["--maxfail", "-n", "2"]],
+     ["--cache-show", "-n", "2"], ["--dist", "load", "--tx", "4*popen"], ["-d", "--tx=popen"],
+     ["-k", "x", "-n", "2"], ["--maxfail", "-n", "2"]],
 )  # fmt: skip
 def test_options_take_no_word_that_looks_like_an_option(args):
     assert in_args(args) is True
@@ -315,3 +315,43 @@ def test_an_addopts_override_needs_no_working_directory():
 
     assert run_starts_workers(["-o", "addopts=-n 2"], {}, gone)
     assert not run_starts_workers([], {}, gone)
+
+
+def test_the_last_plugin_choice_wins_across_config_env_and_arguments(tmp_path):
+    _build(tmp_path, {"pytest.ini": "[pytest]\naddopts = -p no:xdist\n"})
+    assert not run_starts_workers(["-n", "2"], {}, tmp_path)
+    assert run_starts_workers(["-n", "2"], {"PYTEST_ADDOPTS": "-p xdist"}, tmp_path)
+    assert run_starts_workers(["-p", "xdist.plugin", "-n", "2"], {}, tmp_path)
+    on = tmp_path / "on"
+    _build(on, {"pytest.ini": "[pytest]\naddopts = -p xdist -n 2\n"})
+    assert not run_starts_workers([], {"PYTEST_ADDOPTS": "-pno:xdist"}, on)
+    assert run_starts_workers(["-p", "xdist"], {"PYTEST_ADDOPTS": "-p no:xdist"}, on)
+    assert run_starts_workers(["-p", "xdist.looponfail"], {}, on)
+
+
+@pytest.mark.parametrize("args", [["-qn=4"], ["-vn=4"], ["-qn=auto"], ["-xvn=2"]])
+def test_an_equals_sign_after_a_cluster_of_short_flags(args):
+    assert in_args(args) is True
+
+
+def test_arguments_from_a_file_are_read(tmp_path):
+    (tmp_path / "args.txt").write_text("-n\nauto\n")
+    (tmp_path / "more.txt").write_text("@args.txt\n")
+    assert run_starts_workers(["@args.txt"], {}, tmp_path)
+    assert run_starts_workers(["@more.txt"], {}, tmp_path)
+    assert not run_starts_workers(["@missing.txt"], {}, tmp_path)
+    (tmp_path / "big.txt").write_text("-n\nauto\n" + "x\n" * 600_000)
+    assert not run_starts_workers(["@big.txt"], {}, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [(["-n", "4"], 4), (["-n", "auto"], "auto"), (["-n", "4", "--maxprocesses", "2"], 2),
+     (["-n0", "--dist", "load", "--tx", "2*popen"], None), (["--tx", "2*popen"], None),
+     (["--dist", "load", "--tx", "2*popen", "--tx", "popen"], 3),
+     (["-n", "4", "--co"], None), (["-n", "4", "--collect-only"], None),
+     (["-n", "auto", "--pdb"], None), (["-n", "2", "--pdb"], None), (["--pdb"], None),
+     (["-d", "--tx", "popen", "-n", "0"], None)],
+)  # fmt: skip
+def test_workers_are_counted_as_pytest_xdist_does(args, expected):
+    assert xdist.workers_in_args(args) == expected
