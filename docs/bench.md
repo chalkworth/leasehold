@@ -309,8 +309,7 @@ regardless, as a tool that reads none of them does.
 The jobs are synthetic. They scale perfectly with workers and pay little for running more
 workers than CPUs, which real builds do not; that favours the conditions that oversubscribe.
 
-**Conditions**, one after another, each after the machine has settled (load at most 2, CPU
-pressure under 10%):
+**Conditions**, one after another, each after the machine has settled (see Washout below):
 
 | Condition | How each job starts |
 |---|---|
@@ -325,6 +324,29 @@ pressure under 10%):
 | `lh-hardcpu-greedy` | as `lh-enforced-greedy`, with `[contain] hard_cpu = true` (`CPUQuota` = weight CPUs) |
 | `lh-enforced-declared` | as `lh-enforced`, each `mem` job declaring its size plus 512 MiB (`hold --memory`) |
 | `lh-enforced-v020` | as `lh-enforced`, on the config leasehold 0.2.0's `init --user` wrote, weight 4 |
+| `lh-jobserver` | as `lh-enforced`, through `hold --jobserver`; each job is a client of its lease's jobserver (`job.py --jobserver`) |
+| `lh-elastic` | as `lh-jobserver`, with elastic leases (`hold --elastic`); stops before anything runs if the installed leasehold has none |
+
+The leasehold conditions (all `lh-` ones but `lh-enforced-v020`) take parameters after an `@`,
+so one condition can be run at several settings, for example `lh-enforced@w=2-4,h=1`:
+
+| Parameter | What it sets |
+|---|---|
+| `w=N` or `w=MIN-MAX` | what every job asks `hold --weight` for; `w=N` also sets the config's `[commands] heavy_weight` |
+| `h=N` | `[pools.work] headroom` |
+| `kept=N` | CPUs kept back: the config is rendered for `CPUs - N` slots, which sets the ceiling, both pools' `max` and the work pool's reservation as `init` would |
+| `mem=declared` | each `mem` job declares its size plus 512 MiB, as in `lh-enforced-declared` |
+| `budget=SIZE` | `[memory] budget` (otherwise `--memory-budget`, else `auto`) |
+| `arm=TAG` | nothing; it tells two arms of one condition apart, as in an A/A run |
+
+In `--conditions`, a part with `=` and no `@` belongs to the condition before it:
+`unmanaged,lh-enforced@w=3-3,h=1,kept=3` is two conditions. Each condition has one spelling,
+with its parameters in the order above and `w=3-3` written `w=3`, and a directory name such as
+`lh-enforced_w3_h1_kept3-r2`. The jobserver client cuts its work into 4 tasks per CPU. It
+always runs one task on the token it holds by being started, and runs each further task only
+on a token read from the jobserver, which it writes back when that task ends. How many tasks run
+at once then follows the tokens the jobserver holds, so a lease that grows or shrinks shows up
+in the job.
 
 leasehold runs as a private user-mode daemon on a socket of its own, with the config `leasehold
 init --user` writes for this machine: 6 slots of 8 CPUs (2 kept for the person), pool `work`
@@ -353,6 +375,115 @@ Running out of it makes the kernel kill a job (jobs raise their OOM score), not 
 session. The harness also stops every job if the machine has under 512 MiB available or a
 memory `full` pressure over 60% for 10 s.
 
+**Rounds and order.** A round runs every condition once on one plan. Its seed is
+`--seed-base` plus the round number, the same for every condition in the round and new each
+round (without `--seed-base`, round 1 has `--seed`). The order within a round follows a
+Williams design: with two conditions AB, then BA; with n, a cycle of n orders (2n when n is
+odd) in which each condition runs in each position equally often and follows each other
+condition equally often. Whatever one run leaves behind (a warm page cache, pages still coming
+back from swap) then falls on every condition alike. Round r takes the order at position r - 1
+in that cycle (modulo its length), so a round's schedule never depends on how many rounds
+there are. `--round N --dir DIR` runs round N alone into DIR. The first invocation calibrates
+and writes `spec.json`. Later ones reuse it, and refuse to run if they name another schedule
+(conditions, seed base, agents, preset or workload). A runner can run one round per invocation
+and lose at most a round when it stops. A run that is run again moves its old directory to
+`DIR/superseded/`.
+
+**Washout.** Before each run, after `--settle` seconds (20), the harness waits until the
+machine is quiet:
+
+- load at most a quarter of the CPUs (at least 2);
+- CPU pressure under 10%;
+- memory pressure under 0.5%;
+- at most 16 pages read back from swap over the last 30 s;
+- dirty and writeback pages under 64 MiB together.
+
+It reads these every 5 s. `--drop-caches` also writes back dirty pages and empties the page
+cache before each wait. That needs root or passwordless sudo for `tee
+/proc/sys/vm/drop_caches`, and the harness checks for it before it starts. If the wait reaches
+`--max-wait` (600 s) first, that attempt is marked invalid and the harness waits again, once;
+if the machine is still not quiet, the run is left invalid and does not run. Invalid attempts
+go to `invalid.jsonl` and the summary.
+
+**Manifest.** Each run's directory has a `manifest.json` with:
+
+- the git commit of the checkout and whether its tracked files had changes, and the leasehold
+  version;
+- the condition, its parameters, and the config its daemon ran on (also in `config.toml`, with
+  the ledger named only `ledger`);
+- what its jobs asked `hold` for;
+- the round, the seed and the run's place in its round;
+- the kernel release, CPU count, memory, swap, virtualisation and Python version;
+- the machine class: `--machine-class` (e.g. `kvm-8cpu-16g`) or `<CPUs>cpu-<GiB>g`. It also
+  names the results directory and the `--publish` directory;
+- the washout attempts, whether the run is valid, and each `--note` (pinning, clock boost).
+
+Neither the manifest nor `spec.json` records the host's name, the CPU model or a path on the
+machine: the config is named `bench`, and `spec.json` says only whether `git status` was timed.
+
+## Pre-registered comparisons
+
+A comparison that decides something is written down before it runs, as a gate file in
+[`bench/gates/`](../bench/gates/), and judged afterwards by `compare`, which needs only the
+standard library:
+
+```sh
+uv run python bench/run.py compare DIR [DIR ...] --gate bench/gates/defaults.toml
+uv run python bench/run.py compare DIR [DIR ...] --gate bench/gates/defaults.toml --blind-sd
+```
+
+A gate file has:
+
+- `[gate]`: `name`, `kind` (`confirmatory`, `screen` or `aa`), and `intent`, `objective`,
+  `stop` and `decision`, which head the report;
+- `[arms]`: the `control` and the `candidates`, as conditions;
+- `[[workloads]]`: each with a `name` (a run's `--workload`, or its preset), the `args` it runs
+  with, and optional `params` added to every arm in it (`mem=declared` for a memory-heavy mix);
+- `[rounds]`: `planned`, the `seed_base` the runs must use, and the blind look: after
+  `look_after` rounds, if the pooled paired SD of `blind_metric` is above `extend_if_sd_above`,
+  the gate needs `extend_to` rounds;
+- `[test] alpha` (one-sided), `[[metrics]]` (each a summary column and its `margin`), `[hard]`
+  (`failed_jobs`, `oom_kills`, `psi_max`) and `[order] sequential`.
+
+The unit is the round. In each round where the control and a candidate both ran validly,
+`compare` takes d = ln(candidate / control) for each metric. Over the rounds it gives the mean
+and SD of d, and a one-sided upper bound, mean + t(1 - alpha, n - 1) × SD / √n, as a ratio. A
+metric passes when that bound is under its margin. A candidate passes when every metric passes
+on every workload, no round of it breaks a hard rule (a failed job, an OOM kill, memory PSI over
+`psi_max`) and the rounds the gate needs are there. A broken hard rule fails a candidate at
+once; otherwise, with too few rounds, the verdict is `incomplete`. This is an intersection-union test: each metric is tested at alpha and all must
+pass, so the metrics need no correction for their number. With `sequential = true`, a second
+candidate is tested only if the first passed. Beside each bound, a sign-permutation test of
+the same hypothesis serves as a check. It is exact over all 2^n sign flips up to 12 rounds, and
+it cannot reach 0.05 with fewer than 5. A `screen` gate only drops arms: one goes when its
+geometric-mean wake or makespan ratio is above the gate's limit or it breaks a hard rule, and
+at most `max_survivors` stay. An `aa` gate runs one condition as two arms (`arm=a`, `arm=b`)
+and passes when the two-sided interval of the mean log ratio contains 0 and the paired SD is at
+most `max_paired_sd`.
+
+`--blind-sd` is for the look after `look_after` rounds. It prints the pooled SD of the paired
+log ratios of `blind_metric` and what the extension rule makes of it, and nothing about which
+arm is ahead, so the look cannot stop a run early for success. Without `--blind-sd`, `compare`
+prints a markdown report and writes it, with the same figures as JSON, to
+`DIR/compare-<gate>.md` and `.json` (`--out` for another place). The report warns about a
+results directory whose seed base differs from the gate's, so a pilot's rounds are never
+pooled with a gate's.
+
+The gates so far:
+
+- [`aa.toml`](../bench/gates/aa.toml): fixed weight 4 against itself, 4 rounds. It passes if the
+  interval of the makespan ratio contains 1 and the paired SD is at most 0.06; this sets the
+  gate's rounds and margin.
+- [`pilot.toml`](../bench/gates/pilot.toml): a screen of fixed 4 against `w=3-3,h=1`, `w=2-4`,
+  `w=2-3,kept=3` and `w=4-8` over 3 rounds (seeds 101 to 103). It drops an arm whose wake p99
+  ratio is above 2.0 or makespan ratio above 1.15, or that breaks a hard rule, and keeps at
+  most two.
+- [`defaults.toml`](../bench/gates/defaults.toml): the confirmatory gate for the generated
+  heavy-rule weight, on the full and memory-heavy workloads. 8 rounds, extended to 12 if the
+  blind SD after 4 is above 0.06. Margins: makespan and job mean 1.05 (makespan 1.10 if the A/A
+  run calls for it, set before the first round), wake p99 and `git status` p95 1.5. Its
+  candidates are filled in after the pilot, and `compare` refuses it until they are.
+
 ## Reproducing
 
 On a Linux machine with a systemd user manager (cgroup v2, cpu and memory delegated, which
@@ -379,10 +510,34 @@ uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo
 # two at once (opt-in): --weights cpu=3,mem=3 (and --memory-budget 7g for a matched budget)
 ```
 
-`--out DIR` (default `./bench-results`) receives, per run, `spec.json` (machine, plan, sizes,
-limits), `log.txt`, `summary.md` and `summary.csv`, and per condition `jobs.csv` (one row per
-job: agent, kind, when asked, started, ended, exit code, workers, cgroup), `samples.csv` (the
-machine once a second), the probes' raw samples (`wakeup_same.csv.gz`, `wakeup_outside.csv.gz`,
-`git_same.csv.gz`) and the leasehold daemon's log. `--publish` copies the summary to
-`bench/results/<CPUs>cpu-<GiB>g/`. `bench/run.py summarize DIR` rebuilds a summary from the raw
+The 0.3 runs above ran both rounds on one plan. Rounds now each have a seed of their own, so
+these commands run new plans in their second round.
+
+A pre-registered run, one round per invocation (the A/A run of `bench/gates/aa.toml`):
+
+```sh
+for r in 1 2 3 4; do
+  uv run python bench/run.py --agents 8 --duration 240 --git-repo /var/tmp/bigrepo \
+    --conditions lh-enforced@w=4,arm=a,lh-enforced@w=4,arm=b --rounds 4 --seed-base 200 \
+    --workload full --machine-class kvm-8cpu-16g --dir bench-results/aa --round $r
+done
+uv run python bench/run.py compare bench-results/aa --gate bench/gates/aa.toml
+```
+
+A smoke run of the whole path takes seconds and needs no systemd scope:
+
+```sh
+uv run python bench/run.py --tiny --no-scope --agents 1 --rounds 2 \
+  --conditions unmanaged,lh-advisory@w=2-4,h=1 --dir /tmp/lhbench-smoke --round 1
+```
+
+`--out DIR` (default `./bench-results`) receives a directory per invocation, named after the
+machine class, the agents, the preset and the time; `--dir DIR` names it instead. It holds
+`spec.json` (machine, sizes, limits, the schedule, the config `init` wrote, named `bench`),
+`log.txt`, `summary.md` and `summary.csv`, `invalid.jsonl` if a washout timed out, and per run
+`manifest.json`, `jobs.csv` (one row per job: agent, kind, when asked, started, ended, exit
+code, workers, cgroup), `samples.csv` (the machine once a second), the probes' raw samples
+(`wakeup_same.csv.gz`, `wakeup_outside.csv.gz`, `git_same.csv.gz`) and, for leasehold's
+conditions, `config.toml` and the daemon's log. `--publish` copies the summary to
+`bench/results/<machine class>/`. `bench/run.py summarize DIR` rebuilds a summary from the raw
 files. The run takes about an hour for K=4 and an hour and a half for K=8 on the machine below.

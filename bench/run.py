@@ -5,12 +5,13 @@ run under each way of keeping the machine usable that a skeptic would name.
     uv run python bench/run.py --agents 8 --duration 300
     uv run python bench/run.py --dry-run              # print the seeded schedule and stop
     uv run python bench/run.py summarize DIR          # rebuild the summary of a finished run
+    uv run python bench/run.py compare DIR --gate bench/gates/defaults.toml
 
 Each of K simulated agents works through its own seeded list of steps: think for a random
 (exponential) time, then run one job and wait for it, as an agent waits for its tool call. The
 jobs (`bench/job.py`) are either `cpu` (hashing spread over as many workers as the job may use)
-or `mem` (the same, over a large block of touched memory). Every condition runs the same lists,
-so every condition does the same work; only how the jobs are started changes:
+or `mem` (the same, over a large block of touched memory). Every condition in a round runs the
+same lists, so every condition does the same work; only how the jobs are started changes:
 
 * `unmanaged`: as they are, beside the person's own programs;
 * `nice`: under `nice -n 19`;
@@ -27,24 +28,42 @@ so every condition does the same work; only how the jobs are started changes:
 * `lh-enforced-declared`: as `lh-enforced`, with each `mem` job declaring its size plus 512
   MiB (`hold --memory`), which a config with a memory budget counts;
 * `lh-enforced-v020`: as `lh-enforced`, on the config leasehold 0.2.0's `init --user` wrote
-  for this machine (no memory counted) with every job at 0.2.0's built-in weight, 4.
+  for this machine (no memory counted) with every job at 0.2.0's built-in weight, 4;
+* `lh-jobserver`: as `lh-enforced`, through `hold --jobserver`, with jobs that are clients of
+  the lease's jobserver (`job.py --jobserver`);
+* `lh-elastic`: as `lh-jobserver`, with elastic leases (`hold --elastic`). It needs a leasehold
+  that has them, and stops with an error before anything runs if the installed one does not.
+
+The leasehold conditions take parameters (`bench/conditions.py`): `lh-enforced@w=2-4,h=1`
+asks for 2-4 slots with a work-pool headroom of 1; `kept=N` keeps N CPUs back from the slots,
+`mem=declared` declares memory, `budget=7g` sets the memory budget, and `arm=b` tells two arms
+of one condition apart.
 
 leasehold's conditions run a private user-mode daemon on a socket of their own, with the
 config `leasehold init --user` writes for this machine (its `[memory] budget` replaced by
-`--memory-budget` when given), and `hold --weight` as the built-in `[commands]` rules weigh a
-test run in it (`--weights`, by default the config's `heavy_weight`).
+`--memory-budget` when given) and the condition's parameters, and `hold --weight` as the
+built-in `[commands]` rules weigh a test run in it (`--weights`, by default the config's
+`heavy_weight`), or the condition's `w`.
+
+Rounds (`bench/schedule.py`): each round runs every condition once, on the plan of its own seed
+(`--seed-base` plus the round), in the order of a Williams design (AB, then BA, for two).
+`--round N` runs round N alone into `--dir`, so that a runner can run one round per invocation
+and pick up where it stopped. Before each run the harness waits for the machine to be quiet
+(`bench/washout.py`), and marks the run invalid if it never is.
 
 Safety: everything the benchmark starts is held to one memory limit (`MemoryMax`, with a
 bounded `MemorySwapMax`): the harness's own scope for the conditions whose jobs run in it, and
-the slice the jobs run in for `slice` and `lh-enforced`. Running out of that memory makes the
-kernel kill a job (jobs raise their OOM score), never the person's session. The run also stops
-every job if the machine itself runs short of memory.
+the slice the jobs run in for `slice` and the enforced conditions. Running out of that memory
+makes the kernel kill a job (jobs raise their OOM score), never the person's session. The run
+also stops every job if the machine itself runs short of memory.
 
-What is measured, per condition: makespan; each job's completion time from when its agent asked
+What is measured, per run: makespan; each job's completion time from when its agent asked
 (and, under leasehold, the wait before it started); a 10 ms wakeup probe in the jobs' own cgroup
 (a shell in the agents' terminal, an editor running the agent) and one in the session the
 benchmark was started from; optionally `git status` time; OOM kills; swap-in; memory pressure.
-Raw rows go to CSV files beside a summary table.
+Raw rows go to CSV files beside a summary table, and each run's `manifest.json` says what ran
+(`bench/manifest.py`). `compare` judges the runs by a gate file written before they ran
+(`bench/gate.py`, `bench/gates/`).
 """
 
 from __future__ import annotations
@@ -58,6 +77,7 @@ import math
 import os
 import platform
 import random
+import re
 import shutil
 import signal
 import subprocess
@@ -68,30 +88,21 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import conditions as conds
+import manifest
+import schedule
+import washout
+from conditions import DECLARED_EXTRA, DEFAULT_CONDITIONS
+
 HERE = Path(__file__).resolve().parent
 JOB = HERE / "job.py"
 PROBE = HERE / "probe.py"
 GIB = 1 << 30
 MIB = 1 << 20
 
-CONDITIONS = {
-    "unmanaged": "jobs started as they are, in the same cgroup as the person's shell",
-    "nice": "jobs under nice -n 19, same cgroup",
-    "slice": "jobs in one systemd user slice with a low CPUWeight",
-    "lh-advisory": "leasehold hold, containment off: lease and job count only",
-    "lh-enforced": "leasehold hold, containment on: weighted scope per lease",
-    "lh-advisory-greedy": "as lh-advisory, jobs ignore the job count and use every CPU",
-    "lh-enforced-greedy": "as lh-enforced, jobs ignore the job count and use every CPU",
-    "lh-hardcpu-greedy": "as lh-enforced-greedy, with [contain] hard_cpu = true",
-    "static-jobs": "unmanaged, each job told the job count its lease would give",
-    "lh-enforced-declared": "as lh-enforced, mem jobs declare their memory (hold --memory)",
-    "lh-enforced-v020": "as lh-enforced, on leasehold 0.2.0's generated config and weights",
-}
 #: The built-in weight of a test run or build in leasehold 0.2.0.
 WEIGHT_V020 = 4
-#: What `lh-enforced-declared` declares for a mem job beyond the block it touches.
-DECLARED_EXTRA = 512 * (1 << 20)
-DEFAULT_CONDITIONS = list(CONDITIONS)
+_CLASS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -150,7 +161,9 @@ def cpu_times() -> tuple[int, int, int]:
     return total - idle, total, fields[7]
 
 
-def machine() -> dict:
+def machine(label: str | None = None) -> dict:
+    """What the results say about the machine: never its name or its CPU model. `class` is
+    `label`, or `<CPUs>cpu-<GiB>g`."""
     mem = meminfo()
     cpus = os.cpu_count() or 1
     try:
@@ -166,7 +179,7 @@ def machine() -> dict:
         "kernel": platform.release(),
         "virt": virt or "none",
         "python": platform.python_version(),
-        "class": f"{cpus}cpu-{round(mem['MemTotal'] / GIB)}g",
+        "class": label or f"{cpus}cpu-{round(mem['MemTotal'] / GIB)}g",
     }
 
 
@@ -190,6 +203,11 @@ def make_plan(seed: int, agents: int, preset: Preset, nominal: dict[str, float])
             t += think + nominal[kind]
         plan.append(steps)
     return plan
+
+
+def spec_plan(spec: dict, seed: int) -> list[list]:
+    """The plan of `seed` for the run `spec` describes."""
+    return make_plan(seed, spec["agents"], Preset(**spec["preset"]), spec["nominal_s"])
 
 
 def calibrate(cpus: int) -> tuple[float, float]:
@@ -259,11 +277,45 @@ def clean_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("LEASEHOLD_")}
 
 
+def job_weight(cond: conds.Condition, spec: dict, kind: str) -> str:
+    """What a `kind` job of `cond` asks `hold --weight` for."""
+    if cond.weight is not None:
+        return conds.weight_text(cond.weight)
+    if cond.base == "lh-enforced-v020":
+        return str(WEIGHT_V020)
+    return str(spec["weights"][kind])
+
+
+def condition_config(spec: dict, cond: conds.Condition, ledger: str = "ledger") -> dict | None:
+    """The config `cond`'s daemon runs on, and what its jobs ask for (None: not a leasehold
+    condition). The ledger is placed at `ledger`; the default is the neutral name the
+    manifest records."""
+    if not cond.leasehold:
+        return None
+    text = conds.config(
+        spec["init_config"],
+        cond,
+        cpus=spec["machine"]["cpus"],
+        ledger=ledger,
+        memory_budget=spec.get("memory_budget"),
+    )
+    return {
+        "summary": conds.summary(text),
+        "hold_weight": {k: job_weight(cond, spec, k) for k in ("cpu", "mem")},
+        "mem_declared_bytes": spec["mem_bytes"] + DECLARED_EXTRA if cond.declared else None,
+        "jobserver": cond.jobserver,
+        "elastic": cond.elastic,
+        "contained": cond.contained,
+        "text": text,
+    }
+
+
 class Setup:
     """How one condition starts a job, and what it sets up and takes down around the run."""
 
     def __init__(self, condition: str, spec: dict, workdir: Path) -> None:
-        self.condition = condition
+        self.cond = conds.parse(condition)
+        self.condition = self.cond.base
         self.spec = spec
         self.workdir = workdir
         self.token = os.urandom(3).hex()
@@ -271,11 +323,8 @@ class Setup:
         self.daemon: subprocess.Popen | None = None
         self.sockdir: Path | None = None
         self.env = clean_env()
-        self.leasehold = condition.startswith("lh-")
-        self.greedy = condition.endswith("-greedy")
-        self.hard_cpu = condition == "lh-hardcpu-greedy"
-        self.v020 = condition == "lh-enforced-v020"
-        self.declared = condition == "lh-enforced-declared"
+        self.leasehold = self.cond.leasehold
+        self.greedy = self.cond.greedy
 
     def start(self) -> None:
         caps = [f"MemoryMax={self.spec['cap_bytes']}", f"MemorySwapMax={self.spec['swap_bytes']}"]
@@ -283,7 +332,7 @@ class Setup:
             self.slice = f"lhbenchjobs_{self.token}.slice"
             weight = f"CPUWeight={self.spec['slice_weight']}"
             self._set_property(self.slice, weight, *caps)
-        elif self.condition.startswith(("lh-enforced", "lh-hardcpu")):
+        elif self.cond.contained:
             # A session slice as `leasehold run` makes, under leasehold.slice; it carries the
             # benchmark's memory limit, as the harness's scope does for the other conditions.
             self.slice = f"leasehold-bench_{self.token}.slice"
@@ -302,31 +351,18 @@ class Setup:
     def _start_daemon(self) -> None:
         runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
         self.sockdir = Path(tempfile.mkdtemp(prefix="lhbench-", dir=runtime))
-        config = self.workdir / "machine.toml"
-        text = subprocess.run(
-            [*leasehold_cli(), "init", "--user", "--print"],
-            capture_output=True,
-            text=True,
-            check=True,
-            env=self.env,
-        ).stdout
-        marker = 'mode = "user"'
-        if marker not in text:
-            raise SystemExit("leasehold init --print gave a config the benchmark cannot place")
-        if self.v020:
-            text = config_v020(text)
-        elif self.spec.get("memory_budget"):
-            line = 'budget = "auto"'
-            if line not in text:
-                raise SystemExit("leasehold init --print has no [memory] budget to replace")
-            text = text.replace(line, f'budget = "{self.spec["memory_budget"]}"', 1)
-        ledger = self.workdir / "ledger"
-        text = text.replace(marker, f'{marker}\nledger_dir = "{ledger}"', 1)
-        if self.hard_cpu:
-            if "hard_cpu = false" not in text:
-                raise SystemExit("leasehold init --print has no hard_cpu line to turn on")
-            text = text.replace("hard_cpu = false", "hard_cpu = true", 1)
-        config.write_text(text)
+        # The daemon's config and ledger live beside its socket, so the results directory holds
+        # no path of this machine's; config.toml there is the same config, ledger named only.
+        config = self.sockdir / "machine.toml"
+        try:
+            resolved = condition_config(self.spec, self.cond, str(self.sockdir / "ledger"))
+        except ValueError as exc:
+            raise SystemExit(f"{self.cond.text}: {exc}") from exc
+        assert resolved is not None
+        config.write_text(resolved["text"])
+        neutral = condition_config(self.spec, self.cond)
+        assert neutral is not None
+        (self.workdir / "config.toml").write_text(neutral["text"])
         log = (self.workdir / "daemon.log").open("w")
         self.daemon = subprocess.Popen(
             [*leasehold_cli(), "serve", "--user", "--config", str(config), "--socket", self.sock],
@@ -364,6 +400,8 @@ class Setup:
             job += ["--size", str(self.spec["mem_bytes"])]
         if self.greedy:
             job.append("--ignore-env")
+        if self.cond.jobserver:
+            job.append("--jobserver")
         if self.condition == "nice":
             return ["nice", "-n", "19", *job]
         if self.condition == "slice":
@@ -380,19 +418,22 @@ class Setup:
                 *job,
             ]
         if self.leasehold:
-            weight = WEIGHT_V020 if self.v020 else self.spec["weights"][kind]
             # A size rounded up past the job's touched block, as a person declares one: the job's
             # interpreter and workers need a little more, and MemoryHigh is set to it.
             size = self.spec["mem_bytes"] + DECLARED_EXTRA
-            declared = ["--memory", f"{size}b"] if self.declared else []
+            declared = ["--memory", f"{size}b"] if self.cond.declared else []
+            jobserver = ["--jobserver"] if self.cond.jobserver else []
+            elastic = ["--elastic"] if self.cond.elastic else []
             return [
                 *leasehold_cli(),
                 "hold",
                 "--socket",
                 self.sock,
                 "--weight",
-                str(weight),
+                job_weight(self.cond, self.spec, kind),
                 *(declared if kind == "mem" else []),
+                *jobserver,
+                *elastic,
                 "--session",
                 f"agent{agent}",
                 "--if-unavailable",
@@ -429,30 +470,28 @@ def leasehold_cli() -> list[str]:
 
 
 def init_config() -> str:
-    """The config `leasehold init --user` writes for this machine."""
-    return subprocess.run(
-        [*leasehold_cli(), "init", "--user", "--print"],
+    """The config `leasehold init --user` writes for this machine, named `bench`."""
+    return conds.neutral(
+        subprocess.run(
+            [*leasehold_cli(), "init", "--user", "--print"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=clean_env(),
+        ).stdout
+    )
+
+
+def elastic_supported() -> bool:
+    """Whether the installed leasehold's `hold` has elastic leases (`--elastic`)."""
+    done = subprocess.run(
+        [*leasehold_cli(), "hold", "--help"],
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
         env=clean_env(),
-    ).stdout
-
-
-def config_v020(text: str) -> str:
-    """What leasehold 0.2.0's `init --user` wrote for the machine `text` (today's config for it)
-    describes: the same name, slots, CPUs, per-lease memory and description."""
-    import tomllib
-
-    from leasehold.template import render_user_0_2
-
-    raw = tomllib.loads(text)
-    about = text.splitlines()[1].removeprefix("# ")
-    c = raw["ceiling"]
-    return render_user_0_2(
-        name=raw["name"], slots=c["slots"], cpus=c["cpus"], memory=c["memory"], about=about,
-        release="0.2.0",
-    )  # fmt: skip
+    )
+    return "--elastic" in done.stdout
 
 
 def heavy_weight(text: str) -> int:
@@ -603,24 +642,28 @@ def _kill_group(proc: subprocess.Popen, sig: int) -> None:
         os.killpg(proc.pid, sig)
 
 
-def run_condition(spec_path: Path, condition: str, workdir: Path) -> int:
-    """One condition, from inside the benchmark's own scope: set up, run the plan with the
-    in-cgroup probes alongside, take down, and write jobs.csv, samples.csv and run.json."""
+def run_condition(
+    spec_path: Path, condition: str, workdir: Path, seed: int, git_repo: str | None
+) -> int:
+    """One condition, from inside the benchmark's own scope: set up, run the plan of `seed`
+    with the in-cgroup probes alongside, take down, and write jobs.csv, samples.csv and
+    run.json."""
     spec = json.loads(spec_path.read_text())
     setup = Setup(condition, spec, workdir)
     probes: list[subprocess.Popen] = []
     try:
         setup.start()
         probes.append(_probe("wakeup", workdir / "wakeup_same.csv.gz"))
-        if spec.get("git_repo"):
-            probes.append(_probe("git", workdir / "git_same.csv.gz", "--repo", spec["git_repo"]))
+        if git_repo:
+            probes.append(_probe("git", workdir / "git_same.csv.gz", "--repo", git_repo))
         run = Run(setup, spec, workdir)
         events_before = {}
         jobs_cg = setup.job_cgroup()
         cgroups = {"harness": own_cgroup(), **({"jobs": jobs_cg} if jobs_cg else {})}
         for name, cg in cgroups.items():
             events_before[name] = read_kv(cg / "memory.events")
-        result = run.run(spec["plan"])
+        result = run.run(spec_plan(spec, seed))
+        result["seed"] = seed
         for proc in probes:
             proc.send_signal(signal.SIGTERM)
         result["cgroups"] = {}
@@ -666,25 +709,6 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 # The whole run, from the person's session
 
 
-def wait_quiet(cpus: int, max_wait_s: float, settle_s: float, log) -> dict:
-    """Wait (at most `max_wait_s`) until the machine looks idle: load under a quarter of the
-    CPUs (at least 2), CPU pressure under 10%, memory pressure under 1%. What it saw."""
-    time.sleep(settle_s)
-    deadline = time.monotonic() + max_wait_s
-    while True:
-        load = float(Path("/proc/loadavg").read_text().split()[0])
-        cpu, mem = psi("cpu").get("some_avg10", 0), psi("memory").get("some_avg10", 0)
-        quiet = load <= max(2, cpus / 4) and cpu < 10 and mem < 1
-        if quiet or time.monotonic() > deadline:
-            seen = {"load1": load, "cpu_some": cpu, "mem_some": mem, "quiet": quiet}
-            log(
-                f"  machine before: load {load:.2f}, cpu some {cpu}%, mem some {mem}%"
-                + ("" if quiet else " (not quiet; going ahead)")
-            )
-            return seen
-        time.sleep(5)
-
-
 def scope_argv(unit: str, spec: dict) -> list[str]:
     return [
         "systemd-run",
@@ -703,66 +727,138 @@ def scope_argv(unit: str, spec: dict) -> list[str]:
     ]
 
 
-def runs(conditions: list[str], rounds: int) -> list[tuple[str, str]]:
-    """Each run as (condition, label): the conditions `rounds` times, every other round in
-    reverse so that no condition always runs first or last; labelled `<condition>-r<n>` when
-    there is more than one round."""
-    out = []
-    for n in range(1, rounds + 1):
-        order = conditions if n % 2 else conditions[::-1]
-        out += [(c, c if rounds == 1 else f"{c}-r{n}") for c in order]
-    return out
+def slots(spec: dict, only: int | None = None) -> list[schedule.Slot]:
+    """The runs of the schedule `spec` describes (of round `only` alone, if given)."""
+    names = spec["conditions"]
+    seed_base = spec.get("seed_base", spec.get("seed", 1) - 1)
+    slugs = [conds.parse(c).slug for c in names]
+    return schedule.schedule(names, spec.get("rounds", 1), seed_base, only, slugs)
 
 
-def run_all(args, spec: dict, outdir: Path, log) -> list[dict]:
+def runs(conditions: list[str], rounds: int, seed_base: int = 0) -> list[tuple[str, str, int]]:
+    """Each run as (condition, label, seed): every condition once a round, a round's seed
+    `seed_base + round` shared by every condition in it, in the order of `bench/schedule.py`."""
+    spec = {"conditions": conditions, "rounds": rounds, "seed_base": seed_base}
+    return [(s.condition, s.label, s.seed) for s in slots(spec)]
+
+
+def run_one(args, spec: dict, outdir: Path, workdir: Path, slot: schedule.Slot, before: dict):
+    """One run, in the benchmark's scope; its summary row."""
+    outside = _probe("wakeup", workdir / "wakeup_outside.csv.gz")
+    vm0 = vmstat()
+    unit = f"lhbench-{conds.parse(slot.condition).base}-{os.urandom(3).hex()}.scope"
+    inner = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "_condition",
+        "--spec",
+        str(outdir / "spec.json"),
+        "--condition",
+        slot.condition,
+        "--dir",
+        str(workdir),
+        "--seed",
+        str(slot.seed),
+        *(["--git-repo", args.git_repo] if args.git_repo else []),
+    ]
+    argv = inner if args.no_scope else [*scope_argv(unit, spec), *inner]
+    t0 = time.monotonic()
+    try:
+        done = subprocess.run(argv, check=False)
+    finally:
+        outside.send_signal(signal.SIGTERM)
+        outside.wait(30)
+        if not args.no_scope:
+            systemctl("kill", "--signal=KILL", unit)
+    vm1 = vmstat()
+    extra = {
+        "before": before,
+        "inner_rc": done.returncode,
+        "wall_s": time.monotonic() - t0,
+        "pswpin": vm1.get("pswpin", 0) - vm0.get("pswpin", 0),
+        "pswpout": vm1.get("pswpout", 0) - vm0.get("pswpout", 0),
+        "oom_kill_machine": vm1.get("oom_kill", 0) - vm0.get("oom_kill", 0),
+    }
+    (workdir / "outer.json").write_text(json.dumps(extra, indent=1))
+    return summarize_condition(workdir, slot.label)
+
+
+def run_all(args, spec: dict, outdir: Path, log, only: int | None = None) -> list[dict]:
+    """Every run of the schedule (or of round `only`), each after a washout; the summary rows
+    of the runs that ran."""
+    now = {
+        "git": manifest.git_state(),
+        "leasehold_version": manifest.leasehold_version(),
+        "notes": args.note or [],
+    }
     rows = []
-    vm0 = None
-    for condition, label in runs(spec["conditions"], spec.get("rounds", 1)):
-        workdir = outdir / label
-        workdir.mkdir(parents=True, exist_ok=True)
-        log(f"{label}: {CONDITIONS[condition]}")
-        before = (
-            wait_quiet(spec["machine"]["cpus"], args.max_wait, args.settle, log)
-            if not args.no_wait
-            else {}
-        )
-        outside = _probe("wakeup", workdir / "wakeup_outside.csv.gz")
-        vm0 = vmstat()
-        unit = f"lhbench-{condition}-{os.urandom(3).hex()}.scope"
-        inner = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "_condition",
-            "--spec",
-            str(outdir / "spec.json"),
-            "--condition",
-            condition,
-            "--dir",
-            str(workdir),
-        ]
-        argv = inner if args.no_scope else [*scope_argv(unit, spec), *inner]
-        t0 = time.monotonic()
-        try:
-            done = subprocess.run(argv, check=False)
-        finally:
-            outside.send_signal(signal.SIGTERM)
-            outside.wait(30)
-            if not args.no_scope:
-                systemctl("kill", "--signal=KILL", unit)
-        vm1 = vmstat()
-        extra = {
-            "before": before,
-            "inner_rc": done.returncode,
-            "wall_s": time.monotonic() - t0,
-            "pswpin": vm1.get("pswpin", 0) - vm0.get("pswpin", 0),
-            "pswpout": vm1.get("pswpout", 0) - vm0.get("pswpout", 0),
-            "oom_kill_machine": vm1.get("oom_kill", 0) - vm0.get("oom_kill", 0),
-        }
-        (workdir / "outer.json").write_text(json.dumps(extra, indent=1))
-        row = summarize_condition(workdir, label)
-        rows.append(row)
-        log("  " + ", ".join(f"{k} {v}" for k, v in row.items() if k != "condition"))
+    for slot in slots(spec, only):
+        row = run_slot(args, spec, outdir, log, slot, now)
+        if row is not None:
+            rows.append(row)
+            log("  " + ", ".join(f"{k} {v}" for k, v in row.items() if k != "condition"))
     return rows
+
+
+def run_slot(
+    args, spec: dict, outdir: Path, log, slot: schedule.Slot, now: dict, wait=None, run=run_one
+) -> dict | None:
+    """One run of the schedule after a washout (`wait`, by default `washout.wait_quiet`), with
+    its manifest; its summary row, or None if the machine was never quiet enough to run it. A
+    run whose directory exists from an earlier attempt runs again, the old directory moved
+    under `superseded/`."""
+    cond = conds.parse(slot.condition)
+    workdir = outdir / slot.label
+    if workdir.exists():
+        old = outdir / "superseded" / f"{slot.label}-{time.strftime('%Y%m%d-%H%M%S')}"
+        old.parent.mkdir(exist_ok=True)
+        workdir.rename(old)
+    workdir.mkdir(parents=True)
+    log(f"{slot.label}: round {slot.round}, seed {slot.seed}: {cond.describe}")
+    config = condition_config(spec, cond)
+    attempts: list[dict] = []
+
+    def write(valid: bool | None, why: str = "") -> None:
+        m = manifest.build(
+            spec=spec | now,
+            slot=slot,
+            condition=cond,
+            config=config,
+            washout=attempts,
+            valid=bool(valid),
+            why_invalid=why,
+        )
+        if valid is None:
+            m["valid"] = None
+        (workdir / "manifest.json").write_text(json.dumps(m, indent=1))
+
+    def quiet() -> dict:
+        if args.drop_caches:
+            washout.drop_caches(log)
+        if args.no_wait:
+            return {"quiet": True, "skipped": True}
+        return washout.wait_quiet(spec["machine"]["cpus"], args.max_wait, args.settle, log)
+
+    def invalid(seen: dict, attempt: int) -> None:
+        attempts.append(seen | {"attempt": attempt, "ran": False})
+        log(
+            "  invalid: the machine was not quiet; "
+            + ("waiting again" if attempt == 1 else "not run")
+        )
+        with (outdir / "invalid.jsonl").open("a") as f:
+            f.write(json.dumps({"label": slot.label, "attempt": attempt, "seen": seen}) + "\n")
+
+    def go(seen: dict, attempt: int) -> dict:
+        attempts.append(seen | {"attempt": attempt, "ran": True})
+        write(None)
+        return run(args, spec, outdir, workdir, slot, seen)
+
+    row = washout.washed(wait or quiet, go, invalid)
+    if row is None:
+        write(False, "the machine was not quiet after two washouts")
+    else:
+        write(True)
+    return row
 
 
 # ---------------------------------------------------------------------------------------------
@@ -883,10 +979,28 @@ def markdown_table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def completed_rows(outdir: Path, spec: dict) -> list[dict]:
+    """The summary row of every run of the schedule that has results, in schedule order."""
+    return [
+        summarize_condition(outdir / s.label, s.label)
+        for s in slots(spec)
+        if (outdir / s.label / "outer.json").exists()
+    ]
+
+
 def write_summary(outdir: Path, spec: dict, rows: list[dict]) -> str:
     _write_csv(outdir / "summary.csv", rows)
     m = spec["machine"]
     w = spec["weights"]
+    if "seed_base" in spec:
+        first = spec["seed_base"] + 1
+        plan = spec_plan(spec, first)
+        rounds = spec.get("rounds", 1)
+        seeds = f"seed {first}" if rounds == 1 else f"seeds {first} to {first + rounds - 1}"
+        plan_of = f" (seed {first}: " if rounds > 1 else " ("
+    else:
+        plan, seeds, plan_of = spec["plan"], f"seed {spec['seed']}", " ("
+    invalid = _read_rows_jsonl(outdir / "invalid.jsonl")
     text = "\n".join(
         [
             f"# leasehold benchmark: {m['class']}, {spec['agents']} agents",
@@ -894,10 +1008,10 @@ def write_summary(outdir: Path, spec: dict, rows: list[dict]) -> str:
             f"- Machine: {m['cpus']} CPUs, {m['memory_bytes'] / GIB:.1f} GiB memory, "
             f"{m['swap_bytes'] / GIB:.1f} GiB swap; virtualisation: {m['virt']}; "
             f"kernel {m['kernel']}.",
-            f"- Plan: seed {spec['seed']}, {spec['agents']} agents, planned over "
-            f"{spec['preset']['duration_s']:g} s, mean think {spec['preset']['think_s']:g} s, "
-            f"{sum(len(s) for s in spec['plan'])} jobs "
-            f"({sum(k == 'mem' for s in spec['plan'] for _, k in s)} mem).",
+            f"- Plan: {seeds}, {spec['agents']} agents, planned over "
+            f"{spec['preset']['duration_s']:g} s, mean think {spec['preset']['think_s']:g} s"
+            f"{plan_of}{sum(len(s) for s in plan)} jobs, "
+            f"{sum(k == 'mem' for s in plan for _, k in s)} mem).",
             f"- Jobs: cpu {spec['preset']['cpu_s']:g} s alone on every CPU; mem "
             f"{spec['mem_bytes'] / GIB:.2f} GiB touched, then {spec['preset']['mem_s']:g} s "
             "of hashing alone on every CPU.",
@@ -909,29 +1023,46 @@ def write_summary(outdir: Path, spec: dict, rows: list[dict]) -> str:
                 if spec.get("memory_budget")
                 else ""
             )
-            + f", `hold --weight` cpu {w['cpu']}, mem {w['mem']} "
+            + f", `hold --weight` cpu {w['cpu']}, mem {w['mem']} unless the condition sets `w` "
             f"(`lh-enforced-v020`: 0.2.0's config, weight {WEIGHT_V020}); slice condition "
             f"CPUWeight {spec['slice_weight']}.",
+            *([f"- Notes: {'; '.join(spec['notes'])}."] if spec.get("notes") else []),
             "",
             markdown_table(rows),
             "",
             "Wakeup latency is how late a 10 ms sleep wakes: `same` in the jobs' own cgroup (the "
             "harness's scope), `outside` in the session the benchmark was started from.",
             "",
+            *(
+                [
+                    "Invalid (the machine was not quiet before it): "
+                    + ", ".join(f"{i['label']} (attempt {i['attempt']})" for i in invalid)
+                    + ".",
+                    "",
+                ]
+                if invalid
+                else []
+            ),
         ]
     )
     (outdir / "summary.md").write_text(text)
     return text
 
 
+def _read_rows_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
 # ---------------------------------------------------------------------------------------------
 # The command line
 
 
-def parse_weights(text: str) -> dict[str, int]:
+def parse_weights(text: str, init: str) -> dict[str, int]:
     """`cpu=N,mem=M`; a kind left out keeps the built-in weight of a test run (`heavy_weight`
     in the config `init` writes)."""
-    heavy = heavy_weight(init_config())
+    heavy = heavy_weight(init)
     out = {"cpu": heavy, "mem": heavy}
     for part in filter(None, text.split(",")):
         key, _, value = part.partition("=")
@@ -941,6 +1072,29 @@ def parse_weights(text: str) -> dict[str, int]:
     return out
 
 
+#: What a resumed run must be given again exactly as it was first: the schedule and the plan.
+RESUME_KEYS = ("conditions", "seed_base", "agents", "preset_name", "workload")
+
+
+def resume(spec_path: Path, fresh: dict, rounds: int, parser) -> dict:
+    """The spec of a results directory to run more rounds into, checked against what this
+    invocation would have written (`fresh`): the schedule must be the same."""
+    spec = json.loads(spec_path.read_text())
+    for key in RESUME_KEYS:
+        if spec.get(key) != fresh[key]:
+            parser.error(
+                f"{spec_path.parent} was started with {key} {spec.get(key)!r}, not "
+                f"{fresh[key]!r}; pass the same schedule to run more of it"
+            )
+    if (spec.get("rounds", 1) == 1) != (rounds == 1):
+        parser.error(f"{spec_path.parent} was started with --rounds {spec.get('rounds', 1)}")
+    if bool(spec.get("git_repo")) != fresh["git_repo"]:
+        parser.error(f"{spec_path.parent}: pass --git-repo as the run was first started")
+    spec["rounds"] = max(spec.get("rounds", 1), rounds)
+    spec_path.write_text(json.dumps(spec, indent=1))
+    return spec
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["_condition"]:
@@ -948,32 +1102,52 @@ def main(argv: list[str] | None = None) -> int:
         inner.add_argument("--spec", type=Path, required=True)
         inner.add_argument("--condition", required=True)
         inner.add_argument("--dir", type=Path, required=True)
+        inner.add_argument("--seed", type=int, required=True)
+        inner.add_argument("--git-repo")
         a = inner.parse_args(argv[1:])
-        return run_condition(a.spec, a.condition, a.dir)
+        return run_condition(a.spec, a.condition, a.dir, a.seed, a.git_repo)
     if argv[:1] == ["summarize"]:
         outdir = Path(argv[1])
         spec = json.loads((outdir / "spec.json").read_text())
-        rows = [
-            summarize_condition(outdir / label, label)
-            for _c, label in runs(spec["conditions"], spec.get("rounds", 1))
-            if (outdir / label / "outer.json").exists()
-        ]
-        print(write_summary(outdir, spec, rows))
+        print(write_summary(outdir, spec, completed_rows(outdir, spec)))
         return 0
+    if argv[:1] == ["compare"]:
+        import gate
+
+        return gate.main(argv[1:])
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--agents", type=int, default=4)
     parser.add_argument("--duration", type=float, help="seconds of planned work per agent")
-    parser.add_argument("--seed", type=int, default=1)
+    seeds = parser.add_mutually_exclusive_group()
+    seeds.add_argument("--seed", type=int, default=1, help="round 1's seed (default 1)")
+    seeds.add_argument("--seed-base", type=int, help="round N runs the plan of seed SEED_BASE + N")
     preset = parser.add_mutually_exclusive_group()
     preset.add_argument("--quick", action="store_true", help="about 2 minutes a condition")
     preset.add_argument("--tiny", action="store_true", help="a seconds-long smoke run")
-    parser.add_argument("--conditions", default=",".join(DEFAULT_CONDITIONS))
+    parser.add_argument(
+        "--conditions",
+        default=",".join(DEFAULT_CONDITIONS),
+        help="comma-separated; leasehold's take parameters, e.g. lh-enforced@w=2-4,h=1",
+    )
     parser.add_argument(
         "--rounds",
         type=int,
         default=1,
-        help="run the conditions this many times on one plan, every other round in reverse",
+        help="run every condition this many times, each round on its own seed, in a Williams order",
+    )
+    parser.add_argument(
+        "--round", type=int, help="run only round N of the schedule (into --dir, to resume)"
+    )
+    parser.add_argument(
+        "--dir",
+        type=Path,
+        help="the results directory itself; one that exists is run into again, with the "
+        "schedule it was started with",
+    )
+    parser.add_argument(
+        "--workload",
+        help="a name for this mix of jobs, which gate files refer to (default: the preset)",
     )
     parser.add_argument("--mem-gib", type=float, help="a mem job's size (default: 0.7 x RAM / 3)")
     parser.add_argument(
@@ -998,6 +1172,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--git-repo", help="time `git status` in this repository every 5 s")
     parser.add_argument("--out", type=Path, default=Path("bench-results"))
     parser.add_argument(
+        "--machine-class",
+        help="the machine's label in results (default: <CPUs>cpu-<GiB>g), e.g. kvm-8cpu-16g",
+    )
+    parser.add_argument(
+        "--note",
+        action="append",
+        help="a free-form note for every run's manifest, e.g. 'boost off'; may repeat",
+    )
+    parser.add_argument(
         "--publish",
         action="store_true",
         help="also copy the summary to bench/results/<machine class>/",
@@ -1011,20 +1194,45 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-wait", action="store_true", help="do not wait for a quiet machine")
     parser.add_argument("--max-wait", type=float, default=600)
     parser.add_argument("--settle", type=float, default=20)
+    parser.add_argument(
+        "--drop-caches",
+        action="store_true",
+        help="empty the page cache before each run's wait (needs root or passwordless sudo)",
+    )
     args = parser.parse_args(argv)
 
     try:
-        args.weights = parse_weights(args.weights)
+        conditions = conds.parse_list(args.conditions)
+    except ValueError as exc:
+        parser.error(f"--conditions: {exc}")
+    if not conditions:
+        parser.error("--conditions: none given")
+    if any(c.elastic for c in conditions) and not elastic_supported():
+        parser.error(
+            "lh-elastic needs a leasehold with elastic leases (hold --elastic); the installed "
+            f"leasehold {manifest.leasehold_version()} has none"
+        )
+    if args.machine_class and not _CLASS.match(args.machine_class):
+        parser.error("--machine-class: letters, digits, '.', '_' and '-' only")
+    if args.rounds < 1:
+        parser.error("--rounds: at least 1")
+    if args.round is not None and not 1 <= args.round <= args.rounds:
+        parser.error(f"--round: one of 1 to --rounds ({args.rounds})")
+    if args.round is not None and not args.dir and not args.dry_run:
+        parser.error("--round needs --dir, the results directory every round goes into")
+    if args.drop_caches:
+        washout.check_drop_caches()
+    init = init_config()
+    try:
+        args.weights = parse_weights(args.weights, init)
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(f"--weights: {exc}")
-    conditions = [c for c in args.conditions.split(",") if c]
-    unknown = [c for c in conditions if c not in CONDITIONS]
-    if unknown:
-        parser.error(f"unknown conditions: {', '.join(unknown)}")
     name = "tiny" if args.tiny else "quick" if args.quick else "full"
     base = PRESETS[name]
     preset = Preset(**(asdict(base) | ({"duration_s": args.duration} if args.duration else {})))
-    m = machine()
+    seed_base = args.seed_base if args.seed_base is not None else args.seed - 1
+    names = [c.text for c in conditions]
+    m = machine(args.machine_class)
     mem = meminfo()
     mem_bytes = int(args.mem_gib * GIB) if args.mem_gib else int(0.7 * m["memory_bytes"] / 3)
     if args.tiny:
@@ -1035,60 +1243,89 @@ def main(argv: list[str] | None = None) -> int:
         else int(min(0.65 * m["memory_bytes"], mem["MemAvailable"] - 2 * GIB))
     )
     swap = int(min(args.swap_gib * GIB, mem.get("SwapFree", 0) / 2))
+    for c in conditions:
+        try:
+            condition_config(
+                {
+                    "init_config": init,
+                    "machine": m,
+                    "weights": args.weights,
+                    "mem_bytes": mem_bytes,
+                    "memory_budget": args.memory_budget,
+                },
+                c,
+            )
+        except ValueError as exc:
+            parser.error(f"--conditions: {c.text}: {exc}")
 
-    if args.dry_run or args.tiny:
-        rate, touch = 1e9, 2.0  # fixed: the plan must not depend on this machine's speed
-    else:
-        print("calibrating...", flush=True)
-        rate, touch = calibrate(m["cpus"])
-    nominal = {"cpu": preset.cpu_s, "mem": preset.mem_s + touch * mem_bytes / GIB}
-    plan = make_plan(args.seed, args.agents, preset, nominal)
+    first = {"conditions": names, "rounds": args.rounds, "seed_base": seed_base}
     if args.dry_run:
+        rate, touch = 1e9, 2.0  # fixed: the plan must not depend on this machine's speed
+        nominal = {"cpu": preset.cpu_s, "mem": preset.mem_s + touch * mem_bytes / GIB}
         print(
             json.dumps(
                 {
-                    "seed": args.seed,
+                    "seed": seed_base + (args.round or 1),
                     "agents": args.agents,
                     "preset": asdict(preset),
                     "nominal_s": nominal,
-                    "plan": plan,
+                    "plan": make_plan(seed_base + (args.round or 1), args.agents, preset, nominal),
+                    "schedule": [asdict(s) for s in slots(first, args.round)],
                 }
             )
         )
         return 0
 
-    work = {
-        "cpu": max(1, int(rate * m["cpus"] * preset.cpu_s)),
-        "mem": max(0, int(rate * m["cpus"] * preset.mem_s)),
-    }
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    outdir = args.out / f"{m['class']}-k{args.agents}-{name}-d{preset.duration_s:g}-{stamp}"
-    outdir.mkdir(parents=True, exist_ok=True)
-    spec = {
-        "machine": m,
-        "seed": args.seed,
+    fresh = {
+        "conditions": names,
+        "seed_base": seed_base,
         "agents": args.agents,
         "preset_name": name,
-        "preset": asdict(preset),
-        "conditions": conditions,
-        "rounds": args.rounds,
-        "plan": plan,
-        "nominal_s": nominal,
-        "rate_bytes_per_cpu_s": rate,
-        "touch_s_per_gib": touch,
-        "work": work,
-        "mem_bytes": mem_bytes,
-        "cap_bytes": cap,
-        "swap_bytes": swap,
-        "weights": args.weights,
-        "memory_budget": args.memory_budget,
-        "slice_weight": args.slice_weight,
-        "git_repo": args.git_repo,
-        "abort_available_bytes": 512 * MIB,
-        "job_timeout_s": max(60.0, 40 * max(nominal.values())),
+        "workload": args.workload or name,
+        "git_repo": bool(args.git_repo),
     }
-    (outdir / "spec.json").write_text(json.dumps(spec, indent=1))
-    print(f"results in {outdir}", flush=True)
+    if args.dir and (args.dir / "spec.json").exists():
+        outdir = args.dir
+        spec = resume(outdir / "spec.json", fresh, args.rounds, parser)
+        print(f"results in {outdir} (run again with the schedule it was started with)", flush=True)
+    else:
+        if args.tiny:
+            rate, touch = 1e9, 2.0
+        else:
+            print("calibrating...", flush=True)
+            rate, touch = calibrate(m["cpus"])
+        nominal = {"cpu": preset.cpu_s, "mem": preset.mem_s + touch * mem_bytes / GIB}
+        work = {
+            "cpu": max(1, int(rate * m["cpus"] * preset.cpu_s)),
+            "mem": max(0, int(rate * m["cpus"] * preset.mem_s)),
+        }
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        outdir = args.dir or (
+            args.out / f"{m['class']}-k{args.agents}-{name}-d{preset.duration_s:g}-{stamp}"
+        )
+        outdir.mkdir(parents=True, exist_ok=True)
+        spec = fresh | {
+            "machine": m,
+            "seed": seed_base + 1,
+            "preset": asdict(preset),
+            "rounds": args.rounds,
+            "nominal_s": nominal,
+            "rate_bytes_per_cpu_s": rate,
+            "touch_s_per_gib": touch,
+            "work": work,
+            "mem_bytes": mem_bytes,
+            "cap_bytes": cap,
+            "swap_bytes": swap,
+            "weights": args.weights,
+            "memory_budget": args.memory_budget,
+            "slice_weight": args.slice_weight,
+            "init_config": init,
+            "notes": args.note or [],
+            "abort_available_bytes": 512 * MIB,
+            "job_timeout_s": max(60.0, 40 * max(nominal.values())),
+        }
+        (outdir / "spec.json").write_text(json.dumps(spec, indent=1))
+        print(f"results in {outdir}", flush=True)
 
     def log(message: str) -> None:
         print(message, flush=True)
@@ -1097,15 +1334,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.tiny:
         args.no_wait = True
-    # A stopped benchmark still takes down the condition it was running (run_all's finally).
+    # A stopped benchmark still takes down the condition it was running (run_one's finally).
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    rows = run_all(args, spec, outdir, log)
-    text = write_summary(outdir, spec, rows)
+    run_all(args, spec, outdir, log, args.round)
+    text = write_summary(outdir, spec, completed_rows(outdir, spec))
     print(text)
     if args.publish:
-        dest = HERE / "results" / m["class"]
+        dest = HERE / "results" / spec["machine"]["class"]
         dest.mkdir(parents=True, exist_ok=True)
-        stem = f"k{args.agents}-{name}-d{preset.duration_s:g}"
+        stem = f"k{spec['agents']}-{spec['preset_name']}-d{spec['preset']['duration_s']:g}"
         shutil.copy(outdir / "summary.md", dest / f"{stem}.md")
         shutil.copy(outdir / "summary.csv", dest / f"{stem}.csv")
         print(f"summary copied to {dest}")

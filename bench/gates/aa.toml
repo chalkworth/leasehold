@@ -1,0 +1,53 @@
+# A/A qualification: the control against itself, to measure the bench's own noise before any
+# gate depends on it. Judge with:
+#   python bench/run.py compare DIR --gate bench/gates/aa.toml
+
+[gate]
+name = "aa"
+kind = "aa"
+intent = "Find out how much two runs of the same condition differ on this machine, round by round."
+objective = "The paired SD of ln(makespan ratio) between two arms of fixed weight 4, over 4 rounds."
+stop = "4 rounds, run in full; no early stop."
+decision = "Pass: the gate runs as planned, with its rounds and margin set from this SD. Fail: fix pinning, clock boost or the washout and run this again."
+
+[arms]
+control = "lh-enforced@w=4,arm=a"
+candidates = ["lh-enforced@w=4,arm=b"]
+
+[[workloads]]
+name = "full"
+args = "--agents 8 --duration 240 --git-repo /var/tmp/bigrepo"
+
+[rounds]
+planned = 4
+seed_base = 200
+
+[test]
+alpha = 0.05
+
+[aa]
+metric = "makespan_s"
+ci = 0.95            # two-sided interval of the mean log ratio; it must contain 0 (a ratio of 1)
+max_paired_sd = 0.06
+
+# Reported for each metric; only `aa.metric` decides.
+[[metrics]]
+name = "makespan_s"
+margin = 1.05
+
+[[metrics]]
+name = "job_mean_s"
+margin = 1.05
+
+[[metrics]]
+name = "wake_same_p99_ms"
+margin = 1.5
+
+[[metrics]]
+name = "git_p95_ms"
+margin = 1.5
+
+[hard]
+failed_jobs = 0
+oom_kills = 0
+psi_max = 10.0

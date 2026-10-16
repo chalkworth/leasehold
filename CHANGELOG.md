@@ -139,12 +139,37 @@ here.
   `leasehold.shims.covered_env`; `leasehold.doctor.check_headroom`;
   `leasehold.mcp_server.Held.waiting`, and `Held.sizes` returns None when the daemon has said
   no range; `leasehold.client.OPTIONAL`.
+- The benchmark (`bench/`, not part of the package):
+  - The leasehold conditions take parameters, as in `lh-enforced@w=2-4,h=1,kept=3`: the weight
+    or range jobs ask for, the work pool's headroom, CPUs kept back, `mem=declared`,
+    `budget=SIZE`, and `arm=TAG` to run one condition as two arms.
+  - Two new conditions: `lh-jobserver`, whose jobs are make jobserver clients
+    (`job.py --jobserver`), and `lh-elastic`, which stops with an error unless the installed
+    leasehold has elastic leases.
+  - Each round runs on its own seed, `--seed-base` plus the round, in a Williams order.
+    `--round N` with `--dir DIR` runs one round of a schedule into a results directory.
+  - Before each run, the harness waits for swap-in, memory pressure and dirty pages to settle
+    as well as load. A wait that times out is retried once and then leaves the run invalid.
+    `--drop-caches` empties the page cache first.
+  - `--machine-class`, `--note` and `--workload`. Each run gets a `manifest.json`: the commit,
+    the leasehold version, the condition and its config, the seed, and the machine, without
+    its name.
+  - Pre-registered gate files (`bench/gates/aa.toml`, `pilot.toml`, `defaults.toml`) and
+    `bench/run.py compare`, which judges results by one: paired log ratios per round, one-sided
+    t bounds, the intersection-union verdict, hard rules, a sign-permutation check, and
+    `--blind-sd`.
 
 ### Changed
 
 - A client's `--config` outranks `$LEASEHOLD_SOCKET`: it takes the socket of the config the
   flag names before the environment's, so a command inside `hold` can still name another
   daemon. `serve` is unchanged.
+- The benchmark's `--rounds` gives each round a new seed; it used to run every round on one
+  plan. With three or more conditions, the order is a Williams design instead of every other
+  round reversed. `spec.json` says whether `git status` was timed instead of naming the
+  repository, holds the config `init` wrote (named `bench`) instead of the plan, and the
+  leasehold conditions' config and ledger now sit beside the daemon's socket, with a copy
+  in each run's `config.toml`.
 - A variable already set is the user's, and `hold` leaves it alone unless the lease the
   command runs in set it to the value it still has.
 - A user's `OMP_NUM_THREADS` is copied to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` where

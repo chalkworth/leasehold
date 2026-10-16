@@ -1,0 +1,65 @@
+# Confirmatory gate for the generated heavy-rule weight. Written before the runs. The
+# candidates and the makespan margin are filled in after the pilot (bench/gates/pilot.toml)
+# and the A/A run (bench/gates/aa.toml), and before any round of this gate runs.
+# Blind look after round 4, then the verdict:
+#   python bench/run.py compare DIR-FULL DIR-MEMHEAVY --gate bench/gates/defaults.toml --blind-sd
+#   python bench/run.py compare DIR-FULL DIR-MEMHEAVY --gate bench/gates/defaults.toml
+
+[gate]
+name = "defaults"
+kind = "confirmatory"
+intent = "Decide whether a ranged heavy-rule weight can replace fixed 4 as the generated default."
+objective = "Per candidate against fixed 4: one-sided 95% upper bounds on the geometric-mean ratios of makespan, mean job time, wake p99 and git status p95, on both workloads."
+stop = "8 rounds. After round 4, a look blind to which arm leads: if the pooled paired SD of ln(makespan ratio) is above 0.06, run 12 rounds. No early stop for success or failure."
+decision = "The first candidate that passes every metric on both workloads, with no hard rule broken, becomes the generated heavy-rule weight. If none passes, find the cause (most likely memory) before release."
+
+[arms]
+control = "lh-enforced@w=4"
+# Filled in after the pilot, best first; at most two.
+candidates = []
+
+[order]
+sequential = true    # the second candidate is tested only if the first passes
+
+[[workloads]]
+name = "full"
+args = "--agents 8 --duration 240 --git-repo /var/tmp/bigrepo"
+
+[[workloads]]
+name = "memheavy"
+args = "--agents 8 --duration 240 --git-repo /var/tmp/bigrepo --mem-gib 3"
+params = "mem=declared"   # every arm declares its memory in this workload
+
+[rounds]
+planned = 8
+look_after = 4
+blind_metric = "makespan_s"
+extend_if_sd_above = 0.06
+extend_to = 12
+seed_base = 1000
+
+[test]
+alpha = 0.05         # one-sided, for each metric; a candidate must pass them all
+
+# Co-primary metrics: the upper bound of the geometric-mean ratio must be under the margin.
+[[metrics]]
+name = "makespan_s"
+margin = 1.05        # 1.10 if the A/A paired SD calls for it; set before the first round
+
+[[metrics]]
+name = "job_mean_s"
+margin = 1.05
+
+[[metrics]]
+name = "wake_same_p99_ms"
+margin = 1.5
+
+[[metrics]]
+name = "git_p95_ms"
+margin = 1.5
+
+# Any of these in any candidate round fails the candidate.
+[hard]
+failed_jobs = 0
+oom_kills = 0
+psi_max = 10.0       # memory PSI some avg10, highest sample in the round, percent
