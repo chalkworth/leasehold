@@ -95,7 +95,8 @@ def register(sub) -> None:
         "--no-job-env",
         dest="job_env",
         action="store_false",
-        help="leave CARGO_BUILD_JOBS, OMP_NUM_THREADS and the other job and thread variables alone",
+        help="set none of CARGO_BUILD_JOBS, OMP_NUM_THREADS and the other job and thread "
+        "variables, and remove the ones an enclosing lease set",
     )
     s.add_argument(
         "--threads",
@@ -103,7 +104,8 @@ def register(sub) -> None:
         metavar="N|jobs",
         help="the thread count OMP_NUM_THREADS and the other per-process thread-pool variables "
         "get: N (at most the job count) or jobs, the job count. Default: the matching "
-        "[commands] rule's threads, else jobs",
+        "[commands] rule's threads, else jobs. Inside another lease it sets them for this "
+        "lease's own job count. A PATH shim inside the command may still lower them",
     )
     s.add_argument(
         "--if-unavailable",

@@ -47,6 +47,18 @@ def test_a_named_configs_socket_is_used(tmp_path):
     assert discovery.find(None, None, {paths.ENV_CONFIG: str(config)}) == Path("/srv/lh.sock")
 
 
+def test_a_flag_outranks_the_environment(tmp_path):
+    """Inside `hold`, which exports `LEASEHOLD_SOCKET`, `--config` still names the daemon."""
+    config = tmp_path / "m.toml"
+    config.write_text('socket = "/srv/lh.sock"\n[ceiling]\nslots = 1\n')
+    env = {discovery.ENV_SOCKET: "/from/env.sock", paths.ENV_CONFIG: "/from/env.toml"}
+    assert discovery.find(None, str(config), env) == Path("/srv/lh.sock")
+    assert discovery.find("/named.sock", str(config), env) == Path("/named.sock")
+    assert discovery.find(None, None, env) == Path("/from/env.sock")
+    only_config = {paths.ENV_CONFIG: str(config)}
+    assert discovery.find(None, None, only_config) == Path("/srv/lh.sock")
+
+
 def test_the_first_socket_that_answers_is_taken(sock_dir):
     env = {"HOME": str(sock_dir), "XDG_RUNTIME_DIR": str(sock_dir)}
     user = paths.user_socket(env)

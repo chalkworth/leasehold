@@ -205,7 +205,8 @@ def test_hold_leaves_a_command_where_it_is_when_containment_is_off(daemon):
     off = CHILD_ENV | {contain.ENV: "off"}
     done = _hold(daemon.path, "--", sys.executable, "-c", _REPORT, env=off)
     assert done.returncode == 0, done.stderr
-    assert "leasehold.slice" not in done.stdout
+    here = Path("/proc/self/cgroup").read_text().split("::")[1].strip()
+    assert done.stdout.split()[0] == here  # the cgroup these tests run in, whatever it is
 
 
 @live
