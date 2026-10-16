@@ -290,12 +290,22 @@ The rows in detail:
   headroom keeps 1). The 6-slot gate machine cannot show its gain.
 * Headroom moved 2-4's makespan by 7 s or less on 6 and 8 slots without declared memory.
   Elsewhere headroom 0 was faster than `auto` by 4 to 25 s.
-* Almost every configuration in the non-dominated sets is untrusted. On 6 slots the sets hold
-  3-3 with headroom 1 and configurations with 0 or 1 CPU kept back. For the light mix they also
-  hold 2-4, 2-2, 2-3 and one MIN-1 range with 3 CPUs kept back.
-* On 8 slots the sets hold fixed 4, 4-8 and other ranges, mostly MIN-3 and MIN-4; on 16 slots,
-  only MIN-4 ranges. The only trusted members are MIN-4 ranges with 0 or 1 CPU kept back, for
-  the light mix on 8 and 16 slots.
+* A configuration is non-dominated when no other one, within the budget, is at least as good on
+  makespan, p95 wait, slots idle while something waited and the busy-thread level, and better on
+  one. Because a lower busy-thread level counts, configurations that keep fewer threads busy stay
+  in the sets however slow they are, and the sets are large (up to 31 configurations).
+* On 6 slots the trusted members are fixed 4 (and 4-6 with headroom 2, which runs the same way)
+  and two slower ranges with 3 CPUs kept back: 3-4 with headroom 1 and 3-5 with headroom 3, at
+  929 to 949 s and a busy-thread level of 3.9 to 4.6. Every faster member is untrusted: 3-3 with
+  headroom 1, 2-4 and 2-3 with 3 kept for some mixes, and configurations with 0 or 1 CPU kept
+  back.
+* On 8 slots the trusted members are, for the light mix, 3-3 and 3-4 with headroom 1 and MIN-3
+  and MIN-4 ranges with 0 to 3 CPUs kept back (578 to 843 s); for the heavy mixes, only 4-6
+  with 3 kept, at 868 s. On 16 slots they are MIN-4 ranges with 0, 1 or 3 kept, for the light
+  mix only (461 to 506 s).
+* MIN-1 ranges are in the sets for the light mix on 6 slots (1-4 with 3 kept, 718 s) and with
+  declared memory on 8 and 16 slots, where they are the slowest members (1032 to 1364 s), kept
+  for their low busy-thread level. All of them are untrusted.
 
 The same named comparison with the hold-out parameters
 ([`sim/study-holdout-params/study.md`](../bench/results/8cpu-16g/sim/study-holdout-params/study.md))

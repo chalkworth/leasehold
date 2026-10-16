@@ -196,32 +196,37 @@ def test_the_non_dominated_set_drops_beaten_and_over_budget_configurations():
             "makespan_s": 1,
             "wait_p95_s": 1,
             "idle_while_waiting": 0,
-            "saturated_share": 0,
+            "busy_p95": 0,
             "over_budget": 0,
         },
         {
             "makespan_s": 2,
             "wait_p95_s": 2,
             "idle_while_waiting": 0,
-            "saturated_share": 0,
+            "busy_p95": 0,
             "over_budget": 0,
         },
         {
             "makespan_s": 0,
             "wait_p95_s": 3,
             "idle_while_waiting": 0,
-            "saturated_share": 0,
+            "busy_p95": 0,
             "over_budget": 0,
         },
         {
             "makespan_s": 0,
             "wait_p95_s": 0,
             "idle_while_waiting": 0,
-            "saturated_share": 0,
+            "busy_p95": 0,
             "over_budget": 0.1,
         },
     ]
     assert study.pareto(rows) == [rows[0], rows[2]]
+    # Equal on the rest, the configuration that keeps more threads busy is dominated.
+    calm = dict(rows[0], makespan_s=5, busy_p95=4.0)
+    busy = dict(rows[0], makespan_s=5, busy_p95=7.0)
+    assert study.pareto([calm, busy]) == [calm]
+    assert study.OBJECTIVES[-1] == "busy_p95"
 
 
 def test_the_screening_design_stays_in_its_ranges():

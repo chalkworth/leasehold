@@ -25,9 +25,10 @@ less available than the measured machine had when it went into swap (`swap_limit
 configuration is untrusted when at least `UNTRUSTED_REPS` of its replications cross it.
 
 Configurations are compared on four measures, all lower-better: makespan, p95 wait, the share
-of slots left idle while something waited, and the share of the time the machine had at most
-one CPU idle (where the measured wakeup latency went bad, docs/bench.md). `pareto` keeps, of
-those never over budget, the ones no other configuration beats on all four.
+of slots left idle while something waited, and the busy-thread level the machine was at or
+under for 95% of the run (`busy_p95`; the measured wakeup latency went bad once 7 of 8 vCPUs
+were busy, docs/bench.md). `pareto` keeps, of those never over budget, the ones no other
+configuration beats on all four.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ BACKGROUND = 1.0
 #: The memory the person's own work uses, on every machine: about what the measured machine's
 #: other processes used beside the benchmark.
 OTHER_GIB = 6.0
-OBJECTIVES = ("makespan_s", "wait_p95_s", "idle_while_waiting", "saturated_share")
+OBJECTIVES = ("makespan_s", "wait_p95_s", "idle_while_waiting", "busy_p95")
 #: The measures compared with the control seed by seed.
 PAIRED = (
     "makespan_s",
