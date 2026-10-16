@@ -5,21 +5,24 @@ Two parts, both on every one of `WORKLOADS` and on three machines (6, 8 and 16 s
 and 18 CPUs with 2 kept back, 2 GiB of memory a CPU, `OTHER_GIB` of it used by other work):
 
 * `named`: today's fixed weight 4 (the control) against the ranges 2-4 and 1-4, each with the
-  pool's headroom at `auto`, 0, and one more than `auto`; 3-3 and 3-4 with headroom 1; and 4-8
-  (today's weight as the least) with headroom `auto`;
+  pool's headroom at `auto`, 0, and one more than `auto`; 3-3 and 3-4 with headroom 1; 2-2 and
+  2-3 with 3 CPUs kept back, which leave CPUs idle while two jobs run; and 4-8 (today's weight
+  as the least) with headroom `auto`;
 * `screen`: a Latin hypercube over the range's least and most, the headroom and the CPUs kept
   back, `points` configurations per machine and workload.
 
-Every configuration runs the same `reps` plans (seeds 1 to `reps`), with the same job-to-job
-spread on each seed. Each configuration's difference from the control is the mean over seeds
+Every configuration runs the same `reps` plans (seeds 1 to `reps`). Each job's share of the
+job-to-job spread is drawn from its seed and its place in the plan, so a job varies the same
+way under every policy. Each configuration's difference from the control is the mean over seeds
 of the two runs' difference, with its 95% interval (`paired`); the named configurations' runs
 are also kept seed by seed.
 
 A configuration whose jobs used more memory than the budget in any replication is marked over
 budget: the budget counts what jobs declare or are assumed to use, and the jobs used more.
-`untrusted` marks the results the calibration cannot vouch for: those where every slot was
-held for at least `FULL_SHARE` of the run, or where the jobs' memory left less available than
-the measured machine had when it went into swap (`swap_limit_gib`).
+`untrusted` marks the results the calibration cannot vouch for. A replication crosses the line
+when every slot was held for at least `FULL_SHARE` of the run, or when the jobs' memory left
+less available than the measured machine had when it went into swap (`swap_limit_gib`); a
+configuration is untrusted when at least `UNTRUSTED_REPS` of its replications cross it.
 
 Configurations are compared on four measures, all lower-better: makespan, p95 wait, the share
 of slots left idle while something waited, and the share of the time the machine had at most
@@ -60,9 +63,18 @@ BACKGROUND = 1.0
 OTHER_GIB = 6.0
 OBJECTIVES = ("makespan_s", "wait_p95_s", "idle_while_waiting", "saturated_share")
 #: The measures compared with the control seed by seed.
-PAIRED = ("makespan_s", "wait_p95_s", "idle_while_waiting", "saturated_share", "actual_peak_gib")
-#: Every slot held for this share of a run or more makes its result untrusted.
+PAIRED = (
+    "makespan_s",
+    "wait_p95_s",
+    "idle_while_waiting",
+    "saturated_share",
+    "busy_p95",
+    "actual_peak_gib",
+)
+#: Every slot held for this share of a run or more makes that replication untrusted...
 FULL_SHARE = 0.10
+#: ...and a configuration with this share of its replications untrusted is untrusted.
+UNTRUSTED_REPS = 0.10
 #: The available memory under which the measured machine went into swap (about 5 GiB, in the
 #: two-at-once run, with jobs well inside their limit): jobs that leave less make a result
 #: untrusted.
@@ -91,6 +103,13 @@ def swap_limit_gib(cpus: int) -> float:
     """The memory the jobs can use on the study machine of `cpus` CPUs before it leaves less
     available than `SWAP_AVAILABLE_GIB`."""
     return 2 * cpus - OTHER_GIB - SWAP_AVAILABLE_GIB
+
+
+def untrusted_share(results: list[dict], limit_gib: float) -> float:
+    """The share of `results` (one configuration's replications) in which every slot was held
+    for `FULL_SHARE` of the run or more, or the jobs' memory passed `limit_gib`."""
+    crossed = [r["full_share"] >= FULL_SHARE or r["actual_peak_gib"] > limit_gib for r in results]
+    return sum(crossed) / len(crossed)
 
 
 def run_one(args) -> dict:
@@ -127,7 +146,14 @@ def named_configs() -> list[Config]:
     out = [Config("4")]
     for weights in ("2-4", "1-4"):
         out += [Config(weights, headroom) for headroom in ("auto", "0", "auto+1")]
-    return [*out, Config("3-3", "1"), Config("3-4", "1"), Config("4-8")]
+    return [
+        *out,
+        Config("3-3", "1"),
+        Config("3-4", "1"),
+        Config("2-2", kept=3),
+        Config("2-3", kept=3),
+        Config("4-8"),
+    ]
 
 
 def screen_configs(slots: int, points: int, seed: int = 7) -> list[Config]:
@@ -170,7 +196,8 @@ def evaluate(configs, workload: Workload, cpus: int, reps: int, params: Params, 
         }
         agg = aggregate(results_c)
         row = {**head, **agg}
-        row["untrusted"] = agg["full_share"] >= FULL_SHARE or agg["actual_peak_gib"] > limit
+        row["untrusted_reps"] = untrusted_share(results_c, limit)
+        row["untrusted"] = row["untrusted_reps"] >= UNTRUSTED_REPS
         for key in PAIRED:
             mean, half = paired(
                 [float(r[key]) for r in results_c], [float(r[key]) for r in by_config[control]]
@@ -190,6 +217,7 @@ RUN_KEYS = (
     "wait_p95_s",
     "idle_while_waiting",
     "saturated_share",
+    "busy_p95",
     "full_share",
     "swap_share",
     "actual_peak_gib",
@@ -242,14 +270,16 @@ def _diff(r: dict, key: str, scale: float = 1.0, nd: int = 0) -> str:
 
 def table(rows: list[dict], *, mark: list[dict] | None = None) -> str:
     """Rows as a Markdown table of the measures the study compares, each with its paired
-    difference from the control."""
+    difference from the control. The share of time with at most one CPU idle is shown without a
+    difference: it turns on a cutoff (`metrics.SATURATED_SLACK`), so the busy-thread level it
+    is taken from (`busy_p95`) is shown beside it."""
     marked = {id(r) for r in (mark or [])}
     lines = [
         "| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle "
-        "while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | "
-        "memory used peak GiB | over budget | untrusted |"
+        "while waiting % | vs control | busy threads p95 | vs control | at most 1 CPU idle % "
+        "(cutoff) | all slots held % | memory used peak GiB | over budget | untrusted |"
         + (" non-dominated |" if mark is not None else ""),
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
         + ("---|" if mark is not None else ""),
     ]
     for r in rows:
@@ -263,12 +293,13 @@ def table(rows: list[dict], *, mark: list[dict] | None = None) -> str:
             _diff(r, "wait_p95_s", nd=1),
             _fmt(100 * r["idle_while_waiting"], None, 1),
             _diff(r, "idle_while_waiting", 100, 1),
+            f"{_fmt(r['busy_p95'], None, 2)} of {r['machine_cpus']}",
+            _diff(r, "busy_p95", nd=2),
             _fmt(100 * r["saturated_share"], None, 1),
-            _diff(r, "saturated_share", 100, 1),
             _fmt(100 * r["full_share"]),
             _fmt(r["actual_peak_gib"], None, 1),
             f"{100 * r['over_budget']:.0f}% of runs" if r["over_budget"] else "no",
-            "yes" if r["untrusted"] else "",
+            f"{100 * r['untrusted_reps']:.0f}% of runs" if r["untrusted"] else "",
         ]
         if mark is not None:
             cells.append("yes" if id(r) in marked else "")
@@ -333,6 +364,7 @@ def write(out: Path, rows: list[dict], runs: list[dict], params: Params, reps: i
                 "background": BACKGROUND,
                 "other_gib": OTHER_GIB,
                 "full_share": FULL_SHARE,
+                "untrusted_reps": UNTRUSTED_REPS,
                 "pareto": {
                     k: [(r["weights"], r["headroom"], r["kept"]) for r in v]
                     for k, v in front.items()

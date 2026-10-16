@@ -226,7 +226,7 @@ class Simulation:
         self.other_memory = other_memory
         self.pressure = pressure
         self.cpu = _Cpu(self.env, machine, kinds)
-        self.rng = random.Random(f"noise:{seed}")
+        self.seed = seed
         self.noise_cv = noise_cv
         self.config = setup.config
         self.leases: dict[tuple[str, str], _Lease] = {}
@@ -414,7 +414,10 @@ class Simulation:
         job.issued = self.env.now
         self.jobs.append(job)
         if self.noise_cv > 0:
-            job.work *= self.rng.lognormvariate(-(self.noise_cv**2) / 2, self.noise_cv)
+            # Drawn from the job's place in the plan, so a job varies the same way whatever the
+            # policy and whenever it is issued.
+            rng = random.Random(f"noise:{self.seed}:{job.agent}:{job.seq}")
+            job.work *= rng.lognormvariate(-(self.noise_cv**2) / 2, self.noise_cv)
         managed = self.config is not None
         yield self.env.timeout(o.start if managed else o.start_unmanaged)
         weight = job.weight

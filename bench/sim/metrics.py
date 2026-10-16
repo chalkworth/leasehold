@@ -40,6 +40,19 @@ def jain(values: Iterable[float]) -> float | None:
     return sum(xs) ** 2 / (len(xs) * sum(x * x for x in xs))
 
 
+def _weighted_pct(levels: list[tuple[float, float]], q: float) -> float | None:
+    """The level the machine was at or under for `q`% of the time, from (level, seconds)."""
+    if not levels:
+        return None
+    total = sum(dt for _, dt in levels)
+    seen = 0.0
+    for level, dt in sorted(levels):
+        seen += dt
+        if seen >= total * q / 100:
+            return level
+    return levels[-1][0]
+
+
 def summarize(result: Result, background: float = 0.0) -> dict:
     """One run's measures."""
     done = [j for j in result.jobs if j.done is not None]
@@ -53,11 +66,13 @@ def summarize(result: Result, background: float = 0.0) -> dict:
     }
     slot_s, cpu_s, idle_waiting, saturated, swapping, full = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     samples = result.samples
+    levels: list[tuple[float, float]] = []
     for a, b in zip(samples, [*samples[1:], None], strict=True):
         end = makespan if b is None else min(b.t, makespan)
         dt = end - a.t
         if dt <= 0:
             continue
+        levels.append((a.busy + background, dt))
         slot_s += a.held * dt
         cpu_s += min(a.busy, result.cpus) * dt
         if a.waiting:
@@ -91,6 +106,7 @@ def summarize(result: Result, background: float = 0.0) -> dict:
         "cpu_util": cpu_s / (result.cpus * span),
         "idle_while_waiting": idle_waiting / (result.slots * span),
         "saturated_share": saturated / span,
+        "busy_p95": _weighted_pct(levels, 95),
         "swap_share": swapping / span,
         "full_share": full / span,
         "jain_slot_s": jain(shares),

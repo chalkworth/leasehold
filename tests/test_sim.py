@@ -362,3 +362,36 @@ def test_the_study_reports_each_configuration_against_the_control_seed_by_seed(t
     for name in ("study.csv", "runs.csv"):
         assert b"\r" not in (tmp_path / name).read_bytes()
     assert "vs control" in (tmp_path / "study.md").read_text()
+
+
+def test_a_job_varies_the_same_way_under_every_policy():
+    def works(weights):
+        params = Params()
+        machine = params.machine(8, 16 * GIB, 1.0)
+        workload = replace(SHORT, agents=8)
+        steps, mem_bytes = plan_steps(workload, 2, params, machine, Weights.parse(weights))
+        setup = setup_for("lh-enforced", cpus=8, memory_bytes=16 * GIB)
+        sim = Simulation(setup, machine, params.kinds(mem_bytes), steps, seed=2, noise_cv=0.2)
+        return {(j.agent, j.seq): j.work for j in sim.run().jobs}
+
+    fixed, ranged = works("4"), works("2-4")
+    assert fixed == ranged
+    assert len(set(fixed.values())) > 2
+
+
+def test_a_configuration_is_untrusted_by_the_share_of_its_replications_that_cross():
+    calm = {"full_share": 0.0, "actual_peak_gib": 1.0}
+    full = {"full_share": study.FULL_SHARE, "actual_peak_gib": 1.0}
+    heavy = {"full_share": 0.0, "actual_peak_gib": 6.0}
+    assert study.untrusted_share([calm] * 9 + [full], 5.0) == pytest.approx(0.1)
+    assert study.untrusted_share([calm] * 9 + [heavy], 5.0) == pytest.approx(0.1)
+    assert study.untrusted_share([calm] * 10, 5.0) == 0
+    # One replication in four crosses both lines, though the means would cross neither.
+    both = {"full_share": 0.3, "actual_peak_gib": 9.0}
+    assert study.untrusted_share([calm] * 3 + [both], 5.0) == pytest.approx(0.25)
+
+
+def test_the_busy_level_is_read_over_time():
+    assert metrics._weighted_pct([(1.0, 9.0), (7.0, 1.0)], 95) == 7.0
+    assert metrics._weighted_pct([(1.0, 9.0), (7.0, 1.0)], 50) == 1.0
+    assert metrics._weighted_pct([], 95) is None
