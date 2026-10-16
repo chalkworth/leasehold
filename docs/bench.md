@@ -263,6 +263,15 @@ What these say:
 These runs did not show two at once to be better on this machine, which is why it is not the
 default.
 
+## Simulator
+
+[`bench/sim/`](../bench/sim/) replays these runs with leasehold's own admission code and a
+fitted model of the jobs and the machine, to choose which weight defaults the next benchmark
+run should compare. It reproduces 23 of the 24 leasehold conditions above within 7% on
+makespan; the one it misses (by 29%) is the two-at-once run that went into swap, which it does
+not model. [Simulator](sim.md) has the method, the calibration, a study of range defaults and
+its limits.
+
 ## Caveats
 
 - One machine, a virtual one, and one run per condition except in the 0.3-defaults comparison
