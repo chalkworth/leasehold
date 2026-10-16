@@ -241,6 +241,14 @@ class ContainSettings(_Strict):
     hard_cpu: bool = False
 
 
+class ElasticSettings(_Strict):
+    """How elastic leases move (`leasehold.elastic`)."""
+
+    #: How long an elastic lease's size stays put after it last changed (or after it was
+    #: granted) before it may grow again. Giving slots back is never held back.
+    settle_s: float = Field(15.0, ge=0)
+
+
 class Standing(_Strict):
     """Capacity a named long-lived workload outside leasehold occupies permanently.
 
@@ -316,6 +324,8 @@ class MachineConfig(_Strict):
     contain: ContainSettings = Field(default_factory=ContainSettings)
     #: When new work is held back for memory (`leasehold.guard`).
     guard: GuardSettings = Field(default_factory=GuardSettings)
+    #: How elastic leases move (`leasehold.elastic`).
+    elastic: ElasticSettings = Field(default_factory=ElasticSettings)
     #: The memory admitted work may count together. None (no `[memory]` table): no memory is
     #: counted.
     memory: MemorySettings | None = None

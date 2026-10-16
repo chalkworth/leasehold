@@ -26,8 +26,8 @@ uv run lint-imports       # the layer contracts in .importlinter
 
 ## Shape of the code
 
-- The library is pure: `model` (pools), `admission` (the decision), `ledger` (SQLite),
-  `quota`. It never imports the daemon. `.importlinter` enforces the layers; fix an upward
+- The library is pure: `model` (pools), `admission` (the decision), `elastic` (elastic
+  leases' targets), `ledger` (SQLite), `quota`. It never imports the daemon. `.importlinter` enforces the layers; fix an upward
   import rather than listing it as an exception.
 - The daemon is `machine` (config) → `agent` (requests, ticks) → `api` (routes, no sockets) →
   `server` (the unix socket). `status` builds the status object as a pure function.

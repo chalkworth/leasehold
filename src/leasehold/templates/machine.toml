@@ -88,3 +88,9 @@ revoke_grace_s = 30
 # Measure pressure over everything but lend.slice, so lent work never revokes itself. Lent
 # work must then run in lend.slice (systemd-run --slice=lend.slice ...).
 # pressure_cgroups = ["work.slice", "runner.slice", "system.slice", "user.slice"]
+
+# An elastic lease (a range run with `hold --jobserver`) grows one slot at a time into free
+# slots and gives them back when a request waits for them. After its size changes, it waits
+# this long before it grows again.
+[elastic]
+settle_s = 15

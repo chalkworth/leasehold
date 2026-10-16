@@ -139,6 +139,38 @@ here.
   `leasehold.shims.covered_env`; `leasehold.doctor.check_headroom`;
   `leasehold.mcp_server.Held.waiting`, and `Held.sizes` returns None when the daemon has said
   no range; `leasehold.client.OPTIONAL`.
+- Elastic leases: a range can ask to grow and shrink after it is admitted (`elastic: true` in
+  `POST /v1/acquire`, `hold --elastic`). Its holder promises to take slots when they are
+  offered and to give them back when asked. The daemon works out each one's `target` in every
+  decision. The target rises by one slot per decision, up to the range's most, while nothing
+  waits in its pool and memory is neither short nor under pressure, once the lease's size has
+  stayed put for `[elastic] settle_s` (new, 15 s by default). It may rise into the pools'
+  `headroom`. It falls, largest extras first, when a request whose turn has come would then
+  fit, and falls to the least for every elastic lease while memory is under pressure.
+  Nothing is taken from a lease that ignores its target, and nothing is killed
+  (docs/reference.md, "Elastic leases").
+- `POST /v1/resize` (`lease_id`, `weight`) moves an elastic lease: giving slots back always
+  succeeds and admits whatever then fits; taking slots succeeds up to the target while they
+  are still free, and is answered 409 `conflict` (a new error code) otherwise.
+  `leasehold.client.Client.resize`.
+- `hold --jobserver` with a range asks for an elastic lease unless `--no-elastic` is given.
+  It renews at least every `settle_s`, puts tokens in its jobserver and resizes its scope as
+  the lease grows, and takes free tokens out as jobs give them back before it gives slots
+  back. Only jobserver clients (make, ninja 1.13 and later, cargo and rustc, GCC's LTO) see
+  the size change: the job and thread variables keep their first values.
+- The grant and the renewal answers carry `elastic`, `target` and `target_jobs`, and the grant
+  the daemon's `[elastic]` settings; the status object's leases carry `elastic` and `target`,
+  and its queued items `elastic` (`schema` stays 2). A new event, `resized`, carries the
+  lease's new `weight` and its `previous_weight`. `top` shows a target that differs from the
+  weight as `3>4/2-4`.
+- Library: `leasehold.elastic` (`Elastic`, `targets`); `leasehold.follow.Follower`;
+  `leasehold.jobs.Jobserver`; `leasehold.contain.update_scope`, `scope_properties` and
+  `lease_unit`; `leasehold.ledger.Ledger.resize`, `Resize`, `ELASTIC_SETTLE_S` and
+  `Ledger.settle_s` (a constructor argument); `LedgerItem.elastic`; `Renewal.target` and
+  `elastic`; `leasehold.agent.AcquireRequest.elastic`, `MachineAgent.resize` and `Conflict`;
+  `leasehold.machine.ElasticSettings` and `MachineConfig.elastic`;
+  `leasehold.events.EventType.RESIZED`; `leasehold.hold.hold` and `lease_request` take
+  `elastic`.
 
 ### Changed
 
@@ -200,6 +232,10 @@ here.
   least of a range) wins, the first of equals, as before; the docs now say so.
 - Asking again under a lease id already waiting keeps the first request's range: to change
   it, give the place up and ask under a new id (docs/reference.md).
+- A lease's `weight` is the size it holds now: an elastic lease's moves, and every reader of
+  the ledger, the status object and events sees the size it holds. A lease that is not
+  elastic keeps the size it was granted, as before.
+- `leasehold.client.OPTIONAL` includes `elastic`.
 
 ### Compatibility
 
@@ -234,6 +270,17 @@ here.
 - With every request asking a single weight (no range anywhere), admission decides exactly as
   before, at the same sizes. Built-in rules and the configs `init` writes keep fixed weights.
 - A config from 0.3 has no `headroom`, so its pools get `"auto"`; that only affects ranges.
+- A daemon from before elastic leases refuses `elastic`; `Client.acquire` asks again without
+  it, and the lease keeps the size it is granted. Such a daemon has no `/v1/resize`, and
+  `hold` takes its 404 as "not now". A client from before elastic leases never asks for one,
+  and reads an elastic lease's `weight` as the size it holds.
+- The ledger gains more columns in place, at the same schema version (4):
+  `queue.elastic`, and `leases.elastic`, `leases.target` and `leases.resized_at`, all NULL for
+  rows written before (a lease from before is fixed). `leases.weight` is always the size held,
+  and a per-slot lease's `memory` the total at that size, so a 0.3 process sharing the ledger
+  counts an elastic lease at its size now. A 0.3 process neither works out targets nor
+  resizes. It admits around them as it would around any lease.
+- With no elastic lease, admission decides exactly as before.
 
 ## [0.3.0]
 

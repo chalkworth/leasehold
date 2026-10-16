@@ -31,6 +31,10 @@ in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it r
 A lease asked for as a range (`--weight 2-4`) is sized to the weight it was granted: its job
 and thread counts, jobserver, `LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot,
 `MemoryHigh`. The command does not inherit `LEASEHOLD_WANT` (`leasehold.weights`).
+
+A range run with a jobserver asks for an elastic lease unless told not to: its jobserver's
+tokens and its scope then follow the lease's target as it grows and shrinks
+(`leasehold.follow`), and the lease is renewed at least every `[elastic] settle_s`.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, jobs, shell, terminal, weights
+from leasehold import contain, follow, jobs, shell, terminal, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -182,15 +186,18 @@ def waiting_line(request: dict, answer: dict) -> str:
 
 
 class _Lease:
-    """A granted lease and its renewals: one due every TTL/3 (`due_in`), counted from the start
-    of the last, each waiting at most TTL/3 for its answer."""
+    """A granted lease and its renewals: one due every TTL/3, or `every` when that is sooner
+    (`due_in`), counted from the start of the last, each waiting at most that long for its
+    answer."""
 
-    def __init__(self, client: Client, lease_id: str, kind: str, ttl: float) -> None:
+    def __init__(
+        self, client: Client, lease_id: str, kind: str, ttl: float, every: float | None = None
+    ) -> None:
         self.client = client
         self.lease_id = lease_id
         self.kind = kind
         self.ttl = ttl
-        self.interval = max(0.05, ttl / 3)
+        self.interval = max(0.05, ttl / 3 if every is None else min(ttl / 3, every))
         self._quick = Client(client.path, timeout=min(client.timeout, self.interval))
         self.last_ok = time.monotonic()
         self._next = self.last_ok + self.interval
@@ -298,6 +305,7 @@ def hold(
     if_unavailable: str = "run",
     max_weight: int | None = None,
     memory_per_slot: str | None = None,
+    elastic: bool | None = None,
 ) -> int:
     """Run `argv` under a lease of `weight` to `max_weight` slots (None: `weight`), sized to
     the weight granted (`leasehold.jobs`): the job-count and thread-count variables unless
@@ -310,7 +318,8 @@ def hold(
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`. A leased command gets the
     client's socket as `LEASEHOLD_SOCKET`, so a `hold` or shim inside it reaches the same
-    daemon."""
+    daemon. `elastic` asks for an elastic lease, which only a range can be (None: when it is
+    a range and `jobserver` is true)."""
     if not argv:
         _say("no command given (leasehold hold [options] -- cmd ...)")
         return 2
@@ -327,6 +336,8 @@ def hold(
                 if threads is None:
                     threads = rule.threads
             threads = "jobs" if threads is None else threads
+            if elastic is None:
+                elastic = jobserver
             request = lease_request(
                 kind=kind,
                 pool=pool,
@@ -337,6 +348,7 @@ def hold(
                 memory=memory,
                 max_weight=max_weight,
                 memory_per_slot=memory_per_slot,
+                elastic=elastic,
             )
             if client is None:
                 code, answer = EXIT_UNAVAILABLE, {}
@@ -427,11 +439,13 @@ def lease_request(
     memory: str | None = None,
     max_weight: int | None = None,
     memory_per_slot: str | None = None,
+    elastic: bool = False,
 ) -> dict:
     """An acquire request for a new lease of its own id, as `hold` sends it: `weight` to
     `max_weight` slots (None, or `weight`: no range is sent). `memory` (a size such as `4g`)
     is the memory the work declares in all, `memory_per_slot` for each slot it is granted;
-    None declares none."""
+    None declares none. `elastic` asks for an elastic lease, and is sent only with a range."""
+    ranged = max_weight is not None and max_weight > weight
     return {
         "kind": kind,
         "pool": pool,
@@ -441,8 +455,9 @@ def lease_request(
         "session": session,
         "ttl_s": ttl_s,
         "memory": memory,
-        "max_weight": max_weight if max_weight is not None and max_weight > weight else None,
+        "max_weight": max_weight if ranged else None,
         "memory_per_slot": memory_per_slot,
+        "elastic": True if elastic and ranged else None,
     }
 
 
@@ -469,8 +484,11 @@ def run_leased(
     granted = answer["lease"]
     if memory is None and memory_per_slot is not None:
         memory = f"{int(granted['weight']) * memory_to_bytes(memory_per_slot)}b"
-    lease = _Lease(client, lease_id, kind, float(granted["ttl_s"]))
+    elastic = bool(granted.get("elastic"))
+    settle_s = (answer.get("elastic") or {}).get("settle_s") if elastic else None
+    lease = _Lease(client, lease_id, kind, float(granted["ttl_s"]), settle_s)
     count = int(granted.get("jobs") or granted["weight"])
+    server = None
     tty = terminal.owned()
     with contextlib.ExitStack() as stack:
         relay = stack.enter_context(_relayed())
@@ -484,12 +502,12 @@ def run_leased(
         )
         if jobserver:
             try:
-                fifo = stack.enter_context(jobs.jobserver(count))
+                server = stack.enter_context(jobs.Jobserver(count))
             except OSError as exc:
                 lease.release()
                 _say(f"cannot make a jobserver: {exc}")
                 return EXIT_NOT_STARTED
-            env |= jobserver_env(os.environ, count, fifo)
+            env |= jobserver_env(os.environ, count, server.fifo)
         prefix = scope_prefix(request, answer, memory)
         if prefix and shutil.which(argv[0], path=env.get("PATH")) is None:
             # Said here: under systemd-run a missing program would be its error, not ours.
@@ -514,7 +532,19 @@ def run_leased(
                 _say(uncontained)
             if tty:
                 stack.enter_context(foreground(child.pid))
-            code = _supervise(child, lease, request, grace_s)
+            follower = None
+            if elastic:
+                follower = follow.Follower(
+                    client,
+                    lease_id,
+                    granted,
+                    server=server,
+                    scope=contain.lease_unit(lease_id) if prefix and not uncontained else None,
+                    memory_per_slot=memory_per_slot,
+                    hard_cpu=bool((answer.get("contain") or {}).get("hard_cpu")),
+                    say=_say,
+                )
+            code = _supervise(child, lease, request, grace_s, follower)
     if interrupted is not None:
         return _interrupted(interrupted)
     return _ended(code, tty)
@@ -683,25 +713,38 @@ def jobserver_env(env: Mapping[str, str], count: int, fifo: Path) -> dict[str, s
     return out
 
 
-def _supervise(child, lease, request, grace_s) -> int:
+#: How often a follower waiting on jobs to give tokens back looks again.
+_FOLLOW_S = 0.2
+
+
+def _supervise(child, lease, request, grace_s, follower: follow.Follower | None = None) -> int:
     """Renew the lease while `child` runs; stop its process group when the lease is revoked or
     lost; release the lease once it is done. The child's return code (negative: the signal that
     killed it), or `EXIT_REVOKED`. A `work` or `external` lease the daemon no longer knows is
     asked for again; refused, the command runs on without a lease, which is not asked for
-    again."""
+    again. An elastic lease's `follower` hears each renewal and moves toward its target."""
     revoked: str | None = None
     unleased = queued = False
     try:
         while True:
+            wait = None if unleased else lease.due_in()
+            if wait is not None and follower is not None and follower.busy():
+                wait = min(wait, _FOLLOW_S)
             try:
-                code = child.wait(timeout=None if unleased else lease.due_in())
+                code = child.wait(timeout=wait)
                 break
             except subprocess.TimeoutExpired:
                 pass
+            if follower is not None and lease.due_in() > 0:
+                follower.step()
+                continue
             renewal = lease.renew()
             status = None if renewal is None else renewal["status"]
             if status == "ok":
                 queued = False
+                if follower is not None:
+                    follower.heard(renewal)
+                    follower.step()
             if status == "revoked":
                 revoked = renewal.get("reason") or "revoked"
             elif lease.kind in PREEMPTIBLE and (

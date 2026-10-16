@@ -806,21 +806,30 @@ class _Kept:
 
 
 def _extra_fits(
-    tally: _Tally, policy: AdmissionPolicy, pool: str, kept: _Kept, memory: int
+    tally: _Tally,
+    policy: AdmissionPolicy,
+    pool: str,
+    kept: _Kept,
+    memory: int,
+    *,
+    headroom: bool = True,
 ) -> bool:
     """Whether one extra slot, counting `memory`, fits `pool` with room left for what `kept`
-    names and the pool's `headroom` (the limits in the module docstring)."""
+    names and, with `headroom`, the pool's and its host's `headroom` (the limits in the module
+    docstring). Without it, the slot may use the headroom: an elastic lease gives it back
+    (`leasehold.elastic`)."""
     p = policy.pools[pool]
-    # A later change may relax headroom for leases that can give slots back.
+    pool_headroom = p.headroom if headroom else 0
+    host_headroom = _host_headroom(policy, p.host) if headroom else 0
     mine = 1 + kept.slots.get(pool, 0)
-    if tally.used.get(pool, 0) + mine + p.headroom > top(policy, pool):
+    if tally.used.get(pool, 0) + mine + pool_headroom > top(policy, pool):
         return False
     others = sum(
         max(0, q.reserved - tally.used.get(name, 0), _reachable(tally, policy, name, kept))
         for name, q in policy.pools.items()
         if name != pool and q.host == p.host
     )
-    spare = mine + _host_headroom(policy, p.host)
+    spare = mine + host_headroom
     if policy.slots.get(p.host, 0) - tally.host_used.get(p.host, 0) - spare < others:
         return False
     budget = policy.memory.get(p.host)
@@ -828,7 +837,7 @@ def _extra_fits(
         return True
     # The memory the host's headroom would count, at the assumed size or this slot's if larger,
     # so a request like this one that the headroom keeps room for can start.
-    room = _host_headroom(policy, p.host) * max(policy.assumed_memory.get(p.host, 0), memory)
+    room = host_headroom * max(policy.assumed_memory.get(p.host, 0), memory)
     return tally.memory.get(p.host, 0) + memory + kept.memory.get(p.host, 0) + room <= budget
 
 

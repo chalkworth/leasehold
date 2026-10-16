@@ -785,6 +785,50 @@ def test_two_processes_granting_ranges_never_over_admit(tmp_path):
             proc.join(60)
 
 
+def _contend_elastic(path: str, worker: int, results, release) -> None:
+    """Admit elastic ranges and move each to its target as fast as it can, while the other
+    process does the same: the most held at once, as this process saw it."""
+    ledger = Ledger(Path(path), settle_s=0)
+    seen = 0
+    mine = []
+    for i in range(12):
+        key = (f"s{worker}", f"e{worker}-{i}")
+        item = LedgerItem(*key, "work", f"u{worker}", "ci", 1, max_weight=4, elastic=True)
+        ledger.try_admit(item, SIX)
+        mine.append(key)
+        for held in mine:
+            renewal = ledger.renew(held)
+            if renewal.target is not None and renewal.target != renewal.weight:
+                ledger.resize(held, renewal.target, SIX)
+        if i % 3 == 2:
+            ledger.release(mine.pop(0))
+        ledger.settle(SIX)
+        seen = max(seen, sum(r["weight"] for r in ledger.leases()))
+    results.put((worker, seen))
+    release.wait(60)
+
+
+def test_two_processes_resizing_elastic_leases_never_over_admit(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    results, release = ctx.Queue(), ctx.Event()
+    path = str(tmp_path / "ledger.sqlite3")
+    Ledger(tmp_path / "ledger.sqlite3")
+    procs = [ctx.Process(target=_contend_elastic, args=(path, w, results, release)) for w in (1, 2)]
+    for proc in procs:
+        proc.start()
+    try:
+        got = [results.get(timeout=120) for _ in procs]
+        assert all(seen <= 6 for _, seen in got)
+        leases = Ledger(tmp_path / "ledger.sqlite3").leases()
+        assert sum(r["weight"] for r in leases) <= 6
+        assert all(1 <= r["weight"] <= 4 for r in leases)
+        assert any(r["weight"] > 1 for r in leases) or len(leases) == 6  # they did grow
+    finally:
+        release.set()
+        for proc in procs:
+            proc.join(60)
+
+
 def test_a_per_slot_lease_counts_the_same_to_a_reader_from_before_memory_per_slot(tmp_path):
     # A 0.3 process reads only `memory`: the total granted, which is what admission counts.
     budget = AdmissionPolicy(

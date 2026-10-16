@@ -24,12 +24,17 @@ per slot). `hold` tells its command in two ways:
   and `MKL_NUM_THREADS` where the user left them unset. A user's `OPENBLAS_NUM_THREADS` or
   `MKL_NUM_THREADS` is left alone and changes nothing else. `LEASEHOLD_JOBS` and
   `LEASEHOLD_THREADS` are always the job count and the thread count this lease chose.
-* **A jobserver** (`hold --jobserver`): a named pipe holding `jobs - 1` tokens, announced in
-  `MAKEFLAGS` as `--jobserver-auth=fifo:PATH`, the protocol of GNU make 4.4. make, ninja 1.13
-  and later, cargo and rustc, and GCC's LTO take a token before each extra job, so the whole tree
-  of builds under the command, sub-makes included, runs at most `jobs` at once. A tool that does
-  not speak the protocol (or make before 4.4, which warns and runs serially) still has the
-  variables. The command must not pass its own `-jN`: make then runs its own jobserver.
+* **A jobserver** (`hold --jobserver`, `Jobserver`): a named pipe holding `jobs - 1` tokens,
+  announced in `MAKEFLAGS` as `--jobserver-auth=fifo:PATH`, the protocol of GNU make 4.4. make,
+  ninja 1.13 and later, cargo and rustc, and GCC's LTO take a token before each extra job, so
+  the whole tree of builds under the command, sub-makes included, runs at most `jobs` at once.
+  A tool that does not speak the protocol (or make before 4.4, which warns and runs serially)
+  still has the variables. The command must not pass its own `-jN`: make then runs its own
+  jobserver.
+
+The variables are set once, when the command starts: a process cannot change another's
+environment. Only the jobserver's tokens can follow an elastic lease (`leasehold.follow`) as
+it grows and shrinks.
 
 Prior art: steve and guildmaster run one jobserver for a whole machine; here the jobserver is
 per lease, so it follows what the machine's daemon granted.
@@ -278,23 +283,66 @@ def makeflags(existing: str | None, jobs: int, fifo: Path) -> str:
     return " ".join([*kept, *flags])
 
 
+class Jobserver:
+    """A fifo jobserver for `jobs` jobs, as a context manager: the command itself holds the
+    implicit first token, so the fifo starts with `jobs - 1`. In a directory only this user may
+    enter (`fifo`); removed on leaving.
+
+    `tokens` is how many tokens are in play: in the fifo, or taken by a job that will put them
+    back. `add` puts more in, so more jobs run at once. `withhold` takes free tokens out of the
+    fifo, so fewer do; a token a job holds is taken only once the job gives it back, so no
+    running job is stopped."""
+
+    def __init__(self, jobs: int) -> None:
+        self.tokens = max(0, jobs - 1)
+        self.fifo = Path()
+        self._directory: Path | None = None
+        self._fd: int | None = None
+
+    def __enter__(self) -> Jobserver:
+        self._directory = Path(tempfile.mkdtemp(prefix="leasehold-jobs-"))
+        try:
+            self.fifo = self._directory / "fifo"
+            os.mkfifo(self.fifo, 0o600)
+            # Open read-write without blocking, so the tokens can be written before any reader
+            # exists, and so the fifo never sees end-of-file while the command runs.
+            self._fd = os.open(self.fifo, os.O_RDWR | os.O_NONBLOCK)
+            if not stat.S_ISFIFO(os.fstat(self._fd).st_mode):
+                raise OSError(f"{self.fifo} is not a fifo")
+            os.write(self._fd, b"+" * self.tokens)
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        if self._directory is not None:
+            shutil.rmtree(self._directory, ignore_errors=True)
+            self._directory = None
+
+    def add(self, count: int) -> None:
+        """Put `count` more tokens in play."""
+        if count > 0 and self._fd is not None:
+            os.write(self._fd, b"+" * count)
+            self.tokens += count
+
+    def withhold(self, count: int) -> int:
+        """Take up to `count` free tokens out of play, without waiting for any; how many."""
+        if count <= 0 or self._fd is None:
+            return 0
+        try:
+            taken = len(os.read(self._fd, count))
+        except BlockingIOError:
+            return 0
+        self.tokens -= taken
+        return taken
+
+
 @contextlib.contextmanager
 def jobserver(jobs: int) -> Iterator[Path]:
-    """A fifo jobserver for `jobs` jobs: the command itself holds the implicit first token, so
-    the fifo holds `jobs - 1`. In a directory only this user may enter; removed afterwards."""
-    directory = Path(tempfile.mkdtemp(prefix="leasehold-jobs-"))
-    try:
-        fifo = directory / "fifo"
-        os.mkfifo(fifo, 0o600)
-        # Open read-write without blocking, so the tokens can be written before any reader
-        # exists, and so the fifo never sees end-of-file while the command runs.
-        fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
-        try:
-            if not stat.S_ISFIFO(os.fstat(fd).st_mode):
-                raise OSError(f"{fifo} is not a fifo")
-            os.write(fd, b"+" * (jobs - 1))
-            yield fifo
-        finally:
-            os.close(fd)
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
+    """A `Jobserver` for `jobs` jobs whose tokens stay as they started: its fifo."""
+    with Jobserver(jobs) as server:
+        yield server.fifo
