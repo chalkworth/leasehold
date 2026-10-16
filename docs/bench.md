@@ -503,19 +503,30 @@ the paired SD of every metric. It passes when the two-sided interval of `aa.metr
 ratio contains 0 and that metric's paired SD is at most `max_paired_sd`.
 
 **The plan rule.** A gate's `[plan]` says, before the A/A run, how its SDs set the gate's rounds
-and margins. For each metric it takes the rounds needed for 80% power to pass when the
-candidate equals the control (a true ratio of 1), at that metric's paired SD and margin. The
-gate runs the most any metric needs, at least `min_rounds` (8) and at most `max_rounds` (12). If
-makespan still lacks power at 12 rounds, its margin becomes 1.10. A latency metric that lacks
-power at 12 keeps its margin, and the plan says it is underpowered. Power comes from the
-noncentral t distribution, integrated numerically in the standard library.
+and margins. A candidate passes only if it passes every metric on every workload, so the rule
+looks at joint power. That is the chance a candidate equal to the control (a true ratio of 1)
+passes all of them, taking the metrics and workloads as independent: the product of each
+metric's power to pass its margin, raised to the number of workloads. The gate runs the fewest
+rounds from `min_rounds` (8) to `max_rounds` (12) whose joint power is at least `joint_power`
+(0.8). If no count up to 12 reaches it, the throughput margins (makespan and job mean) become
+1.10 and the search runs again. The latency margins never widen. If 12 rounds still fall
+short, the gate runs 12 and the plan prints the joint power it has as a known limit. Power
+comes from the noncentral t distribution, integrated numerically in the standard library.
 
-The plan prints each metric's power at the rounds it chose. At a paired SD of 0.06 and a
-margin of 1.05, 8 rounds give a 66% chance that an equal candidate passes on makespan, and 11
-rounds give 81%. At an SD of 0.03, 8 rounds give 99%. A wake or `git status` p95 SD of 0.29 at a margin of 1.5 gives 97%
-at 8 rounds. A candidate must pass four metrics on two workloads, so its chance of passing as a
-whole is lower than any one of these. A fail is evidence against a candidate only when the plan
-showed power for it.
+The A/A runs only the `full` workload. Its SDs stand for `memheavy` too, and the plan says so.
+
+The plan prints each metric's power and the joint power at the rounds it chose. With latency
+SDs of 0.29 on both workloads:
+
+| throughput SD | rounds | throughput margins | joint power |
+|---|---|---|---|
+| 0.03 | 8 | 1.05 | 0.86 |
+| 0.06 | 8 | 1.10 | 0.86 |
+| 0.08 | 10 | 1.10 | 0.84 |
+
+At an SD of 0.06 and a margin of 1.05, each throughput metric has a power of 0.84 at 12
+rounds. Over four metrics and two workloads that leaves a joint power near 0.5, so the margins
+widen. A fail is evidence against a candidate only when the plan showed power for it.
 
 **The blind look.** A confirmatory gate's runs are scheduled for `extend_to` rounds from the
 start (`--rounds 12`) and stop after the rounds the gate needs. After `look_after` rounds,
@@ -533,7 +544,8 @@ The gates so far:
 
 - [`aa.toml`](../bench/gates/aa.toml): fixed weight 4 against itself, 4 rounds, on the `full`
   workload. It passes if the interval of the makespan ratio contains 1 and the paired SD is at
-  most 0.06. Its SDs set the defaults gate's rounds and margins by that gate's `[plan]`.
+  most 0.06. Its SDs set the defaults gate's rounds and margins by that gate's `[plan]`,
+  for both of that gate's workloads.
 - [`pilot.toml`](../bench/gates/pilot.toml): a screen of fixed 4 against `w=3-3,h=1`, `w=2-4`,
   `w=2-3,kept=3` and `w=4-8` over 3 rounds (seeds 101 to 103), on the `full` workload. It drops
   an arm whose wake p99 ratio is above 2.0 or makespan ratio above 1.15, or that breaks a hard
@@ -543,7 +555,7 @@ The gates so far:
   `hold --weight` range together with its pool settings (kept CPUs, headroom). It does not test
   a generated heavy rule: `[commands] heavy_weight` takes one number, not a range. 8 rounds, or
   up to 12 by the plan rule at the blind look after 4. Margins: makespan and job mean 1.05
-  (makespan 1.10 if the plan rule calls for it), wake p99 and `git status` p95 1.5. Its
+  (both 1.10 if the plan rule calls for it), wake p99 and `git status` p95 1.5. Its
   candidates are filled in after the pilot, and `compare` refuses it until they are.
 
 The workloads are pinned in the gate files and `compare` checks them against each run's
@@ -650,4 +662,5 @@ code, workers, cgroup), `samples.csv` (the machine once a second), the probes' r
 conditions, `config.toml` and the daemon's log. `--publish` copies `summary.md` and
 `summary.csv`, and nothing else, to `bench/results/<machine class>/`. The logs and `jobs.csv`
 name runtime and cgroup paths, so they stay in the results directory. `bench/run.py summarize
-DIR` rebuilds a summary from the raw files. The run takes about an hour for K=4 and an hour and a half for K=8 on the machine below.
+DIR` rebuilds a summary from the raw files.
+The run takes about an hour for K=4 and an hour and a half for K=8 on the machine below.

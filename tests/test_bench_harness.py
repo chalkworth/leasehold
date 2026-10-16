@@ -567,7 +567,12 @@ def _gate(kind="confirmatory", candidates=(CAND,), **extra) -> dict:
         },
         "arms": {"control": CONTROL, "candidates": list(candidates)},
         "rounds": {"planned": 8, "look_after": 4, "extend_to": 12, "seed_base": 1000},
-        "plan": {"power": 0.8, "min_rounds": 8, "max_rounds": 12, "widen": {"makespan_s": 1.10}},
+        "plan": {
+            "joint_power": 0.8,
+            "min_rounds": 8,
+            "max_rounds": 12,
+            "widen": {"makespan_s": 1.10, "job_mean_s": 1.10},
+        },
         "test": {"alpha": 0.05},
         "metrics": [
             {"name": "makespan_s", "margin": 1.05},
@@ -724,19 +729,48 @@ def test_power_matches_a_simulation():
     assert gate.pass_power(8, 0.06, 1.05, 0.05) == pytest.approx(0.665, abs=0.005)
 
 
-def test_the_plan_rule_sets_rounds_and_widens_only_makespan():
+def _sds(mk: float, jm: float, lat: float = 0.29) -> dict:
+    return {"makespan_s": mk, "job_mean_s": jm, "wake_same_p99_ms": lat, "git_p95_ms": lat}
+
+
+def test_joint_power_is_the_product_over_metrics_and_workloads():
+    sds = _sds(0.06, 0.04)
+    margins = {"makespan_s": 1.05, "job_mean_s": 1.05, "wake_same_p99_ms": 1.5, "git_p95_ms": 1.5}
+    one = math.prod(gate.pass_power(10, sds[k], margins[k], 0.05) for k in margins)
+    assert gate.joint_power(10, sds, margins, 0.05, 2) == pytest.approx(one**2)
+
+
+def test_the_plan_rule_targets_joint_power_over_both_workloads():
     g = _gate()
-    sds = {"makespan_s": 0.03, "job_mean_s": 0.03, "wake_same_p99_ms": 0.29, "git_p95_ms": 0.29}
-    assert gate.plan(sds, g["metrics"], g["plan"], 0.05)["rounds"] == 8
-    out = gate.plan(sds | {"makespan_s": 0.06}, g["metrics"], g["plan"], 0.05)
-    assert out["rounds"] == 11
-    out = gate.plan(sds | {"makespan_s": 0.08}, g["metrics"], g["plan"], 0.05)
-    mk = out["metrics"][0]
-    assert out["rounds"] == 8 and mk["margin"] == 1.10 and mk["widened"] and mk["enough"]
-    out = gate.plan(sds | {"git_p95_ms": 0.6}, g["metrics"], g["plan"], 0.05)
-    git = out["metrics"][3]
-    assert out["rounds"] == 12 and git["margin"] == 1.5 and not git["enough"]
-    assert "Not enough power at 12 rounds: git_p95_ms" in gate.plan_text(out, "#")
+    out = gate.plan(_sds(0.03, 0.03), g["metrics"], g["plan"], 0.05, 2)
+    assert out["rounds"] == 8 and out["reached"] and out["joint_power"] >= 0.8
+    assert not any(m["widened"] for m in out["metrics"])
+    # At SD 0.06 each throughput metric has about 0.84 power at 12 rounds, so the joint power
+    # over four metrics and two workloads stays near 0.5: the throughput margins widen.
+    out = gate.plan(_sds(0.06, 0.06), g["metrics"], g["plan"], 0.05, 2)
+    assert [m["margin"] for m in out["metrics"]] == [1.10, 1.10, 1.5, 1.5]
+    assert out["rounds"] == 8 and out["reached"]
+    out = gate.plan(_sds(0.08, 0.08), g["metrics"], g["plan"], 0.05, 2)
+    assert out["rounds"] == 10 and out["reached"] and out["joint_power"] >= 0.8
+
+
+def test_widening_job_mean_is_what_reaches_the_target():
+    g = _gate()
+    makespan_only = g["plan"] | {"widen": {"makespan_s": 1.10}}
+    out = gate.plan(_sds(0.02, 0.06), g["metrics"], makespan_only, 0.05, 2)
+    assert not out["reached"] and out["rounds"] == 12 and out["joint_power"] < 0.8
+    out = gate.plan(_sds(0.02, 0.06), g["metrics"], g["plan"], 0.05, 2)
+    assert out["reached"] and out["metrics"][1]["margin"] == 1.10
+    assert out["metrics"][1]["widened"]
+
+
+def test_latency_margins_never_widen_and_a_shortfall_is_stated():
+    g = _gate()
+    out = gate.plan(_sds(0.03, 0.03, lat=0.6), g["metrics"], g["plan"], 0.05, 2)
+    assert out["rounds"] == 12 and not out["reached"] and out["joint_power"] < 0.8
+    assert [m["margin"] for m in out["metrics"]][2:] == [1.5, 1.5]
+    text = gate.plan_text(out, "#")
+    assert "Known limit: even at 12 rounds" in text and f"{out['joint_power']:.2f}" in text
 
 
 def test_the_screen_drops_slow_or_laggy_arms_and_keeps_two_at_most():
@@ -858,7 +892,12 @@ def test_the_gate_files_load_and_pin_their_workloads():
         gate.load_gate(BENCH / "gates" / "defaults.toml")
     raw = tomllib.loads((BENCH / "gates" / "defaults.toml").read_text())
     assert [m["margin"] for m in raw["metrics"]] == [1.05, 1.05, 1.5, 1.5]
-    assert raw["plan"]["widen"] == {"makespan_s": 1.10}
+    assert raw["plan"] == {
+        "joint_power": 0.8,
+        "min_rounds": 8,
+        "max_rounds": 12,
+        "widen": {"makespan_s": 1.10, "job_mean_s": 1.10},
+    }
     loads = {w["name"]: w for w in raw["workloads"]}
     assert "params" not in loads["memheavy"]
     full = bench.workload_args(loads["full"]["args"])
@@ -954,6 +993,7 @@ def test_rounds_run_one_at_a_time_into_one_directory_and_compare(tmp_path):
         "compare", str(out), "--gate", str(gate_file), "--plan", str(BENCH / "gates/defaults.toml")
     ).stdout
     assert "## Plan for `defaults.toml`" in planned and "No SD for: job_mean_s" in planned
+    assert "its SDs stand for every workload of the gate (`full`, `memheavy`)" in planned
     # Results run with other sizes are refused.
     other = gate_file.read_text().replace("--agents 1", "--agents 2")
     gate_file.write_text(other)

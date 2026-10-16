@@ -47,15 +47,18 @@ A gate has one of three kinds:
   of every metric, and passes when the two-sided interval of `aa.metric`'s mean log ratio
   contains 0 (a ratio of 1) and its paired SD is at most `max_paired_sd`.
 
-The plan. Each gate file states its rule in `[plan]`: for each metric, the rounds needed for
-`power` (0.8) to pass when the true ratio is 1, given the paired SD and the metric's margin.
-The gate runs the larger of `min_rounds` and the most any metric needs, at most `max_rounds`.
-A metric in `widen` (makespan) that still lacks power at `max_rounds` takes its wider margin
-instead; any other metric that lacks power is reported as such and keeps its margin. `--plan
-GATE` applies GATE's rule to the SDs of an A/A run. The blind look applies the same rule, with
-no widening, to the pooled SDs of the first `rounds.look_after` rounds, so a gate runs
-`planned` rounds, or more if the look asks for it, up to `extend_to`. Power comes from the
-noncentral t distribution, integrated numerically.
+The plan. Each gate file states its rule in `[plan]`. The joint power at N rounds is the
+chance that a candidate equal to the control passes every metric on every workload, taking the
+metrics and workloads as independent: the product of each metric's power to pass its margin,
+raised to the number of workloads. The gate runs the fewest rounds from `min_rounds` (8) to
+`max_rounds` (12) whose joint power reaches `joint_power` (0.8). If none does, the margins in
+`widen` (makespan and job mean, to 1.10) take their wider values and the search runs again.
+The latency margins never widen. If 12 rounds still fall short, the gate runs 12 and the plan
+states its joint power as a known limit. `--plan GATE` applies GATE's rule to the SDs of an
+A/A run; the A/A runs one workload, and its SDs stand for all of GATE's. The blind look
+applies the same rule, with no widening, to the pooled SDs of the first `rounds.look_after`
+rounds, so a gate runs `planned` rounds, or more if the look asks for it, up to `extend_to`.
+Power comes from the noncentral t distribution, integrated numerically.
 
 `--blind-sd` prints only those pooled SDs and the rounds the rule asks for. It says nothing
 about which arm is ahead. Otherwise the report is printed, and written as markdown and JSON
@@ -254,82 +257,105 @@ def pass_power(n: int, sd: float, margin: float, alpha: float, true_log: float =
     return min(1.0, max(0.0, total * h / 3))
 
 
-def rounds_for(sd: float, margin: float, alpha: float, power: float, most: int = 200) -> int | None:
-    """The fewest rounds (at least 2) whose test passes `margin` with chance `power` when the
-    candidate equals the control; None if even `most` rounds do not."""
-    for n in range(2, most + 1):
-        if pass_power(n, sd, margin, alpha) >= power:
-            return n
-    return None
+def joint_power(n: int, sds: dict, margins: dict, alpha: float, workloads: int) -> float:
+    """The chance an equal candidate passes every metric on every workload in `n` rounds,
+    taking the metrics and the workloads as independent."""
+    each = math.prod(pass_power(n, sds[k], margins[k], alpha) for k in margins)
+    return each**workloads
 
 
-def plan(sds: dict, metrics: list[dict], rule: dict, alpha: float, widen: bool = True) -> dict:
+def plan(
+    sds: dict,
+    metrics: list[dict],
+    rule: dict,
+    alpha: float,
+    workloads: int = 1,
+    widen: bool = True,
+) -> dict:
     """The gate's rounds and margins for the paired SDs `sds` (metric: SD), by `rule` (a gate's
-    `[plan]`): see the module docstring."""
-    power = rule.get("power", 0.8)
+    `[plan]`): the fewest rounds from `min_rounds` to `max_rounds` whose joint power over every
+    metric and all `workloads` reaches `joint_power`. If none does, the margins in `widen`
+    take their wider values and the search runs again. If that falls short too, the plan is
+    `max_rounds` and says the joint power it has. A metric without an SD is left out and
+    named."""
+    target = rule.get("joint_power", 0.8)
     least, most = rule.get("min_rounds", 8), rule.get("max_rounds", 12)
     wider = rule.get("widen", {}) if widen else {}
-    out = []
-    for spec in metrics:
-        name, margin = spec["name"], spec["margin"]
-        sd = sds.get(name)
-        if sd is None:
-            out.append({"metric": name, "margin": margin, "sd": None, "rounds": None})
-            continue
-        need = rounds_for(sd, margin, alpha, power)
-        widened = False
-        if (need is None or need > most) and name in wider:
-            margin, widened = wider[name], True
-            need = rounds_for(sd, margin, alpha, power)
-        out.append({"metric": name, "margin": margin, "widened": widened, "sd": sd, "rounds": need})
-    needs = [
-        m["rounds"] if m["rounds"] is not None else math.inf for m in out if m["sd"] is not None
-    ]
-    rounds = int(min(most, max([least, *needs])))
-    for m in out:
-        if m["sd"] is not None:
-            m["power"] = pass_power(rounds, m["sd"], m["margin"], alpha)
-            m["enough"] = m["rounds"] is not None and m["rounds"] <= rounds
-    joint = math.prod(m["power"] for m in out if m["sd"] is not None)
+    measured = [m for m in metrics if sds.get(m["name"]) is not None]
+    margins = {m["name"]: m["margin"] for m in measured}
+
+    def search(margins: dict) -> int | None:
+        return next(
+            (
+                n
+                for n in range(least, most + 1)
+                if joint_power(n, sds, margins, alpha, workloads) >= target
+            ),
+            None,
+        )
+
+    rounds, widened = search(margins), []
+    if rounds is None and any(k in margins for k in wider):
+        widened = [k for k in margins if k in wider]
+        margins = margins | {k: wider[k] for k in widened}
+        rounds = search(margins)
+    reached = rounds is not None
+    rounds = rounds if reached else most
     return {
         "rounds": rounds,
-        "metrics": out,
-        "power": power,
-        "joint_power": joint,
-        "missing": [m["metric"] for m in out if m["sd"] is None],
+        "target": target,
+        "reached": reached,
+        "joint_power": joint_power(rounds, sds, margins, alpha, workloads) if measured else 0.0,
+        "workloads": workloads,
+        "metrics": [
+            {
+                "metric": m["name"],
+                "sd": sds.get(m["name"]),
+                "margin": margins.get(m["name"], m["margin"]),
+                "widened": m["name"] in widened,
+                "power": (
+                    pass_power(rounds, sds[m["name"]], margins[m["name"]], alpha)
+                    if m["name"] in margins
+                    else None
+                ),
+            }
+            for m in metrics
+        ],
+        "missing": [m["name"] for m in metrics if sds.get(m["name"]) is None],
     }
 
 
-def plan_text(result: dict, heading: str) -> str:
-    lines = [
-        heading,
+def _workloads(n: int) -> str:
+    return "the one workload" if n == 1 else f"all {n} workloads"
+
+
+def plan_text(result: dict, heading: str, note: str = "") -> str:
+    lines = [heading, ""]
+    if note:
+        lines += [note, ""]
+    lines += [
+        f"Rounds: {result['rounds']}. Joint power, the chance an equal candidate passes every "
+        f"metric on {_workloads(result['workloads'])}, taking them as independent: "
+        f"{result['joint_power']:.2f} (target {result['target']:.2f}).",
         "",
-        f"Rounds: {result['rounds']}. Per metric, for {result['power']:.0%} power to pass when "
-        "the candidate equals the control:",
-        "",
-        "| metric | paired SD | margin | rounds needed | power at the planned rounds |",
-        "|---|---|---|---|---|",
+        "| metric | paired SD | margin | power on one workload |",
+        "|---|---|---|---|",
     ]
     for m in result["metrics"]:
         if m["sd"] is None:
-            lines.append(f"| {m['metric']} | not measured | {m['margin']} | | |")
+            lines.append(f"| {m['metric']} | not measured | {m['margin']:.2f} | |")
             continue
-        need = "more than 200" if m["rounds"] is None else str(m["rounds"])
-        margin = f"{m['margin']} (widened)" if m.get("widened") else str(m["margin"])
-        lines.append(f"| {m['metric']} | {m['sd']:.3f} | {margin} | {need} | {m['power']:.2f} |")
+        margin = f"{m['margin']:.2f}" + (" (widened)" if m["widened"] else "")
+        lines.append(f"| {m['metric']} | {m['sd']:.3f} | {margin} | {m['power']:.2f} |")
     lines.append("")
-    short = [m["metric"] for m in result["metrics"] if m["sd"] is not None and not m["enough"]]
-    if short:
+    if not result["reached"]:
         lines.append(
-            f"Not enough power at {result['rounds']} rounds: {', '.join(short)}. Their margins "
-            "stay as written; a fail on them is weak evidence."
+            f"Known limit: even at {result['rounds']} rounds, with the throughput margins "
+            f"widened, the joint power is {result['joint_power']:.2f}, under the target. An "
+            "equal candidate may fail this gate."
         )
     if result["missing"]:
-        lines.append(f"No SD for: {', '.join(result['missing'])}; the plan cannot cover them.")
-    lines.append(
-        f"Chance an equal candidate passes every metric, if the metrics were independent: "
-        f"{result['joint_power']:.2f} per workload."
-    )
+        lines.append(f"No SD for: {', '.join(result['missing'])}; the plan leaves them out.")
     return "\n".join(lines)
 
 
@@ -621,7 +647,9 @@ def blind_sd(gate: dict, records: list[dict]) -> dict:
         "min_rounds": rounds["planned"],
         "max_rounds": rounds.get("extend_to", rounds["planned"]),
     }
-    planned = plan(sds, gate["metrics"], rule, gate["test"]["alpha"], widen=False)
+    planned = plan(
+        sds, gate["metrics"], rule, gate["test"]["alpha"], len(gate["workloads"]), widen=False
+    )
     ready = ready and not planned["missing"]
     return {
         "look_after": look,
@@ -977,8 +1005,16 @@ def main(argv: list[str]) -> int:
         if result["kind"] != "aa":
             parser.error("--plan reads the SDs of an aa gate's results")
         target = load_gate(args.plan) if _has_candidates(args.plan) else _load_plan_only(args.plan)
-        planned = plan(result["sds"], target["metrics"], target["plan"], target["test"]["alpha"])
-        text += "\n" + plan_text(planned, f"## Plan for `{args.plan.name}`")
+        names = [w["name"] for w in target["workloads"]] or ["one workload"]
+        planned = plan(
+            result["sds"], target["metrics"], target["plan"], target["test"]["alpha"], len(names)
+        )
+        measured = ", ".join(f"`{w}`" for w in workloads_of(gate))
+        note = (
+            f"The A/A measured {measured} only; its SDs stand for every workload of the gate "
+            f"({', '.join(f'`{n}`' for n in names)})."
+        )
+        text += "\n" + plan_text(planned, f"## Plan for `{args.plan.name}`", note)
         if result["results"][0]["verdict"] != "pass":
             text += "\n\nThe A/A did not pass; fix the bench before planning on its SDs."
         result["plan"] = planned
@@ -1005,4 +1041,5 @@ def _load_plan_only(path: Path) -> dict:
         "metrics": raw["metrics"],
         "plan": raw.get("plan", {}),
         "test": {"alpha": raw.get("test", {}).get("alpha", 0.05)},
+        "workloads": raw.get("workloads", []),
     }

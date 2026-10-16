@@ -45,16 +45,18 @@ look_after = 4
 extend_to = 12
 seed_base = 1000
 
-# The plan rule, stated before the A/A: for each metric, the rounds for 80% power to pass when
-# the candidate equals the control, at the A/A paired SD and the metric's margin. The gate runs
-# the most any metric needs, at least 8 and at most 12. If makespan lacks power at 12, its
-# margin becomes 1.10; any other metric that lacks power keeps its margin and is reported as
-# underpowered.
+# The plan rule, stated before the A/A. Joint power is the chance a candidate equal to the
+# control passes every metric on both workloads, taking them as independent. The gate runs the
+# fewest rounds from 8 to 12 whose joint power, at the A/A paired SDs, is at least 0.8. If no
+# count up to 12 reaches it, the makespan and job mean margins become 1.10 and the search runs
+# again. The latency margins never widen. If 12 rounds still fall short, the gate runs 12 and
+# the plan states its joint power as a known limit. The A/A runs only `full`; its SDs stand
+# for `memheavy` too.
 [plan]
-power = 0.8
+joint_power = 0.8
 min_rounds = 8
 max_rounds = 12
-widen = { makespan_s = 1.10 }
+widen = { makespan_s = 1.10, job_mean_s = 1.10 }
 
 [test]
 alpha = 0.05         # one-sided, for each metric; a candidate must pass them all
@@ -62,11 +64,11 @@ alpha = 0.05         # one-sided, for each metric; a candidate must pass them al
 # Co-primary metrics: the upper bound of the geometric-mean ratio must be under the margin.
 [[metrics]]
 name = "makespan_s"
-margin = 1.05
+margin = 1.05        # 1.10 if the plan rule widens it
 
 [[metrics]]
 name = "job_mean_s"
-margin = 1.05
+margin = 1.05        # 1.10 if the plan rule widens it
 
 [[metrics]]
 name = "wake_same_p99_ms"

@@ -164,7 +164,9 @@ here.
     the control's), and a sign-permutation check. It refuses results with another seed base,
     other `args`, duplicate rounds, mixed commits, leasehold versions or machine classes, or a
     pair with two seeds. `--blind-sd` gives each metric's pooled SD for the blind look, and
-    `--plan GATE` applies a gate's `[plan]` rule (rounds for 80% power, from an A/A run's SDs).
+    `--plan GATE` applies a gate's `[plan]` rule: from an A/A run's SDs, the fewest rounds
+    from 8 to 12 whose joint power over every metric and workload is 0.8, with the
+    throughput margins widened to 1.10 if needed.
 
 ### Changed
 
