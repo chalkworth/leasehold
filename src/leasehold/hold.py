@@ -290,7 +290,6 @@ def hold(
     memory: str | None = None,
     threads: jobs.Threads | None = None,
     if_unavailable: str = "run",
-    socket: str | None = None,
 ) -> int:
     """Run `argv` under a lease, sized to it (`leasehold.jobs`): the job-count and thread-count
     variables unless `job_env` is false, a make jobserver when `jobserver` is true, and when
@@ -300,7 +299,9 @@ def hold(
     (`auto_size`); with no `threads`, its thread count is the matching rule's `threads`, and
     "jobs" when no rule matches.
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
-    a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`."""
+    a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`. A leased command gets the
+    client's socket as `LEASEHOLD_SOCKET`, so a `hold` or shim inside it reaches the same
+    daemon."""
     if not argv:
         _say("no command given (leasehold hold [options] -- cmd ...)")
         return 2
@@ -352,7 +353,7 @@ def hold(
                 jobserver=jobserver,
                 memory=memory,
                 threads=threads,
-                socket=socket,
+                socket=getattr(client, "path", None),
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -621,8 +622,8 @@ def child_env(
     variables, and with `job_env` the job-count and thread-count variables for this lease
     (`jobs.sized_env`). Without `job_env`, the enclosing lease's sizing is removed
     (`jobs.unsized_env`). Which variables an enclosing lease set is read from `env` before this
-    lease's id is added, so it counts only when `env` holds a `LEASEHOLD_LEASE_ID`. A `socket`
-    given to `hold` (`--socket`) is passed on as `LEASEHOLD_SOCKET`, made absolute."""
+    lease's id is added, so it counts only when `env` holds a `LEASEHOLD_LEASE_ID`. `socket`,
+    the daemon's, is passed on as `LEASEHOLD_SOCKET`, made absolute."""
     outer = dict(os.environ if env is None else env)
     lease = {
         "LEASEHOLD_LEASE_ID": lease_id,

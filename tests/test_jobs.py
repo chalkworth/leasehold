@@ -315,18 +315,17 @@ def test_makeflags_keeps_assignments_and_escaped_spaces(tmp_path):
     )
 
 
-def test_resizing_never_copies_the_users_omp_above_what_the_lease_recorded():
+def test_resizing_leaves_the_users_omp_and_its_copies_alone():
+    """The user's `OMP_NUM_THREADS` wins in a shim as in a nested `hold`."""
     outer = jobs.sized_env(LEASED, 4, threads=2)
     inside = jobs.resized(outer | {"OMP_NUM_THREADS": "8"}, 1)
-    assert inside["OPENBLAS_NUM_THREADS"] == inside["MKL_NUM_THREADS"] == "1"
-    assert inside["OMP_NUM_THREADS"] == "8"  # the user's own
+    assert inside["OMP_NUM_THREADS"] == inside["OPENBLAS_NUM_THREADS"] == "8"
+    assert inside["MKL_NUM_THREADS"] == "8" and inside["RAYON_NUM_THREADS"] == "1"
     unset = {k: v for k, v in outer.items() if k != "MKL_NUM_THREADS"}
-    filled = jobs.resized(unset | {"OMP_NUM_THREADS": "8"}, 1)
-    assert filled["MKL_NUM_THREADS"] == "1"  # unset, but recorded at 2: at most the new count
-    roomy = jobs.resized(unset | {"OMP_NUM_THREADS": "8"}, 4)
-    assert roomy["MKL_NUM_THREADS"] == "2"  # at most what the lease recorded
-    low = jobs.resized(unset | {"OMP_NUM_THREADS": "1"}, 4)
-    assert low["MKL_NUM_THREADS"] == "1"  # at most the user's own
+    filled = jobs.resized(unset | {"OMP_NUM_THREADS": "3"}, 1)
+    assert filled["MKL_NUM_THREADS"] == "3"
+    nested = jobs.sized_env(outer | {"OMP_NUM_THREADS": "8"}, 4, 1)
+    assert nested["OPENBLAS_NUM_THREADS"] == nested["MKL_NUM_THREADS"] == "8"
 
 
 def test_a_record_of_names_that_are_not_job_variables_is_not_believed():

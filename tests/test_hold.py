@@ -752,6 +752,18 @@ def test_the_socket_hold_was_given_is_the_one_a_nested_client_finds(daemon, tmp_
     assert proc.returncode == 0, proc.stderr.read()
 
 
+def test_the_socket_a_config_named_is_the_one_a_nested_client_finds(daemon, tmp_path):
+    """`hold --config` finds the daemon through the config; the command gets that socket."""
+    config = tmp_path / "named.toml"
+    config.write_text(f'mode = "user"\nsocket = "{daemon.path}"\n')
+    script = f"import os\nassert os.environ.get('LEASEHOLD_SOCKET') == {str(daemon.path)!r}\n"
+    env = {k: v for k, v in CHILD_ENV.items() if k != "LEASEHOLD_SOCKET"}
+    argv = [sys.executable, "-m", "leasehold", "--config", str(config), "hold", "--",
+            sys.executable, "-c", script]  # fmt: skip
+    done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30, check=False)
+    assert done.returncode == 0, done.stderr
+
+
 def test_a_relative_socket_is_passed_on_made_absolute(tmp_path):
     env = hold_module.child_env("id", _granted(), 2, job_env=False, env={}, socket="run/s.sock")
     assert env["LEASEHOLD_SOCKET"] == str(Path.cwd() / "run/s.sock")

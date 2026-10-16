@@ -392,12 +392,40 @@ def test_an_args_file_that_names_itself_starts_nothing_and_stops(tmp_path):
     assert time.monotonic() - started < 2
 
 
-def test_args_files_expand_to_at_most_max_words(tmp_path):
+def test_args_files_expand_to_at_most_max_words_and_the_rest_counts_as_auto(tmp_path):
     (tmp_path / "wide.txt").write_text("-v\n" * 2_000)
     (tmp_path / "fan.txt").write_text("@wide.txt\n" * 50)
     started = time.monotonic()
-    assert len(xdist._expand(["@fan.txt", "-n", "4"], tmp_path)) == xdist.MAX_WORDS
+    words, unknown = xdist._expand(["@fan.txt", "-n", "4"], tmp_path)
+    assert unknown and words[-2:] == ["-n", "4"] and len(words) <= xdist.MAX_WORDS + 3
+    assert xdist.workers(["@fan.txt", "-n", "4"], {}, tmp_path) == "auto"
     assert time.monotonic() - started < 2
+
+
+def test_an_args_file_at_the_word_limit_still_lets_the_arguments_after_it_count(tmp_path):
+    (tmp_path / "nodes.txt").write_text("".join(f"t.py::t{i}\n" for i in range(10_000)))
+    assert xdist.workers(["@nodes.txt", "-n", "2"], {}, tmp_path) == 2
+    rules = CommandSettings().shell_rules()
+    found = list(shell.programs("pytest @nodes.txt -n 2"))
+    assert shell.threads(rules, found, env={}, cwd=tmp_path) == "jobs/2"
+
+
+def test_an_args_file_cut_at_the_limit_never_leaves_an_option_without_its_value(tmp_path):
+    (tmp_path / "nodes.txt").write_text("".join(f"t{i}\n" for i in range(9_999)) + "-k\nx\n")
+    assert xdist.workers(["@nodes.txt", "-n", "2"], {}, tmp_path) == "auto"
+    (tmp_path / "fewer.txt").write_text("".join(f"t{i}\n" for i in range(9_999)))
+    assert xdist.workers(["@fewer.txt", "-n", "auto"], {}, tmp_path) == "auto"
+    assert xdist.workers(["@fewer.txt", "-n", "3"], {}, tmp_path) == 3
+
+
+def test_args_files_nested_past_the_depth_limit_count_as_auto(tmp_path):
+    for depth in range(9):
+        (tmp_path / f"f{depth}.txt").write_text(f"@f{depth + 1}.txt\n")
+    (tmp_path / "f9.txt").write_text("-n\n2\n")
+    assert xdist.workers(["@f0.txt"], {}, tmp_path) == "auto"
+    assert xdist.workers(["@f2.txt"], {}, tmp_path) == 2
+    rules = CommandSettings().shell_rules()
+    assert shell.threads(rules, list(shell.programs("pytest @f0.txt")), env={}, cwd=tmp_path) == 1
 
 
 @pytest.mark.parametrize(

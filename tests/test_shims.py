@@ -428,3 +428,36 @@ def test_a_refused_run_exits_77_without_running_the_program(tmp_path, sock_dir):
         assert "per-user limit" in done.stderr
     finally:
         daemon.stop()
+
+
+def test_the_users_omp_wins_in_a_shim_as_in_hold(tmp_path, sock_dir):
+    """`OMP_NUM_THREADS=8 hold -- pytest -n 4` through the pytest shim: the user's 8 stays in
+    OMP_NUM_THREADS and the two BLAS variables copied from it, and the rest is shared."""
+    config = machine_config(tmp_path, socket=str(sock_dir / "o.sock"), jobs={"per_slot": 4})
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    real, shim_dir = tmp_path / "bin", tmp_path / "shims"
+    real.mkdir()
+    (real / "pytest").write_text(
+        '#!/bin/sh\necho "$OMP_NUM_THREADS $OPENBLAS_NUM_THREADS $MKL_NUM_THREADS '
+        '$RAYON_NUM_THREADS"\n'
+    )
+    (real / "pytest").chmod(0o755)
+    shims.install(shim_dir, ["pytest"], python=sys.executable)
+    env = {
+        "PATH": f"{shim_dir}:{real}:/usr/bin:/bin",
+        "PYTHONPATH": str(ROOT / "src"),
+        "HOME": str(tmp_path),
+        "LEASEHOLD_SOCKET": str(daemon.path),
+        "OMP_NUM_THREADS": "8",
+    }
+    argv = [sys.executable, "-m", "leasehold", "--socket", str(daemon.path), "hold",
+            "--weight", "2", "--", "pytest", "-n", "4"]  # fmt: skip
+    try:
+        done = subprocess.run(
+            argv, env=env, capture_output=True, text=True, timeout=30, check=False, cwd=tmp_path
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.split() == ["8", "8", "8", "2"]
+    finally:
+        daemon.stop()

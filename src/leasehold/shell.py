@@ -111,7 +111,7 @@ class Rule:
     @classmethod
     def of(cls, row: Mapping) -> Rule:
         """The rule a served row describes. A row without `threads` (a daemon older than the
-        setting), or with one that is not a count of at least 1, has `threads` "jobs"."""
+        setting) has `threads` "jobs", and one with a `threads` it does not know has 1."""
         return cls(
             programs=frozenset(row["programs"]), weight=int(row["weight"]), pool=row.get("pool"),
             args=row.get("args"), source=row.get("source", "config"), memory=row.get("memory"),
@@ -463,48 +463,58 @@ def threads(
     cwd: Path | Callable[[], Path] | None = None,
 ) -> int | str | None:
     """The thread count for a command line running the programs `found`, as a `threads`
-    setting (`jobs.thread_count`): the smallest any of their own rules gives, so no program on
-    the line runs more threads per process than its rule allows; None when no rule matches.
+    setting (`jobs.thread_count`): the smallest any of its programs allows, so none runs more
+    threads per process than its rule gives; None when no rule matches any of them.
     "jobs/W:K" is the job count divided among W workers, and at most K.
 
-    A pytest run under a built-in rule that starts xdist workers takes the built-in xdist
-    rule's `threads` for `-n auto` or `logical`, and "jobs/N", the job count divided among
-    its workers, for N workers. Its arguments say whether it does (`xdist.in_args`); with
-    `env` and `cwd`, so do `PYTEST_ADDOPTS` and its config's `addopts` (`xdist.workers`).
-    `cwd` is a directory, or a function giving it, called only for pytest."""
+    A pytest run that starts xdist workers, whatever rule it matched or none, allows "jobs/W"
+    for W workers and 1 for `-n auto` or `logical`; its rule's own `threads` can only lower
+    that. Its arguments say how many it starts (`xdist.workers_in_args`); with `env` and `cwd`,
+    so do `PYTEST_ADDOPTS` and its config's `addopts` (`xdist.workers`). `cwd` is a directory,
+    or a function giving it, called only for pytest."""
     rules = list(rules)
     chosen: list[int | str] = []
+    matched = False
     for item in found:
         program, args = item
         own = match_programs(rules, [(program, args)])
-        if own is None:
+        if own is not None:
+            matched = True
+            if not (own.rule.source == "default" and own.rule.args == xdist.XDIST_ARGS):
+                chosen.append(own.rule.threads)  # the built-in xdist rule's is "auto"'s
+        if program.rsplit("/", 1)[-1] not in _PYTEST:
             continue
-        count = own.rule.threads
-        name = program.rsplit("/", 1)[-1]
-        builtin = next(
-            (r for r in rules if r.source == "default" and r.args == xdist.XDIST_ARGS
-             and name in r.programs),
-            None,
-        )  # fmt: skip
-        if builtin is not None and own.rule.source == "default" and name in _PYTEST:
-            if env is not None and cwd is not None:
-                here = _directory(cwd, getattr(item, "directory", None))
-                workers = xdist.workers(args, env, here)
-            else:
-                workers = xdist.workers_in_args(args)
-            if workers == "auto":
-                count = builtin.threads
-            elif workers is not None:
-                count = f"jobs/{workers}"
-        chosen.append(count)
-    if not chosen:
+        if env is not None and cwd is not None:
+            here = _directory(cwd, getattr(item, "directory", None))
+            workers = xdist.workers(args, env, here)
+        else:
+            workers = xdist.workers_in_args(args)
+        if workers == "auto":
+            chosen.append(1)
+        elif workers is not None:
+            chosen.append(f"jobs/{workers}")
+    if not matched:
         return None
-    shares = [int(str(c)[5:]) for c in chosen if str(c).startswith("jobs/")]
-    counts = [int(c) for c in chosen if c != "jobs" and not str(c).startswith("jobs/")]
-    if not shares:
-        return min(counts) if counts else "jobs"
+    return _fewest(chosen)
+
+
+def _fewest(chosen: Sequence[int | str]) -> int | str:
+    """The `threads` setting no larger than any of `chosen`: the most workers any shares the
+    job count among, and the smallest count any gives."""
+    shares: list[int] = []
+    counts: list[int] = []
+    for value in chosen:
+        if isinstance(value, int):
+            counts.append(value)
+        elif value.startswith("jobs/"):
+            share, _, most = value[5:].partition(":")
+            shares.append(int(share))
+            if most:
+                counts.append(int(most))
     if counts and min(counts) == 1:
         return 1
+    if not shares:
+        return min(counts) if counts else "jobs"
     return f"jobs/{max(shares)}" + (f":{min(counts)}" if counts else "")
 
 

@@ -303,8 +303,9 @@ The service makes `/run/leasehold` (0750, the socket inside 0660) and `/var/lib/
 Clients find a daemon from `--socket`, then `LEASEHOLD_SOCKET`, then the config file's `socket`;
 told none, they try the system socket, then their own, and use the first that answers.
 `leasehold doctor` lists each candidate and why it was taken or passed over.
-`hold --socket PATH` sets `LEASEHOLD_SOCKET` to that path, made absolute, for the command it
-runs, so a nested `hold` and the PATH shims find the same daemon.
+`hold` sets `LEASEHOLD_SOCKET` for the command it runs to the socket it found this way,
+made absolute, so a nested `hold` and the PATH shims reach the same daemon, even when `hold`
+found it through `--config` or the search.
 `serve` listens on `--socket`, then `LEASEHOLD_SOCKET`, then the config's `socket`, then its
 mode's own.
 
@@ -369,10 +370,13 @@ leasehold hold -- cargo test --workspace
 
 Without `--weight`, `hold` weighs the command as the [`[commands]` rules](#which-commands-take-a-lease-commands)
 weigh it (cargo test: `heavy_weight` slots, cut to what its pool may hold), and anything they
-do not name as 1 slot. `--memory 6g` declares the memory it will use (default: its rule's
+do not name as 1 slot. A training script or other single process that runs many threads
+weighs 1 slot unless a rule names it, so give it `--weight N` for the N slots it uses.
+`--memory 6g` declares the memory it will use (default: its rule's
 `memory`), counted against the [memory budget](#memory) and held to when contained.
 `--threads N` sets the parallelism inside each of its processes (default: its rule's
-`threads`, else the job count; see [sizing](#sizing-the-command-to-its-lease)). `hold` reads
+`threads`, else the job count; see [sizing](#sizing-the-command-to-its-lease)). A PATH shim
+inside the command may still lower it. `hold` reads
 the rules when no `--weight` is given, or for the threads when the job variables are on; with
 `--weight` and `--no-job-env` it does not ask the daemon for them.
 
@@ -467,13 +471,14 @@ The thread count is the job count unless the command's `threads` says otherwise:
 --threads N` or `--threads jobs`, else what the [`[commands]` rules](#which-commands-take-a-lease-commands)
 give the command line. Each program on the line takes its own rule's `threads`, and the line
 gets the smallest of them, so no program on it runs more threads per process than its rule
-allows. A pytest run with 4 workers gives the line a quarter of the job count whatever else
-runs on it: `hold -- sh -c "cargo test && pytest -n 4"` and `pytest -n 4; pytest -n 2` both
-get the job count divided by 4, and `cargo test && pytest -n auto` gets 1. A rule's count
-lowers a share too: a program whose rule gives 3 beside `pytest -n 2` makes the line's count
-the smaller of 3 and half the job count. A count above the job count is cut to it. With the
-default every variable gets the job count, as in 0.3.0. `leasehold commands --test LINE` shows
-the count a line gets.
+allows. Programs on the line that no rule names get the line's count too. A pytest run with 4
+workers gives the line a quarter of the job count whatever else runs on it:
+`hold -- sh -c "cargo test && pytest -n 4"` and `pytest -n 4; pytest -n 2` both get the job
+count divided by 4, and `cargo test && pytest -n auto` gets 1. A rule's count lowers a share
+too: a program whose rule gives 3 beside `pytest -n 2` makes the line's count the smaller of 3
+and half the job count. A count above the job count is cut to it. When every rule on the line
+has `threads = "jobs"` and no pytest run on it starts workers, every variable gets the job
+count, as in 0.3.0. `leasehold commands --test LINE` shows the count a line gets.
 
 A variable already set when `hold` starts is yours, and `hold` leaves it alone unless the
 lease the command runs in set it to the value it still has. `hold` records each name it set,
@@ -489,26 +494,25 @@ A `hold` inside a lease takes a lease of its own, and sets the recorded names to
 counts, larger or smaller than the enclosing lease's. A PATH shim inside a lease takes no lease
 of its own. It only lowers the lease's thread variables, each to the smaller of its current
 value and the count the shim's rule gives, so a program run through a shim never gets more
-threads than the lease around it.
+threads than the lease around it. That holds for a count given with `hold --threads N` too.
 
 When you set `OMP_NUM_THREADS` to a plain count, `hold` gives `OPENBLAS_NUM_THREADS` and
 `MKL_NUM_THREADS` the same value unless you set them too. OpenBLAS reads its own variable
 before `OMP_NUM_THREADS`, and PyTorch lets `MKL_NUM_THREADS` override it, so a different value
-there would undo yours. A shim lowering a lease's count never raises those two above what the
-lease recorded for them, even when one is unset: each gets the smallest of your
-`OMP_NUM_THREADS`, the lease's recorded value and the shim's count. Your own `OPENBLAS_NUM_THREADS` or `MKL_NUM_THREADS` is left alone and copied
-nowhere. When your `OMP_NUM_THREADS` is not a plain count (`4,2`), it is not copied, and an
-enclosing lease's count in the other two stays. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are
-always the counts leasehold chose for this lease. A count of more than 6 digits is never read
-as a count.
+there would undo yours. Your `OMP_NUM_THREADS` wins everywhere: a nested `hold` and a shim
+lowering the lease's count leave it, and the two copied from it, at your value. Your own
+`OPENBLAS_NUM_THREADS` or `MKL_NUM_THREADS` is left alone and copied nowhere. When your
+`OMP_NUM_THREADS` is not a plain count (`4,2`), it is not copied, and an enclosing lease's count
+in the other two stays. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are always the counts leasehold
+chose for this lease. A count of more than 6 digits is never read as a count.
 
 A command whose jobs are worker processes would, with the job count in both groups, let each
 of N workers start an N-thread BLAS or OpenMP pool: N × N threads on N jobs' worth of CPU. A
-pytest run that starts xdist workers shares the job count among them instead. With `-n N`, each
-worker gets the job count divided by N, and at least 1, so `-n 1` on 8 jobs gets 8 threads and
-`-n 4` gets 2. With `-n auto` or `-n logical`, xdist starts as many workers as
-`PYTEST_XDIST_AUTO_NUM_WORKERS`, the job count, so each gets the built-in xdist rule's
-`threads = 1`.
+pytest run that starts xdist workers shares the job count among them instead, whichever
+rule it matched. With `-n N`, each worker gets the job count divided by N, and at least 1, so
+`-n 1` on 8 jobs gets 8 threads and `-n 4` gets 2. With `-n auto` or `-n logical`, xdist starts
+as many workers as `PYTEST_XDIST_AUTO_NUM_WORKERS`, the job count, so each gets 1. A rule's
+own `threads` can only lower that share.
 
 leasehold reads the config file's `addopts`, then `PYTEST_ADDOPTS`, then the command line, as
 pytest does, and decides as pytest-xdist 3 does:
@@ -531,9 +535,11 @@ that takes a value takes the next word unless that word looks like an option, an
 takes it only then, so `--cov -n 4` starts workers. An option that needs a value and gets
 none is an error pytest stops on, so `-k '-n 4' -n 2` and `--maxfail -n 2` start none. Nothing
 after `--` counts. A word `@FILE` stands for the lines of FILE, one argument each, when FILE is
-a regular file of at most 1 MiB. Files may name further files, up to 10,000 words in all; a
-file that names itself, directly or through another, is an error pytest stops on, so it starts
-none. A count of more than 6 digits is not read.
+a regular file of at most 1 MiB. Files may name further files. leasehold reads them up to
+10,000 words in all and 8 files deep, and the arguments after them always; when a limit leaves
+some unread, the run counts as `-n auto`. A file that names itself, directly or through
+another, is an error pytest stops on, so it starts none. A count of more than 6 digits is not
+read.
 
 The config file is located the way pytest 9 does it. The last `-c` or `--config-file`, from
 `PYTEST_ADDOPTS` or the command line, names it. Otherwise the search starts at the common
@@ -576,9 +582,6 @@ was. Some runs are not covered:
   `pass_env` (`pass_env = OMP_NUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS,
   PYTEST_XDIST_AUTO_NUM_WORKERS`), or set them in one that runs `pytest -n` with `set_env =
   OMP_NUM_THREADS=1`.
-- A `[[commands.rule]]` of your own for pytest is tried before the built-in rules, so it is
-  chosen over the xdist rule. Give it `threads = 1` if its runs use xdist, or add a second
-  rule for them with `args` and `threads = 1` beside it.
 
 `hold --jobserver` also hands the command a GNU make jobserver: a named pipe holding one token
 fewer than the job count, announced in `MAKEFLAGS` as `--jobserver-auth=fifo:PATH` (the protocol
@@ -729,11 +732,12 @@ them to run more at once ([two at once](#your-own-daemon), opt-in).
 A weight is both what a command costs in slots and the job count it is given. A rule's
 `threads` sets the parallelism inside each process ([sizing](#sizing-the-command-to-its-lease)):
 `"jobs"`, the job count (the default), or a count of at least 1. The built-in xdist rule has
-1, and a run with `-n N` shares the job count among its N workers. A config rule for pytest without `args` is tried before it, so give such a rule
-`threads = 1` if its runs use xdist ([sizing](#sizing-the-command-to-its-lease)). Among
-one source's rules the heaviest match wins. The daemon clamps each weight to the most its pool
-could ever grant one lease, beside the other pools' reservations and standing work. `leasehold commands` lists the rules; `leasehold commands --test "CMD"` says which
-one a command matches.
+1, and a pytest run that starts xdist workers, under any rule, shares the job count among
+them; a rule's own `threads` can only lower that
+([sizing](#sizing-the-command-to-its-lease)). Among one source's rules the heaviest match
+wins. The daemon clamps each weight to the most its pool could ever grant one lease, beside
+the other pools' reservations and standing work. `leasehold commands` lists the rules;
+`leasehold commands --test "CMD"` says which one a command matches and the threads it gets.
 
 A command line is read as the shell would split it, without running anything: `&&`, `||`,
 `;`, pipes, groups, redirections, `VAR=1` assignments, wrappers (`env`, `time`, `nice`,

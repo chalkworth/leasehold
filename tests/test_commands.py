@@ -220,6 +220,43 @@ def test_a_rule_with_a_count_lowers_a_share_of_the_jobs():
     assert jobs.thread_count(found, 16) == 3 and jobs.thread_count(found, 4) == 2
 
 
+_OWN_PYTEST = shell.Rule.of({"programs": ["pytest"], "weight": 2, "source": "config"})
+
+
+@pytest.mark.parametrize(
+    ("own", "line", "threads"),
+    [
+        (_OWN_PYTEST, "pytest -n auto", 1),
+        (_OWN_PYTEST, "pytest -n 4", "jobs/4"),
+        (_OWN_PYTEST, "pytest -n auto --maxprocesses 3", "jobs/3"),
+        (_OWN_PYTEST, "pytest", "jobs"),
+        (_OWN_PYTEST, "cargo test && pytest -n 4", "jobs/4"),
+        (_OWN_PYTEST, "cargo test && pytest -n auto", 1),
+        (shell.Rule.of({"programs": ["pytest"], "weight": 2, "threads": 3}), "pytest -n 2",
+         "jobs/2:3"),
+        (shell.Rule.of({"programs": ["pytest"], "weight": 2, "threads": 8}), "pytest -n auto", 1),
+    ],
+)  # fmt: skip
+def test_a_config_rule_for_pytest_still_shares_the_jobs_among_its_workers(own, line, threads):
+    """Whatever rule a pytest run matches, its workers share the job count; the rule's own
+    `threads` can only lower that."""
+    rules = [own, *DEFAULTS.shell_rules()]
+    assert shell.match_programs(rules, list(shell.programs(line))).rule.source == "config"
+    assert shell.threads(rules, list(shell.programs(line))) == threads
+
+
+@pytest.mark.parametrize(
+    ("line", "threads"),
+    [("tool", "jobs/4:2"), ("tool; pytest -n 8", "jobs/8:2"), ("tool; other", 1),
+     ("tool; cargo test", "jobs/4:2")],
+)  # fmt: skip
+def test_a_served_share_with_a_limit_is_read_whole(line, threads):
+    rules = [shell.Rule.of({"programs": ["tool"], "weight": 1, "threads": "jobs/4:2"}),
+             shell.Rule.of({"programs": ["other"], "weight": 1, "threads": 1}),
+             *DEFAULTS.shell_rules()]  # fmt: skip
+    assert shell.threads(rules, list(shell.programs(line))) == threads
+
+
 def test_builds_get_the_job_count():
     rules = [r for _src, r in CommandSettings().rules()]
     assert all(r.threads == "jobs" for r in rules if r.programs[0] != "pytest" or not r.args)

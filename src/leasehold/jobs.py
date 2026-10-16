@@ -157,9 +157,9 @@ def job_env(
     """The variables a lease of `jobs` jobs sets in `env`: each of `WORKER_VARIABLES` to `jobs`
     and each of `THREAD_VARIABLES` to `thread_count(threads, jobs)`, but not one the user set
     (present, and not at the value its lease recorded). The user's `OMP_NUM_THREADS`, when it
-    is a plain count, goes to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` instead. With `cap`,
-    each thread variable the enclosing lease set gets the lowest of its value, the new count
-    and, for those two, the user's `OMP_NUM_THREADS`.
+    is a plain count, goes to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` instead, with or
+    without `cap`. With `cap`, each other thread variable the enclosing lease set gets the
+    lower of its value and the new count.
     `LEASEHOLD_JOBS`, `LEASEHOLD_THREADS` and `LEASEHOLD_SET` are always set."""
     count = thread_count(threads, jobs)
     ours = leasehold_set(env)
@@ -180,11 +180,8 @@ def job_env(
             out[name] = str(jobs)
         elif omp is not None and name in BLAS_FAMILY:
             copied = count_of(omp)
-            lease_set = recorded(env).get(name) if cap else None
-            if copied is not None and lease_set is not None:
-                out[name] = str(min(copied, capped(lease_set)))
-            elif copied is not None:
-                out[name] = str(copied)
+            if copied is not None:
+                out[name] = str(copied)  # the user's count wins, as for OMP_NUM_THREADS itself
             elif name in ours:
                 out[name] = env[name]  # still the lease's: kept, and still recorded
         else:

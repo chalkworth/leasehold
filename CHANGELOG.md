@@ -19,11 +19,13 @@ here.
 - The thread count is the job count unless the new `threads` key of a `[[commands.rule]]`, or
   `hold --threads N|jobs`, gives fewer. `threads` is `"jobs"`, the default, or a count of at
   least 1, and a count above the job count is cut to it.
-- A built-in rule for pytest runs that start xdist workers. A run with `-n N` shares the job
-  count among its N workers, and one with `-n auto` or `logical` gives each worker one thread,
-  or the job count divided by M with `--maxprocesses M`.
-  Whether a run starts workers is read from its arguments, `PYTEST_ADDOPTS` and its config
-  file's `addopts`, as pytest and pytest-xdist 3 read them (`leasehold.xdist`).
+- A pytest run that starts xdist workers shares the job count among them, whichever rule it
+  matched. A run with `-n N` gives each worker the job count divided by N, and one with
+  `-n auto` or `logical` gives each one thread, or the job count divided by M with
+  `--maxprocesses M`. The rule's own `threads` can only lower that. A built-in rule matches
+  these runs. Whether a run starts workers is read from its arguments, `PYTEST_ADDOPTS` and
+  its config file's `addopts`, as pytest and pytest-xdist 3 read them (`leasehold.xdist`).
+  `@FILE` arguments past 10,000 words or 8 files deep count as `-n auto`.
 - `LEASEHOLD_SET` lists each variable `hold` set, with its value. A `hold` inside a lease sets
   the variables that still have their recorded values to its own lease's counts.
 - A PATH shim run inside a lease takes no second lease. When its own rule gives fewer threads,
@@ -38,9 +40,9 @@ here.
   return them, and a client reads one in a served rule. The config's `threads` and
   `hold --threads` still take only `"jobs"` or a count. A client reads a served `threads`
   it does not know as 1.
-- `hold --socket PATH` sets `LEASEHOLD_SOCKET` to that path, made absolute, for its command,
-  so a nested `hold` or a PATH shim finds the same daemon. `leasehold.hold.hold`, `run_leased`
-  and `child_env` take `socket`.
+- `hold` sets `LEASEHOLD_SOCKET` for its command to the socket of the daemon it found, made
+  absolute, so a nested `hold` or a PATH shim reaches the same daemon.
+  `leasehold.hold.run_leased` and `child_env` take `socket`.
 - Library: `leasehold.jobs.WORKER_VARIABLES`, `THREAD_VARIABLES`, `BLAS_FAMILY`,
   `LEASEHOLD_SET`, `MAX_DIGITS`, `Threads`, `thread_count`, `count_of`, `recorded`,
   `leasehold_set`, `sized_env`, `unsized_env` and `resized`. The module `leasehold.xdist`.
@@ -53,9 +55,10 @@ here.
 - A variable already set is the user's, and `hold` leaves it alone unless the lease the
   command runs in set it to the value it still has.
 - A user's `OMP_NUM_THREADS` is copied to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` where
-  the user left them unset.
-- A command line that runs several programs takes the fewest threads any of their rules
-  gives, so `cargo test && pytest -n 4` gets the job count divided by 4.
+  the user left them unset, and neither a nested `hold` nor a PATH shim lowers it or them.
+- A command line that runs several programs takes the fewest threads any of them allows,
+  so `cargo test && pytest -n 4` gets the job count divided by 4. Programs on it that no rule
+  names get that count too.
 - `hold` without `--weight` reads its command as the agent hooks do, so `hold -- uv run pytest`,
   `hold -- uvx pytest` and `hold -- python -m pytest` match the pytest rules. It used to match
   on the first word only. Finding the program skips the options of `uv` (before and after
@@ -73,11 +76,13 @@ here.
 ### Compatibility
 
 - A daemon that does not serve `threads` gives every rule `"jobs"`, the thread count of 0.3.0,
-  and serves no xdist rule. A client older than this one matches the xdist rule's `args` as a
+  and serves no xdist rule; a pytest run with xdist workers still shares the job count among
+  them. A client older than this one matches the xdist rule's `args` as a
   regular expression over the joined arguments.
 - A lease started by leasehold 0.3.0 records no `LEASEHOLD_SET`, so a newer `hold` inside it
   takes its values for the user's.
-- A `[[commands.rule]]` for pytest without `args` is tried before the built-in xdist rule.
+- A `[[commands.rule]]` for pytest without `args` is tried before the built-in xdist rule. It
+  sets the weight; its `threads` can only lower the workers' share.
 - The xdist rule does not reach `python -m pytest` or a virtualenv's `pytest` that a script
   runs inside a lease, commands leased by the Claude Code plugin, or tox and nox environments,
   which do not pass these variables in by default.

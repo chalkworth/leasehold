@@ -131,7 +131,8 @@ class _Read:
     last config file and `--rootdir` named, the `-o` overrides, and the free arguments.
     `plugin` is the last `-p` that loads or blocks xdist; `seen` whether any xdist option or
     such a `-p` was given; `missing` whether pytest refuses the words: an option that needs a
-    value had none, or an `@file` names itself."""
+    value had none, or an `@file` names itself; `unknown` whether some words, in `@file`s
+    past the limits, were not read."""
 
     numprocesses: int | str | None = None
     maxprocesses: int | None = None
@@ -141,6 +142,7 @@ class _Read:
     usepdb: bool = False
     collectonly: bool = False
     missing: bool = False
+    unknown: bool = False
     plugin: bool | None = None
     seen: bool = False
     config: str | None = None
@@ -149,20 +151,35 @@ class _Read:
     free: list[str] = field(default_factory=list)
 
 
-def _expand(words: Sequence[str], cwd: Path | Callable[[], Path] | None) -> list[str] | None:
+def _expand(
+    words: Sequence[str], cwd: Path | Callable[[], Path] | None
+) -> tuple[list[str], bool] | None:
     """`words` with each `@file` replaced by the file's lines, one word each, as argparse does
-    for pytest (`fromfile_prefix_chars="@"`). A file that is not a regular file of at most
-    `MAX_CONFIG_BYTES`, or cannot be read, leaves its word as it is. None when a file names
-    itself, directly or through others: pytest fails on that. At most `MAX_WORDS` words come
-    out."""
+    for pytest (`fromfile_prefix_chars="@"`), and whether some of them are unknown. A file
+    that is not a regular file of at most `MAX_CONFIG_BYTES`, or cannot be read, leaves its
+    word as it is. None when a file names itself, directly or through others: pytest fails on
+    that.
+
+    Files give at most `MAX_WORDS` words in all, and are opened at most `_MAX_FILE_DEPTH`
+    deep. Past either limit a file is left unread, or read only in part, and the words are
+    unknown; the words of `words` itself are all kept."""
     out: list[str] = []
     base: list[Path] = []
+    unknown = False
 
     def expand(items: Sequence[str], open_files: frozenset[str]) -> None:
+        nonlocal unknown
+        top = not open_files
         for word in items:
-            if len(out) >= MAX_WORDS:
+            full = len(out) >= MAX_WORDS
+            if full and not top:
+                unknown = True  # the rest of this file is not read
                 return
-            if not word.startswith("@") or len(open_files) >= _MAX_FILE_DEPTH:
+            if not word.startswith("@"):
+                out.append(word)
+                continue
+            if full or len(open_files) >= _MAX_FILE_DEPTH:
+                unknown = True  # a file left unread
                 out.append(word)
                 continue
             try:
@@ -182,7 +199,7 @@ def _expand(words: Sequence[str], cwd: Path | Callable[[], Path] | None) -> list
         expand(words, frozenset())
     except _Cycle:
         return None
-    return out
+    return out, unknown
 
 
 class _Cycle(Exception):
@@ -193,8 +210,8 @@ def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = No
     expanded = _expand(words, cwd)
     if expanded is None:
         return _Read(missing=True)
-    words = expanded
-    read = _Read()
+    words, unknown = expanded
+    read = _Read(unknown=unknown, seen=unknown)
     i = 0
 
     def value_after() -> str | None:
@@ -279,7 +296,10 @@ def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = No
 def _workers(read: _Read) -> int | str | None:
     """How many xdist workers pytest starts, as pytest-xdist 3 decides it
     (`pytest_cmdline_main`, `pytest_configure`): a count, "auto" for `-n auto` or
-    `logical`, or None when it starts none."""
+    `logical`, or None when it starts none. "auto" too when some words were not read
+    (`_expand`), since they may start any number."""
+    if read.unknown:
+        return "auto"
     if read.plugin is False:
         return None
     numprocesses = read.numprocesses
