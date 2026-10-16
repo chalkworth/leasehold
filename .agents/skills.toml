@@ -1,0 +1,9 @@
+# Skills for agents working on this repository, vendored from chalkworth/skills.
+# Change them there, then run `chalk-skills vendor` here; never edit the copies.
+mirror_claude = true
+public = true
+
+[[source]]
+url = "https://github.com/chalkworth/skills"
+ref = "v0.1.0"
+packs = ["experiments", "docs"]

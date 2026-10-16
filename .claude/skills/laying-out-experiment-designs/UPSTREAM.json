@@ -1,0 +1,28 @@
+{
+  "scope": "Rewritten from the upstream skill; no upstream text or code is vendored. Licence text: LICENSE",
+  "repository": "https://github.com/K-Dense-AI/scientific-agent-skills",
+  "commit": "a1043ef544e3a100c28e70a736b6cf32554d0677",
+  "license": "MIT, Copyright (c) 2025 K-Dense Inc. (LICENSE, from LICENSE.md at the pinned commit; skills/experimental-design/SKILL.md frontmatter also says MIT)",
+  "copied_from": "skills/experimental-design: references/factorial_and_doe.md (resolution and aliasing table, Plackett-Burman run-count limits, centre-run and circumscribed-CCD cautions, Box-Behnken against CCD run counts, Latin hypercube scope) -> references/factorial-and-screening.md and references/response-surface-and-space-filling.md; references/randomization_and_blocking.md (permuted-block balance at complete blocks, block-size and predictability, stratum and cluster rules, concealment) -> references/allocation-schedules.md; references/design_types.md (Latin square, split-plot, crossover and carry-over) -> references/other-structures.md; scripts/doe_designs.py and scripts/randomization.py (the pydoe wrappers and the seeded allocation schedules, replaced by one shorter typed script) -> scripts/layouts.py. All rewritten and shortened, with the claims about pydoe 1.5.0 re-checked against the installed package.",
+  "left_out": [
+    "SKILL.md: the Fisher principles overview, the 'when to use' list, the decision tree, 'the mistakes that ruin studies', the eight-step workflow, key references and the related-skills list; designing-experiments already covers the independent unit, replication and pseudoreplication, and the rest is general know-how",
+    "SKILL.md: the installation section's news about pyDOE3 and its Windows interpreter path; history and environment detail that does not change what a run does",
+    "SKILL.md: the closing 'Citing Scientific Agent Skills' request (already removed from the local copy); promotion",
+    "references/sequential_and_adaptive.md: whole file; group-sequential boundaries and stopping are in designing-experiments (references/sequential-stopping.md), and adaptive randomisation, enrichment and data monitoring committees are clinical-trial material",
+    "references/randomization_and_blocking.md: controls (vehicle, sham, positive), blinding and CONSORT allocation-concealment guidance, omics batch and plate-edge layout, covariate-adjustment and FDA guidance; human-subjects and wet-lab material, with the batch-as-block rule kept in allocation-schedules.md",
+    "references/design_types.md: completely randomized and randomized complete block designs, and the pseudoreplication section with its mice, dish and fish-tank examples; general know-how, and designing-experiments covers the unit",
+    "scripts/doe_designs.py and scripts/randomization.py: simple_randomization and assign_factorial_runs (a few lines of numpy each), and the input-hardening shared by every wrapper"
+  ],
+  "local_changes": [
+    "SKILL.md: new; a layout table routing to four references, the run command with the pydoe pin, and six rules for every layout, with a pointer to designing-experiments for the comparison itself",
+    "scripts/layouts.py: new, written from scratch (numpy, pandas and pydoe 1.5.0; typed; one command line). Adds what the upstream wrappers lacked: resolution computed from the design and the alias groups printed, fold-over as a second block, target-resolution fractions through fracfact_by_res, the actual factor range printed for response-surface designs, restricted shuffling within a column, a balance note with the incomplete last block, and a randomised Latin square",
+    "references/: new; each opens with its traps, with compute-experiment wording (seeds as independent replicates, log-scaled factors, rounding duplicates, persistent state as the only source of carry-over, machines and rate-limit windows as blocks)",
+    "pyproject.toml: pandas and pydoe 1.5.0 added to the skills path run"
+  ],
+  "tests": "tests/skills/laying_out_experiment_designs/",
+  "moved_from": {
+    "repository": "chalkworth/context-firewalls (private)",
+    "commit": "e26b9d8a",
+    "path": ".agents/skills/laying-out-experiment-designs"
+  }
+}

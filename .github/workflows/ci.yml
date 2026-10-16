@@ -20,6 +20,8 @@ jobs:
       - run: uv run --no-sync ruff check
       - run: uv run --no-sync ruff format --check
       - run: uv run --no-sync lint-imports
+      - name: Vendored skills match their lockfile
+        run: uvx --from "git+https://github.com/chalkworth/skills@v0.1.0" chalk-skills check
 
   test:
     runs-on: ubuntu-latest

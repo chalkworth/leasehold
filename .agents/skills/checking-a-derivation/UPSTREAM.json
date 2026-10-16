@@ -1,0 +1,27 @@
+{
+  "scope": "The skill is written from this upstream material; no upstream text is vendored. Licence text: LICENSE",
+  "repository": "https://github.com/K-Dense-AI/scientific-agent-skills",
+  "commit": "a1043ef544e3a100c28e70a736b6cf32554d0677",
+  "license": "Upstream skill frontmatter: a link to SymPy's BSD licence (https://github.com/sympy/sympy/blob/master/LICENSE), which licenses SymPy, not the skill text. The upstream repository does have a top-level LICENSE.md at this commit: MIT, Copyright (c) 2025 K-Dense Inc., copied here as LICENSE. Targets SymPy 1.14.0 (BSD-3-Clause), which is run via uv and not vendored.",
+  "copied_from": "skills/sympy: SKILL.md sections 6-7 (solveset complex default and ConditionSet, symbol assumptions and branch traps, code-executing sympify/parse_expr/lambdify warning) and references/code-generation-printing.md (cse and codegen/printer recipe) -> references/traps-tolerances-and-examples.md and references/generating-cpp.md. All rewritten and shortened; the recipe was re-run on SymPy 1.14.0 with cxxcode.",
+  "left_out": [
+    "SKILL.md: overview, installation, best-practice tutorial, use-case patterns, import cheat sheet, troubleshooting and the request to cite the K-Dense paper",
+    "references/core-capabilities.md and references/core_capabilities.md: near-duplicate tutorials on algebra, calculus and solving that Claude already knows",
+    "references/matrices-linear-algebra.md: matrix and eigenvalue tutorial",
+    "references/physics-mechanics.md: classical and quantum mechanics, vectors and units (units overlap uncertainty-and-units)",
+    "references/advanced-topics.md: geometry, number theory, combinatorics, logic and statistics",
+    "references/review.md: upstream review log",
+    "references/code-generation-printing.md: Fortran, autowrap/ufuncify, LaTeX and printing sections, which a C++ model check does not need"
+  ],
+  "local_changes": [
+    "SKILL.md: new; the three-way check and limiting-form checks with limit. references/traps-tolerances-and-examples.md: new; the tolerance rule, angle-wrap and small-denominator traps, and examples of where the check applies",
+    "references/generating-cpp.md: new; cse plus cxxcode recipe, with an ask-first gate in SKILL.md because it replaces repo code",
+    "scripts/check_jacobian.py: new typed template and coordinated-turn demo (stdlib plus sympy 1.14.0); flattens Matrix before lambdify"
+  ],
+  "tests": "tests/skills/checking_a_derivation/",
+  "moved_from": {
+    "repository": "chalkworth/context-firewalls (private)",
+    "commit": "e26b9d8a",
+    "path": ".agents/skills/checking-a-derivation"
+  }
+}
