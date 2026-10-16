@@ -1,0 +1,99 @@
+{
+  "clis": [
+    "claude",
+    "codex",
+    "cursor",
+    "antigravity",
+    "pi"
+  ],
+  "hook_files": {},
+  "hooks": {},
+  "mirror_claude": true,
+  "skills": {
+    "checking-a-derivation": {
+      "files": {
+        "LICENSE": "09b02a3c9df3053c55531d503357a9c7cde275970e6c3ceaa1ddf5f0e90b40c1",
+        "SKILL.md": "48cc14f841a4da76c57b1693c2cd7a0d77b19c62a6714e67d8afec2846cde5fd",
+        "UPSTREAM.json": "18ee409b3acc5d84544d81aa17788ca8274ae0fa05e52d5e2bbbd2d136fc7bad",
+        "references/generating-cpp.md": "b58d10ff5dd94575fe44075139db80b24703fc6abe742e0de80182e1490f4979",
+        "references/traps-tolerances-and-examples.md": "38ae4930cc2e2850bb1f256e88c40efff13d573a0b224c08a02b07d31ae18a34",
+        "scripts/check_jacobian.py": "69714d918c5aadab5c95840841b894427402f2e8fade777bbc00187223284842"
+      },
+      "pack": "experiments",
+      "source": "https://github.com/chalkworth/skills"
+    },
+    "designing-experiments": {
+      "files": {
+        "LICENSE": "09b02a3c9df3053c55531d503357a9c7cde275970e6c3ceaa1ddf5f0e90b40c1",
+        "SKILL.md": "a111ba6f0f199475907166e76fa80d4e1d1ec9e0252f9fe038a107cbf321dd93",
+        "UPSTREAM.json": "41ef5e0c781ac7d02259a57af0c2bedbf644b465abf52ff0352b1813349be6f0",
+        "references/bayesian-rates.md": "0197e69c369e4be006b3fa18d8c1706ef40983355d2e36e7bcb920f9ff69a99b",
+        "references/choosing-the-analysis.md": "3f60117752516514d2f65b0a428669a6ac3ced0846e3398e14a3779b6fb1a815",
+        "references/planning-sample-size.md": "1f641461aee91c562b8c58ba4867bbd16c006fce3e129c3770aca4dfa7c9f0ec",
+        "references/reading-results.md": "56c34f11b5d2ecc0fbacaf00ab101a678cde7703ad51c6cf929f9fa7638eaabf",
+        "references/running-experiment-campaigns.md": "a6f6fd622426942cd4f8bbb55bba12a6ebe4e7de5c51c002c00252a8cc705f59",
+        "references/sequential-stopping.md": "95ef08d9aaf08888e7872524341d44554b485be3725fd159b1e171506c95a14f",
+        "references/simulation-results.md": "a6827ee532cf973d3420b7258e467507243e832466cb26d4a83600abaa08d5f7",
+        "references/trading-off-failure-modes.md": "4e19a36e95deb5aa2f29048ff2f9adb460da94af7ecc5fa8e2404cc7db2ab03c",
+        "scripts/stats.py": "b84d6502c9e2d8f1212d53b3b18e414a743b886480632f66c7c0a880a2a76059",
+        "steps/measured-comparison.md": "64230f10b2a0c18902151ec6793d13563e09970a30603274dcefbaf509091f65"
+      },
+      "pack": "experiments",
+      "source": "https://github.com/chalkworth/skills"
+    },
+    "diagramming-in-markdown": {
+      "files": {
+        "LICENSE": "16550e9337d15fb566d4dc1f2dab56c42ac8840d4bd1441d2fd0405fc8b846e7",
+        "SKILL.md": "4380f0f3038c92736a724f9dd8b8bee3628b8371e746ba49468681dc08a3db3e",
+        "UPSTREAM.json": "5f93ea012445da0292c7a2af45bec2b61ce96180f80df0f8a5f55cb6ddcc4f11",
+        "references/diagram-reference.md": "2be513e8e4a859e83a8ee390263d0c768c5dc09ae195b4a0a78e31f36b35d24d"
+      },
+      "pack": "docs",
+      "source": "https://github.com/chalkworth/skills"
+    },
+    "laying-out-experiment-designs": {
+      "files": {
+        "LICENSE": "09b02a3c9df3053c55531d503357a9c7cde275970e6c3ceaa1ddf5f0e90b40c1",
+        "SKILL.md": "34683f8484ef95f287e799a8c18e303f1fc8f33dd43587b002ab83cd1bd2e21e",
+        "UPSTREAM.json": "ef4f6f14d5f6f48ca7d2dda4f693fb0a26c9a64379f7dd194ad409784cbc0114",
+        "references/allocation-schedules.md": "e201a105a6181fece9df74046ae2a556dd4b3807d6f609f2beeec8ec16b99821",
+        "references/factorial-and-screening.md": "fcd5dec247784c6c7f91aa5927d02afe379e56bb7f678c136705ab9254416ec1",
+        "references/other-structures.md": "e394c823f3c37bb57c0bf4b07c8ba1bf3df61d3a93591ffe6431dcf8c6d29ffb",
+        "references/response-surface-and-space-filling.md": "d1c213c12377b310f5bc6af85e76fe32a2f443e4459df535e7a87ea249bbded4",
+        "scripts/layouts.py": "6c86ae2868eadb1112b52a6f307adfa27f5287edfb835b718f7cd4dc531ade31"
+      },
+      "pack": "experiments",
+      "source": "https://github.com/chalkworth/skills"
+    },
+    "testing-ideas-with-simulation": {
+      "files": {
+        "LICENSE": "09b02a3c9df3053c55531d503357a9c7cde275970e6c3ceaa1ddf5f0e90b40c1",
+        "SKILL.md": "bd12420030ccdb8b35d62de2d904efd15c4f2ae114fa417ad2f4063a7a003e79",
+        "UPSTREAM.json": "51d3b24c9dece6db5af63245251ac15ec9b9f50e407c763b83cf364b80c47dba",
+        "references/closed-forms.md": "ffce8145d0a588b8b4df0e35f75bc97b21ae2d78e527e3f9a9645c5d6ec96bbd",
+        "references/framing-the-what-if.md": "0106106c0b7f5771b4a0121c52bd195cb453b9fcd7cfeb99d157c78176533b38",
+        "references/simpy-patterns.md": "df8404fc1a7c431ea42d3d011d17d2eb4d97b3ef5b8eadecbc977f0ffc915b6a",
+        "references/simpy-pitfalls.md": "44e5e2eb934fc72bd17d3965c43bc4af33ded025d8d2c625e8eceb9deca2f1c8",
+        "references/simulation-method.md": "94844a618612d1ae51d6670eb06abba9cefd1958d04ced7c4a8fc79dd5e3b3c8",
+        "scripts/queueing.py": "0f0348932de7fcfb64819cecb55ba45827cf98e637c183b97067c18880d6d2e0"
+      },
+      "pack": "experiments",
+      "source": "https://github.com/chalkworth/skills"
+    }
+  },
+  "sources": [
+    {
+      "commit": "6695174389295f22629450e9a20918a8bc2cf140",
+      "dirty": false,
+      "packs": [
+        "docs",
+        "experiments"
+      ],
+      "ref": "v0.1.0",
+      "skills": [],
+      "url": "https://github.com/chalkworth/skills"
+    }
+  ],
+  "tool_version": "0.1.0",
+  "version": 1
+}

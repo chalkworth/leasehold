@@ -1,0 +1,29 @@
+{
+  "scope": "The skill is written from this upstream material; no upstream text is vendored. Licence text: LICENSE",
+  "repository": "https://github.com/K-Dense-AI/scientific-agent-skills",
+  "commit": "a1043ef544e3a100c28e70a736b6cf32554d0677",
+  "license": "MIT, Copyright (c) 2025 K-Dense Inc. Targets SimPy 4.1.2 (MIT).",
+  "copied_from": "skills/simpy: references/simulation-methodology.md (replications, warm-up, intervals, streams, validation) -> references/simulation-method.md; references/events.md and references/monitoring.md (half-open until, run(until=event), AnyOf, zero-delay loops, time-weighted averages) -> references/simpy-pitfalls.md; references/resources.md (Resource, PriorityResource, PreemptiveResource, Container, Store, reneging) -> references/simpy-patterns.md. All rewritten and shortened; code examples re-verified on SimPy 4.1.2.",
+  "left_out": [
+    "SKILL.md: SimPy introduction, installation and the reference index; the new skill is organised around testing a theory, not around the library",
+    "references/process-interaction.md: interrupts, waiting on processes and condition events beyond the cases in the pitfalls and patterns files",
+    "references/real-time.md: wall-clock simulation, not used for theory testing",
+    "references/cli-guide.md and scripts/bounded_queue_scenario.py, replication_runner.py, event_trace_summary.py, resource_monitor.py, validate_simulation_config.py, basic_simulation_template.py, _common.py: fixed-model command-line demos that depend on scheduler internals; replaced by one small closed-form and interval helper",
+    "references/sources.md: dated link ledger",
+    "references/simulation-methodology.md: conceptual-model checklists, STRESS-DES reporting, sensitivity taxonomy, causal-claims section and the literature list, which suit academic studies rather than product decisions",
+    "SKILL.md: the request to cite the K-Dense paper"
+  ],
+  "local_changes": [
+    "SKILL.md: new; asks the user before modelling, tries the closed form first, simulates only when its assumptions break, and ends in a verdict",
+    "references/closed-forms.md: new; Little's law, M/M/1, M/G/1, Erlang C, machine-repair model, written independently of upstream",
+    "scripts/queueing.py: new stdlib-only helper (M/M/c, M/G/1, finite-source metrics, Student-t replication summary); formulas checked against textbook values and a SimPy model",
+    "references/framing-the-what-if.md and SKILL.md section 1: new framing front end and check routing"
+  ],
+  "ideas_only": "K-Dense-AI/scientific-agent-skills skills/what-if-oracle at the same commit (CC BY-NC-SA 4.0): ideas only, no text. Its framing, input labelling, flip-observation and 'not estimated' ideas inform SKILL.md section 1 and references/framing-the-what-if.md, written independently.",
+  "tests": "tests/skills/testing_ideas_with_simulation/",
+  "moved_from": {
+    "repository": "chalkworth/context-firewalls (private)",
+    "commit": "e26b9d8a",
+    "path": ".agents/skills/testing-ideas-with-simulation"
+  }
+}

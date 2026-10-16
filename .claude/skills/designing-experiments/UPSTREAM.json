@@ -1,0 +1,38 @@
+{
+  "scope": "The skill is written from this upstream material; no upstream text or code is vendored. Licence text of the main source: LICENSE",
+  "repository": "https://github.com/K-Dense-AI/scientific-agent-skills",
+  "commit": "a1043ef544e3a100c28e70a736b6cf32554d0677",
+  "license": "MIT, Copyright (c) 2025 K-Dense Inc. (LICENSE). Per-file licences from each SKILL.md frontmatter: statistical-analysis, statistical-power, experimental-design, scientific-critical-thinking, scientific-visualization MIT; statsmodels BSD-3-Clause; pymc and pymoo Apache-2.0. Every one is permissive and every source was rewritten, so only the MIT notice is shipped; the BSD and Apache sources are credited here.",
+  "copied_from": "skills/statistical-analysis SKILL.md (Welch by default, signed effect sizes, pingouin absolute-d and observed-power traps) -> references/choosing-the-analysis.md; skills/statistical-power SKILL.md and scripts/simulate_power.py (effect size first, no observed power, sensitivity range, design effect with caveats, Monte Carlo interval, fresh-seed check; only the shape of simulate_power) -> references/planning-sample-size.md and scripts/stats.py; skills/statsmodels SKILL.md (GLM binomial on counts, cluster-robust errors, GEE for clustered binary, MixedLM for Gaussian only) -> references/choosing-the-analysis.md; skills/experimental-design SKILL.md and references/sequential_and_adaptive.md (why peeking fails, group-sequential families, pre-specification, simulate the whole procedure) -> references/sequential-stopping.md; skills/scientific-critical-thinking SKILL.md (independent unit, extract evidence before judging, missing reporting is not evidence) -> references/reading-results.md; skills/scientific-visualization SKILL.md (encoding honesty, named uncertainty, redundant encoding, missing data) -> SKILL.md step 6 and references/reading-results.md; skills/pymc SKILL.md (state the prior, prior sensitivity, checks before trusting a hierarchical fit) -> references/bayesian-rates.md; skills/pymoo SKILL.md (feasibility and constraint convention, Pareto ideas) -> references/trading-off-failure-modes.md; skills/simpy references/simulation-methodology.md (read only, to keep references/simulation-results.md from repeating testing-ideas-with-simulation). All rewritten and shortened.",
+  "also_from": {
+    "repository": "https://github.com/NVIDIA/skills",
+    "commit": "029363a2023c0b24b1a75ddbeac11cd286d74afb",
+    "license": "Apache-2.0 (each SKILL.md frontmatter; no NOTICE or LICENSE file was found at the pinned paths). Ideas rewritten, no text or code copied.",
+    "copied_from": "skills/nemo-rl-auto-research SKILL.md (monitored stop rules restated after every run, count attempts, smoke runs prove nothing, default of baseline plus three ideas, keep failed branches, parent commit in the ledger) and skills/nvflare-autofl references/experiment-comparability.md and scripts/campaign_guard.py (read only: baseline re-runs measure spread, plateau clock, family-repeat stall, repeated-crash blocker, stop files) -> references/running-experiment-campaigns.md and baseline_noise_floor / attempts_since_improvement in scripts/stats.py; skills/cuopt-multi-objective-exploration SKILL.md (conflict check, payoff table, epsilon-constraint against weighted sum, dominance filter, knee, do not collapse to one weighted number) -> references/trading-off-failure-modes.md"
+  },
+  "left_out": [
+    "statistical-analysis: the five references (test selection, assumption diagnostics, effect sizes and power, Bayesian, APA reporting), assumption_checks.py, Pingouin install pinning, normality-first workflow, tests for correlations, survival and reliability, citation text; wrong defaults for small, bounded, clustered outcomes and psychology-lab reporting",
+    "statistical-power: scripts/power.py (a wrapper over statsmodels solvers), correlation, regression and ANOVA recipes, attrition and survival sections, grant and IRB justification, power-curve plotting",
+    "statsmodels: time series, discrete choice, diagnostics bulk, quick start and publication tables; Claude already knows the library",
+    "experimental-design: randomisation schedules, blinding, crossover, split-plot and Latin square designs, factorial and DOE helpers, adaptive randomisation and enrichment, data monitoring committees (the layouts, schedules and structures are now in laying-out-experiment-designs)",
+    "scientific-critical-thinking: clinical appraisal frameworks, bias and fallacy taxonomy, severity-tiered critique format, the figure step that needs an OpenRouter key",
+    "scientific-visualization: journal figure compliance, palettes, export formats",
+    "pymc: the full MCMC workflow, templates, distributions and model patterns; the Beta-Binomial case needs none of it",
+    "pymoo: algorithm and operator catalogues, ZDT and DTLZ benchmarks, and the dependency itself",
+    "simpy: everything else, already carried by testing-ideas-with-simulation",
+    "nemo-rl-auto-research: NeMo-RL recipe paths, Slurm and Brev etiquette, the session-memory skill, NGC and NVIDIA API-key and hosted-endpoint paths (none were used)",
+    "nvflare-autofl: the 4,585-line NVFlare runner and its job, recipe, data and site handling; campaign_guard.py itself, which is not vendored",
+    "cuopt-multi-objective-exploration: every cuOpt API call, warm start, MILP time limit and dual-based reading; LP, MILP and QP formulation hand-offs"
+  ],
+  "local_changes": [
+    "SKILL.md: new; product framing that matches rigour to the stakes and a short reply for a handed-over result, then claim and falsifier, rival explanations, independent unit, paired seeded repeats with intervals and the minimum detectable difference, and a stopping rule",
+    "scripts/stats.py: new, written from scratch (numpy and scipy only, typed, JSON command line). Wilson, Clopper-Pearson, rule of three, paired and cluster bootstrap, exact McNemar, Holm, rate and paired sample sizes with exact power checks, minimum detectable differences, design effect, simulate_power, a paired-seeds generator, O'Brien-Fleming and Pocock boundaries by numerical integration, Beta-Binomial helpers, baseline noise floor and plateau counting",
+    "references/choosing-the-analysis.md, planning-sample-size.md, sequential-stopping.md, reading-results.md, bayesian-rates.md, trading-off-failure-modes.md, simulation-results.md, running-experiment-campaigns.md: new; worked examples in terms of seeds, scenarios, clips and an unsafe_rate metric"
+  ],
+  "tests": "tests/skills/designing_experiments/",
+  "moved_from": {
+    "repository": "chalkworth/context-firewalls (private)",
+    "commit": "e26b9d8a",
+    "path": ".agents/skills/designing-experiments"
+  }
+}

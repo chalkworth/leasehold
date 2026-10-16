@@ -1,0 +1,25 @@
+{
+  "scope": "The whole skill is written from this upstream material; no upstream text is vendored. Licence text: LICENSE",
+  "repository": "https://github.com/K-Dense-AI/scientific-agent-skills",
+  "commit": "a1043ef544e3a100c28e70a736b6cf32554d0677",
+  "license": "Apache-2.0 (declared in the skill's SKILL.md frontmatter; the repository's own LICENSE.md is MIT, Copyright (c) 2025 K-Dense Inc.). Skill author: Clayton Young / Superior Byte Works, LLC. No NOTICE file upstream.",
+  "copied_from": "skills/markdown-mermaid-writing: the type-selection table, rules from references/mermaid_style_guide.md and the rendering and validation notes in references/current-rendering.md -> rewritten and heavily trimmed, no text vendored",
+  "left_out": [
+    "SKILL.md: Markdown house style (emoji headings, single H1, bold limits) and the Mermaid-then-Python-then-AI-image workflow, which do not suit plain engineering documents",
+    "templates/: nine document templates (pull request, issue, kanban, decision record, presentation, research paper, how-to, status report, project documentation)",
+    "references/markdown_style_guide.md: Markdown house style",
+    "references/mermaid_style_guide.md: emoji and colour conventions, subgraph tiers for 20+ node diagrams (this skill splits at about 15 nodes)",
+    "references/diagrams/: 24 per-type guides; only the seven common types are named, with no per-type guide",
+    "references/current-rendering.md: Mermaid 12 configuration keys, browser embedding and parse API, ZenUML, and scientific review checks",
+    "assets/examples/: example documents"
+  ],
+  "local_changes": [
+    "SKILL.md and references/diagram-reference.md: new, written here; add the fence rule for the destination, the 15-node limit, the sequence-diagram semicolon escape, and the mermaid-cli check with an installed Chrome"
+  ],
+  "tests": "tests/skills/diagramming_in_markdown/",
+  "moved_from": {
+    "repository": "chalkworth/context-firewalls (private)",
+    "commit": "e26b9d8a",
+    "path": ".agents/skills/diagramming-in-markdown"
+  }
+}

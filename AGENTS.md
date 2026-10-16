@@ -48,3 +48,8 @@ uv run lint-imports       # the layer contracts in .importlinter
   against a real daemon on a temporary socket (`tests/support.py`).
 - Every change to a public name, config key, CLI flag, exit code, status field or error code is
   listed in `CHANGELOG.md` under the next release.
+- `.agents/skills/` and `.claude/skills/` hold skills vendored from
+  [chalkworth/skills](https://github.com/chalkworth/skills), pinned in `.agents/skills.toml` and
+  `.agents/skills.lock.json`. Don't edit them here: change the skill upstream, bump `ref`, and run
+  `uvx --from git+https://github.com/chalkworth/skills@<ref> chalk-skills vendor`. CI fails on
+  a local edit.
