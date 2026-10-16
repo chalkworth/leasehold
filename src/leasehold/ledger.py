@@ -51,6 +51,7 @@ from leasehold.admission import (
     grants,
     positions,
 )
+from leasehold.elastic import DEFAULT_HEADROOM, Elastic, Headroom, targets
 from leasehold.process import pid_namespace, process_birth, process_matches
 from leasehold.units import MEMORY_MAX
 
@@ -64,6 +65,9 @@ RATE_WINDOW_S = 60.0
 #: namespace) cannot be judged by its pid; it is live while it has touched its rows (`beat`)
 #: within this long.
 STALE_S = 120.0
+#: How long an elastic lease's size stays put after it last changed before it may grow again,
+#: by default (a machine's `[elastic] settle_s`).
+ELASTIC_SETTLE_S = 15.0
 _BUSY_TIMEOUT_S = 30.0
 
 _SCHEMA = f"""
@@ -101,6 +105,12 @@ CREATE TABLE IF NOT EXISTS leases (
     max_weight INTEGER,
     -- The memory it declared for each slot it holds, in bytes; NULL: none.
     memory_per_slot INTEGER,
+    -- 1: an elastic lease (`leasehold.elastic`), whose weight moves between its min_weight and
+    -- max_weight; NULL or 0: its weight is fixed. target is the size it is asked to move to
+    -- (NULL: its weight), and resized_at when its weight last changed (NULL: acquired_at).
+    elastic INTEGER,
+    target INTEGER,
+    resized_at REAL,
     PRIMARY KEY (scope, item_id)
 );
 -- A waiting item, in its user's FIFO by (queued_at, seq).
@@ -125,6 +135,8 @@ CREATE TABLE IF NOT EXISTS queue (
     -- The most weight it can use (weight is the least); NULL: weight.
     max_weight INTEGER,
     memory_per_slot INTEGER,
+    -- 1: it asks for an elastic lease.
+    elastic INTEGER,
     UNIQUE (scope, item_id)
 );
 -- Whose turn was last in each pool: the round-robin's memory ('' is the item with no user).
@@ -217,7 +229,8 @@ class LedgerItem:
     than `weight`, a ValueError), kept as asked while it waits: it is granted a size between
     `weight` and that most as admission cuts it then (`leasehold.admission.grants`,
     `AdmissionPolicy.most`), its lease's weight from then on, and the lease keeps the range so
-    cut."""
+    cut. With `elastic` (only for a range), the lease's size may move between that least and
+    most after it is granted (`leasehold.elastic`, `Ledger.resize`)."""
 
     scope: str
     item_id: str
@@ -230,6 +243,7 @@ class LedgerItem:
     memory: int | None = None
     max_weight: int | None = None
     memory_per_slot: int | None = None
+    elastic: bool = False
 
     def __post_init__(self) -> None:
         for name in ("memory", "memory_per_slot"):
@@ -240,6 +254,8 @@ class LedgerItem:
             raise ValueError("memory and memory_per_slot are both given: declare one or the other")
         if self.max_weight is not None and self.max_weight < self.weight:
             raise ValueError(f"max_weight {self.max_weight} is below weight {self.weight}")
+        if self.elastic and (self.max_weight or self.weight) <= self.weight:
+            raise ValueError("only a range (max_weight above weight) can be elastic")
 
     @property
     def key(self) -> ItemKey:
@@ -284,6 +300,25 @@ class Renewal:
     max_weight: int | None = None
     #: For a lease: the pool it holds its weight in.
     pool: str | None = None
+    #: For a lease: the size it is asked to move to (its weight, unless it is elastic), and
+    #: whether it is elastic.
+    target: int | None = None
+    elastic: bool = False
+
+
+ResizeStatus = Literal["resized", "refused", "unknown"]
+
+
+@dataclass(frozen=True)
+class Resize:
+    """What a `resize` did: the lease is `resized` (to `weight`, its `target` worked out
+    again), a growth was `refused` (`reason`: it no longer fits), or the lease is `unknown`
+    (expired, released or never granted)."""
+
+    status: ResizeStatus
+    weight: int | None = None
+    target: int | None = None
+    reason: str | None = None
 
 
 class Ledger:
@@ -291,9 +326,21 @@ class Ledger:
     directory must exist and be writable: it is never created, since a directory made by the
     wrong user would hide the mistake."""
 
-    def __init__(self, path: Path, *, now=time.time) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        now=time.time,
+        settle_s: float = ELASTIC_SETTLE_S,
+        headroom: Headroom = DEFAULT_HEADROOM,
+    ) -> None:
         self.path = Path(path)
         self._now = now
+        #: How long an elastic lease's size stays put after it changed before it may grow.
+        self.settle_s = settle_s
+        #: How much of the headroom an elastic lease's growth leaves free
+        #: (`leasehold.elastic`).
+        self.headroom: Headroom = headroom
         directory = self.path.parent
         if not directory.is_dir():
             raise LedgerUnavailable(
@@ -441,8 +488,8 @@ class Ledger:
         conn.execute(
             "INSERT INTO queue (scope, item_id, kind, user, session, pool, weight, holder_pid, "
             "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at, memory, "
-            "max_weight, memory_per_slot) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "max_weight, memory_per_slot, elastic) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (scope, item_id) DO NOTHING",
             (
                 item.scope,
@@ -463,6 +510,7 @@ class Ledger:
                 item.memory,
                 item.max_weight,
                 item.memory_per_slot,
+                1 if item.elastic else None,
             ),
         )
 
@@ -478,8 +526,9 @@ class Ledger:
             conn.execute(
                 "INSERT INTO leases (scope, item_id, kind, user, session, host, pool, weight, "
                 "holder_pid, holder_birth, holder_ns, beat_at, acquired_at, labels, ttl_s, "
-                "expires_at, grant_no, memory, min_weight, max_weight, memory_per_slot) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "expires_at, grant_no, memory, min_weight, max_weight, memory_per_slot, "
+                "elastic, target, resized_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scope,
                     item_id,
@@ -511,6 +560,9 @@ class Ledger:
                         row["memory_per_slot"],
                     ),
                     row["memory_per_slot"],
+                    row["elastic"],
+                    weight,
+                    now,
                 ),
             )
             conn.execute("DELETE FROM queue WHERE seq = ?", (row["seq"],))
@@ -542,7 +594,62 @@ class Ledger:
                 "AND COALESCE(l.session, '') = session_turns.session)",
                 (SESSION_TURNS_KEPT - 1,),
             )
+        self._retarget(conn, policy)
         return admitted
+
+    def _elastic(self, conn: sqlite3.Connection) -> list[tuple[Elastic, float]]:
+        """Every elastic lease, with when its size last changed."""
+        rows = conn.execute(
+            "SELECT scope, item_id, pool, host, user, session, weight, min_weight, max_weight, "
+            "memory, memory_per_slot, resized_at, acquired_at FROM leases WHERE elastic = 1"
+        ).fetchall()
+        return [
+            (
+                Elastic(
+                    key=(r["scope"], r["item_id"]),
+                    pool=r["pool"],
+                    host=r["host"],
+                    user=r["user"],
+                    weight=r["weight"],
+                    min_weight=_sizes(r)[1],
+                    max_weight=_sizes(r)[2],
+                    session=r["session"],
+                    memory=r["memory"],
+                    memory_per_slot=r["memory_per_slot"],
+                ),
+                _or(r["resized_at"], r["acquired_at"]),
+            )
+            for r in rows
+        ]
+
+    def _retarget(
+        self,
+        conn: sqlite3.Connection,
+        policy: AdmissionPolicy,
+        eligible: frozenset[ItemKey] | None = None,
+    ) -> dict[ItemKey, int]:
+        """Work out and store every elastic lease's target (`leasehold.elastic.targets`). The
+        leases that may grow are `eligible`; by default, those whose size last changed at least
+        `settle_s` ago. With `eligible` given, only the targets of those leases are stored: the
+        others' were worked out with every lease that may grow, and stay. The targets."""
+        found = self._elastic(conn)
+        if not found:
+            return {}
+        stored = None if eligible is None else eligible
+        if eligible is None:
+            since = self._now() - self.settle_s
+            eligible = frozenset(e.key for e, changed in found if changed <= since)
+        worked = targets(
+            self._state(conn), policy, [e for e, _ in found], eligible, headroom=self.headroom
+        )
+        for (scope, item_id), target in worked.items():
+            if stored is not None and (scope, item_id) not in stored:
+                continue
+            conn.execute(
+                "UPDATE leases SET target = ? WHERE scope = ? AND item_id = ? AND target IS NOT ?",
+                (target, scope, item_id, target),
+            )
+        return worked
 
     # --- the API -------------------------------------------------------------------------------
 
@@ -612,7 +719,11 @@ class Ledger:
             if self._leased(conn, item.key):
                 return Admitted()
             state = self._state(conn)
-            return Queued(positions(state, policy)[item.key], blocker(state, policy, item.key))
+            place = positions(state, policy)[item.key]
+            why = blocker(state, policy, item.key)
+            if place == 1:
+                why = _with_giving_back(why, self._giving_back(conn, policy, item.pool))
+            return Queued(place, why)
 
     def impose(self, item: LedgerItem, policy: AdmissionPolicy, *, holder: Holder) -> bool:
         """Record a lease for work that is already running and was never asked for (a process
@@ -692,7 +803,8 @@ class Ledger:
             self._reclaim(conn)
             row = conn.execute(
                 "SELECT ttl_s, expires_at, revoked_at, revoke_reason, revoke_deadline, weight, "
-                "min_weight, max_weight, pool FROM leases WHERE scope = ? AND item_id = ?",
+                "min_weight, max_weight, pool, target, elastic FROM leases "
+                "WHERE scope = ? AND item_id = ?",
                 key,
             ).fetchone()
             if row is not None:
@@ -712,10 +824,10 @@ class Ledger:
                         "WHERE scope = ? AND item_id = ?",
                         (expires, now, *key),
                     )
-                sizes = _sizes(row)
+                sizes = (*_sizes(row), row["pool"], *_target(row))
                 if row["revoked_at"] is not None:
-                    return Renewal("revoked", expires, row["revoke_reason"], *sizes, row["pool"])
-                return Renewal("ok", expires, None, *sizes, row["pool"])
+                    return Renewal("revoked", expires, row["revoke_reason"], *sizes)
+                return Renewal("ok", expires, None, *sizes)
             row = conn.execute(
                 "SELECT ttl_s, expires_at FROM queue WHERE scope = ? AND item_id = ?", key
             ).fetchone()
@@ -728,6 +840,76 @@ class Ledger:
                 )
                 return Renewal("queued", expires)
             return Renewal("unknown")
+
+    def resize(self, item: LedgerItem | ItemKey, weight: int, policy: AdmissionPolicy) -> Resize:
+        """Move an elastic lease to `weight`, in one transaction that then admits whatever fits
+        and works the targets out again. Giving slots back (a `weight` below the lease's)
+        always succeeds. Growing succeeds only up to the lease's stored target, and only while
+        `leasehold.elastic.targets` would still grow it now; otherwise it is `refused`. A
+        `weight` outside the lease's range, or a lease that is not elastic, is a ValueError."""
+        key = item.key if isinstance(item, LedgerItem) else item
+        with self._tx() as conn:
+            self._reclaim(conn)
+            row = conn.execute(
+                "SELECT weight, min_weight, max_weight, target, elastic FROM leases "
+                "WHERE scope = ? AND item_id = ?",
+                key,
+            ).fetchone()
+            if row is None:
+                return Resize("unknown")
+            current, least, most = _sizes(row)
+            if not row["elastic"]:
+                raise ValueError(f"lease {key[1]} is not elastic: its size is fixed")
+            if not least <= weight <= most:
+                raise ValueError(f"weight {weight} is outside the lease's range {least}-{most}")
+            if weight > current:
+                target = _target(row)[0]
+                if weight > target:
+                    return Resize("refused", current, target, f"its target is {target}")
+                now = self._retarget(conn, policy, eligible=frozenset({key})).get(key, current)
+                if weight > now:
+                    return Resize("refused", current, now, "the slots are no longer free")
+            if weight != current:
+                conn.execute(
+                    "UPDATE leases SET weight = ?, resized_at = ?, "
+                    "memory = CASE WHEN memory_per_slot IS NULL THEN memory "
+                    "ELSE ? * memory_per_slot END WHERE scope = ? AND item_id = ?",
+                    (weight, self._now(), weight, *key),
+                )
+            self._admit(conn, policy)
+            row = conn.execute(
+                "SELECT weight, target, elastic FROM leases WHERE scope = ? AND item_id = ?", key
+            ).fetchone()
+            return Resize("resized", weight, _target(row)[0])
+
+    def make_elastic(self, item: LedgerItem | ItemKey, policy: AdmissionPolicy) -> Resize:
+        """Make a held range elastic, from now on, in one transaction that then works the
+        targets out again: `resized` with its weight and target, or `unknown` when it is not
+        held. A lease whose range is a single size is a ValueError."""
+        key = item.key if isinstance(item, LedgerItem) else item
+        with self._tx() as conn:
+            self._reclaim(conn)
+            row = conn.execute(
+                "SELECT weight, min_weight, max_weight, target, elastic FROM leases "
+                "WHERE scope = ? AND item_id = ?",
+                key,
+            ).fetchone()
+            if row is None:
+                return Resize("unknown")
+            current, least, most = _sizes(row)
+            if least >= most:
+                raise ValueError(f"lease {key[1]} has no range ({least}): its size is fixed")
+            if not row["elastic"]:
+                conn.execute(
+                    "UPDATE leases SET elastic = 1, target = weight "
+                    "WHERE scope = ? AND item_id = ?",
+                    key,
+                )
+                self._admit(conn, policy)
+            row = conn.execute(
+                "SELECT weight, target, elastic FROM leases WHERE scope = ? AND item_id = ?", key
+            ).fetchone()
+            return Resize("resized", current, _target(row)[0])
 
     def revoke(self, *, kind: str, reason: str, grace_s: float) -> list[ItemKey]:
         """Revoke every live lease of `kind` not revoked already: each keeps its weight while
@@ -776,8 +958,31 @@ class Ledger:
         with self._tx() as conn:
             self._reclaim(conn)
             state = self._state(conn)
+            pools = {w.key: w.pool for w in state.waiting}
+            back = {pool: self._giving_back(conn, policy, pool) for pool in set(pools.values())}
         places = positions(state, policy)
-        return {key: (place, blocker(state, policy, key, places)) for key, place in places.items()}
+        out = {}
+        for key, place in places.items():
+            why = blocker(state, policy, key, places)
+            if place == 1:
+                why = _with_giving_back(why, back[pools[key]])
+            out[key] = (place, why)
+        return out
+
+    def _giving_back(
+        self, conn: sqlite3.Connection, policy: AdmissionPolicy, pool: str
+    ) -> tuple[int, int]:
+        """The slots elastic leases on `pool`'s host are asked to give back and have not yet,
+        and how many leases those are."""
+        p = policy.pools.get(pool)
+        if p is None:
+            return 0, 0
+        row = conn.execute(
+            "SELECT COALESCE(SUM(weight - target), 0) AS slots, COUNT(*) AS leases FROM leases "
+            "WHERE elastic = 1 AND target < weight AND host = ?",
+            (p.host,),
+        ).fetchone()
+        return row["slots"], row["leases"]
 
     def beat(self, holder: Holder | None = None) -> None:
         """Say `holder` (this process by default) is alive: what keeps its leases and places in
@@ -904,6 +1109,28 @@ def _holder_args(holder: Holder | None) -> tuple:
     return () if holder is None else (holder.pid, holder.birth, holder.ns)
 
 
+def _with_giving_back(why: str | None, back: tuple[int, int]) -> str | None:
+    """`why` an item first in line waits, with the slots elastic leases are giving back
+    (`Ledger._giving_back`) when there are any."""
+    slots, leases = back
+    if not slots:
+        return why
+    who = "an elastic lease" if leases == 1 else f"{leases} elastic leases"
+    their = "its" if leases == 1 else "their"
+    s = "" if slots == 1 else "s"
+    giving = f"waiting for {who} to give back {slots} slot{s} as {their} jobs finish"
+    return f"{why}; {giving}" if why else giving
+
+
+def _or(value, default):
+    return default if value is None else value
+
+
+def _target(row: sqlite3.Row) -> tuple[int, bool]:
+    """A lease row's target (its weight when it has none) and whether it is elastic."""
+    return _or(row["target"], row["weight"]), bool(row["elastic"])
+
+
 def _sizes(row: sqlite3.Row) -> tuple[int, int, int]:
     """A lease row's granted weight, and the least and the most it asked for (a row from
     before ranges asked for its weight)."""
@@ -913,11 +1140,25 @@ def _sizes(row: sqlite3.Row) -> tuple[int, int, int]:
     return weight, least, most
 
 
-#: The columns added to each table since the schema version was last bumped, all integers
-#: NULL for a row written before them: `memory` (leasehold 0.3), the ranges and `memory_per_slot`.
+#: The columns added to each table since the schema version was last bumped, with their types,
+#: NULL for a row written before them: `memory` (leasehold 0.3), the ranges, `memory_per_slot`
+#: and elastic leases'.
 _ADDED_COLUMNS = {
-    "leases": ("memory", "min_weight", "max_weight", "memory_per_slot"),
-    "queue": ("memory", "max_weight", "memory_per_slot"),
+    "leases": (
+        ("memory", "INTEGER"),
+        ("min_weight", "INTEGER"),
+        ("max_weight", "INTEGER"),
+        ("memory_per_slot", "INTEGER"),
+        ("elastic", "INTEGER"),
+        ("target", "INTEGER"),
+        ("resized_at", "REAL"),
+    ),
+    "queue": (
+        ("memory", "INTEGER"),
+        ("max_weight", "INTEGER"),
+        ("memory_per_slot", "INTEGER"),
+        ("elastic", "INTEGER"),
+    ),
 }
 
 
@@ -933,10 +1174,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if row is not None and row[0] == str(SCHEMA_VERSION):
         for table, added in _ADDED_COLUMNS.items():
             columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-            for column in added:
+            for column, kind in added:
                 if columns and column not in columns:
                     with contextlib.suppress(sqlite3.OperationalError):  # another process did
-                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         return
     conn.executescript(
         "DROP TABLE IF EXISTS leases; DROP TABLE IF EXISTS queue; "

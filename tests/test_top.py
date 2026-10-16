@@ -209,6 +209,13 @@ def test_why_a_lease_waits_is_shown_under_it_in_the_wait_style(busy):
     assert waits == ["▸ pool work is at 5 of 6; this needs 2", "▸ machine has 0 of 12 slots free"]
 
 
+def test_a_lease_giving_slots_back_says_so_beside_it(busy):
+    lease = busy["leases"][0]
+    lease |= {"giving_back": 2, "elastic": True}
+    text = top.plain(top.render(busy, [], 200, 40))
+    assert f"{lease['lease_id']}  giving back 2 slots: waiting for its jobs to finish" in text
+
+
 def test_pressure_above_the_lending_limit_is_a_warning(busy):
     lines = top.render(busy, [], 100, 40)
     cpu = next(line for line in lines if "".join(t for t, _ in line).startswith("PRESSURE"))

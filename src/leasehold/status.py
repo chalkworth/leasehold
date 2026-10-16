@@ -17,11 +17,14 @@ SCHEMA = 2
 
 
 def public(row: dict, policy: AdmissionPolicy | None = None) -> dict:
-    """A ledger row as the API shows it. A lease's `weight` is the size it was granted; a
-    waiting item's, the least it needs. `min_weight` and `max_weight` are the lease's range
-    (both `weight` for a row from before ranges). A waiting item's `max_weight` is the most it
-    asked for, cut as admission would cut it now under `policy` (`AdmissionPolicy.most`) when
-    one is given."""
+    """A ledger row as the API shows it. A lease's `weight` is the size it holds now (granted,
+    or moved to since by an elastic lease), and its `target` the size it is asked to move to
+    (its `weight` unless it is `elastic`). `giving_back` is how far the target is below the
+    weight: slots the holder is asked to give back, and will once its jobs finish. A waiting
+    item's `weight` is the least it needs.
+    `min_weight` and `max_weight` are the lease's range (both `weight` for a row from before
+    ranges). A waiting item's `max_weight` is the most it asked for, cut as admission would cut
+    it now under `policy` (`AdmissionPolicy.most`) when one is given."""
     weight = row["weight"]
     most = _or(row.get("max_weight"), weight)
     if policy is not None and "acquired_at" not in row and row["pool"] in policy.pools:
@@ -41,8 +44,11 @@ def public(row: dict, policy: AdmissionPolicy | None = None) -> dict:
         "memory_bytes": row.get("memory"),
         "memory_per_slot_bytes": row.get("memory_per_slot"),
     }
+    out["elastic"] = bool(row.get("elastic"))
     if "acquired_at" in row:
         out |= {
+            "target": _or(row.get("target"), weight),
+            "giving_back": max(0, weight - _or(row.get("target"), weight)),
             "acquired_at": row["acquired_at"],
             "grant": row["grant_no"],
             "revoked": row["revoked_at"] is not None,

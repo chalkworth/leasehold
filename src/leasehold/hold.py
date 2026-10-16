@@ -31,6 +31,13 @@ in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it r
 A lease asked for as a range (`--weight 2-4`) is sized to the weight it was granted: its job
 and thread counts, jobserver, `LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot,
 `MemoryHigh`. The command does not inherit `LEASEHOLD_WANT` (`leasehold.weights`).
+
+A range run with a jobserver is elastic unless told not to: once the command's jobs take
+jobserver tokens, the lease is made elastic, and its jobserver's tokens and its scope follow
+the lease's target as it grows and shrinks (`leasehold.follow`). Such a lease is renewed at
+least every `[elastic] settle_s`, and its command gets no `CMAKE_BUILD_PARALLEL_LEVEL` and a
+`CARGO_BUILD_JOBS` of the most jobs it may grow to (`jobs.job_env`). `--elastic` without
+`--jobserver` is refused (exit 2), and a command line giving its own `-jN` is warned about.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, jobs, shell, terminal, weights
+from leasehold import contain, follow, jobs, shell, terminal, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -182,16 +189,21 @@ def waiting_line(request: dict, answer: dict) -> str:
 
 
 class _Lease:
-    """A granted lease and its renewals: one due every TTL/3 (`due_in`), counted from the start
-    of the last, each waiting at most TTL/3 for its answer."""
+    """A granted lease and its renewals: one due every TTL/3, or `every` when that is sooner
+    (`due_in`), counted from the start of the last, each waiting at most that long for its
+    answer."""
 
-    def __init__(self, client: Client, lease_id: str, kind: str, ttl: float) -> None:
+    def __init__(
+        self, client: Client, lease_id: str, kind: str, ttl: float, every: float | None = None
+    ) -> None:
         self.client = client
         self.lease_id = lease_id
         self.kind = kind
         self.ttl = ttl
-        self.interval = max(0.05, ttl / 3)
-        self._quick = Client(client.path, timeout=min(client.timeout, self.interval))
+        self.interval = max(0.05, ttl / 3 if every is None else min(ttl / 3, every))
+        #: The client for calls that must not hold the next renewal up: each waits at most
+        #: one interval for its answer.
+        self.quick = Client(client.path, timeout=min(client.timeout, self.interval))
         self.last_ok = time.monotonic()
         self._next = self.last_ok + self.interval
 
@@ -202,7 +214,7 @@ class _Lease:
     def renew(self) -> dict | None:
         self._next = time.monotonic() + self.interval
         try:
-            answer = self._quick.renew(self.lease_id)
+            answer = self.quick.renew(self.lease_id)
         except (Unavailable, ApiError):
             return None
         if answer["status"] in ("ok", "revoked"):
@@ -213,7 +225,7 @@ class _Lease:
         """Ask once more, without waiting, for the lease `request` describes: the answer, or
         None when none came in time."""
         try:
-            return self._quick.acquire(**request, wait_s=0)
+            return self.quick.acquire(**request, wait_s=0)
         except (Unavailable, ApiError):
             return None
 
@@ -298,6 +310,7 @@ def hold(
     if_unavailable: str = "run",
     max_weight: int | None = None,
     memory_per_slot: str | None = None,
+    elastic: bool | None = None,
 ) -> int:
     """Run `argv` under a lease of `weight` to `max_weight` slots (None: `weight`), sized to
     the weight granted (`leasehold.jobs`): the job-count and thread-count variables unless
@@ -310,10 +323,25 @@ def hold(
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`. A leased command gets the
     client's socket as `LEASEHOLD_SOCKET`, so a `hold` or shim inside it reaches the same
-    daemon."""
+    daemon. `elastic` makes a range elastic once the command's jobs take jobserver tokens
+    (`leasehold.follow`; None: whenever `jobserver` is true). It needs `jobserver`: without
+    one, nothing makes the jobs follow the lease, so it exits 2."""
     if not argv:
         _say("no command given (leasehold hold [options] -- cmd ...)")
         return 2
+    if elastic and not jobserver:
+        _say(
+            "--elastic needs --jobserver: without a jobserver nothing makes the command's jobs "
+            "follow the lease as it grows and shrinks"
+        )
+        return 2
+    if jobserver and (count := jobs.own_job_count(argv)) is not None:
+        _say(
+            f"the command gives its own job count ({count}): a make given one runs its own "
+            "jobserver and leaves the lease's, so it runs that many jobs (with no number, as "
+            "many as it can) whatever the lease holds, and the lease keeps its size; leave "
+            "the count out to use the lease's"
+        )
     request = None
     try:
         with _interruptible():
@@ -327,6 +355,8 @@ def hold(
                 if threads is None:
                     threads = rule.threads
             threads = "jobs" if threads is None else threads
+            if elastic is None:
+                elastic = jobserver
             request = lease_request(
                 kind=kind,
                 pool=pool,
@@ -368,6 +398,7 @@ def hold(
                 threads=threads,
                 socket=getattr(client, "path", None),
                 memory_per_slot=memory_per_slot,
+                elastic=elastic,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -431,7 +462,9 @@ def lease_request(
     """An acquire request for a new lease of its own id, as `hold` sends it: `weight` to
     `max_weight` slots (None, or `weight`: no range is sent). `memory` (a size such as `4g`)
     is the memory the work declares in all, `memory_per_slot` for each slot it is granted;
-    None declares none."""
+    None declares none. It never asks for an elastic lease: `hold` makes its lease elastic
+    later, once the command's jobs show they follow the jobserver (`leasehold.follow`)."""
+    ranged = max_weight is not None and max_weight > weight
     return {
         "kind": kind,
         "pool": pool,
@@ -441,7 +474,7 @@ def lease_request(
         "session": session,
         "ttl_s": ttl_s,
         "memory": memory,
-        "max_weight": max_weight if max_weight is not None and max_weight > weight else None,
+        "max_weight": max_weight if ranged else None,
         "memory_per_slot": memory_per_slot,
     }
 
@@ -459,18 +492,29 @@ def run_leased(
     threads: jobs.Threads = "jobs",
     socket: str | None = None,
     memory_per_slot: str | None = None,
+    elastic: bool = False,
 ) -> int:
     """`hold` once `request` is granted (`answer`): run `argv` sized to the weight granted (its
     thread pools to `threads`, `jobs.thread_count`; `child_env`; when contained, held to
     `memory`, or to `memory_per_slot` for each slot granted), renewing the lease, and release
-    it when the command ends; the command's exit code (`_ended`). SIGINT, SIGTERM or SIGHUP
-    before the command runs gives the lease back and stops what was started of it."""
+    it when the command ends; the command's exit code (`_ended`). With `elastic` and
+    `jobserver`, a range follows its target once the command takes jobserver tokens
+    (`leasehold.follow`). SIGINT, SIGTERM or SIGHUP before the command runs gives the lease
+    back and stops what was started of it."""
     lease_id, kind = request["lease_id"], request["kind"]
     granted = answer["lease"]
     if memory is None and memory_per_slot is not None:
         memory = f"{int(granted['weight']) * memory_to_bytes(memory_per_slot)}b"
-    lease = _Lease(client, lease_id, kind, float(granted["ttl_s"]))
     count = int(granted.get("jobs") or granted["weight"])
+    elastic = (
+        elastic
+        and jobserver
+        and int(granted.get("max_weight") or 0) > int(granted.get("min_weight") or 0)
+    )
+    settle_s = (answer.get("elastic") or {}).get("settle_s") if elastic else None
+    lease = _Lease(client, lease_id, kind, float(granted["ttl_s"]), settle_s)
+    most = int(granted.get("max_jobs") or count) if elastic else None
+    server = None
     tty = terminal.owned()
     with contextlib.ExitStack() as stack:
         relay = stack.enter_context(_relayed())
@@ -481,15 +525,16 @@ def run_leased(
             job_env=job_env,
             threads=threads,
             socket=socket,
+            elastic_jobs=most,
         )
         if jobserver:
             try:
-                fifo = stack.enter_context(jobs.jobserver(count))
+                server = stack.enter_context(jobs.Jobserver(count))
             except OSError as exc:
                 lease.release()
                 _say(f"cannot make a jobserver: {exc}")
                 return EXIT_NOT_STARTED
-            env |= jobserver_env(os.environ, count, fifo)
+            env |= jobserver_env(os.environ, count, server.fifo)
         prefix = scope_prefix(request, answer, memory)
         if prefix and shutil.which(argv[0], path=env.get("PATH")) is None:
             # Said here: under systemd-run a missing program would be its error, not ours.
@@ -514,7 +559,19 @@ def run_leased(
                 _say(uncontained)
             if tty:
                 stack.enter_context(foreground(child.pid))
-            code = _supervise(child, lease, request, grace_s)
+            follower = None
+            if elastic and server is not None:
+                follower = follow.Follower(
+                    lease.quick,
+                    lease_id,
+                    granted,
+                    server=server,
+                    scope=contain.lease_unit(lease_id) if prefix and not uncontained else None,
+                    memory_per_slot=memory_per_slot,
+                    hard_cpu=bool((answer.get("contain") or {}).get("hard_cpu")),
+                    say=_say,
+                )
+            code = _supervise(child, lease, request, grace_s, follower)
     if interrupted is not None:
         return _interrupted(interrupted)
     return _ended(code, tty)
@@ -649,6 +706,7 @@ def child_env(
     threads: jobs.Threads = "jobs",
     env: Mapping[str, str] | None = None,
     socket: str | None = None,
+    elastic_jobs: int | None = None,
 ) -> dict[str, str]:
     """The command's environment: `env` (default ours) without `LEASEHOLD_WANT` (what this
     lease was asked for is not what the commands it runs ask for), with the lease's
@@ -657,7 +715,8 @@ def child_env(
     the enclosing lease's sizing is removed (`jobs.unsized_env`). Which variables an enclosing
     lease set is read from `env` before this lease's id is added, so it counts only when `env`
     holds a `LEASEHOLD_LEASE_ID`. `socket`, the daemon's, is passed on as `LEASEHOLD_SOCKET`,
-    made absolute."""
+    made absolute. `elastic_jobs`, for a lease whose jobserver may grow to that many jobs, is
+    passed to `jobs.sized_env`."""
     outer = {k: v for k, v in (os.environ if env is None else env).items() if k != weights.ENV_WANT}
     lease = {
         "LEASEHOLD_LEASE_ID": lease_id,
@@ -668,7 +727,7 @@ def child_env(
     if socket:
         lease["LEASEHOLD_SOCKET"] = os.path.abspath(socket)
     if job_env:
-        return {**jobs.sized_env(outer, count, threads), **lease}
+        return {**jobs.sized_env(outer, count, threads, elastic_jobs=elastic_jobs), **lease}
     return {**jobs.unsized_env(outer), **lease}
 
 
@@ -683,25 +742,38 @@ def jobserver_env(env: Mapping[str, str], count: int, fifo: Path) -> dict[str, s
     return out
 
 
-def _supervise(child, lease, request, grace_s) -> int:
+#: How often a follower waiting on jobs to give tokens back looks again.
+_FOLLOW_S = 0.2
+
+
+def _supervise(child, lease, request, grace_s, follower: follow.Follower | None = None) -> int:
     """Renew the lease while `child` runs; stop its process group when the lease is revoked or
     lost; release the lease once it is done. The child's return code (negative: the signal that
     killed it), or `EXIT_REVOKED`. A `work` or `external` lease the daemon no longer knows is
     asked for again; refused, the command runs on without a lease, which is not asked for
-    again."""
+    again. An elastic lease's `follower` hears each renewal and moves toward its target."""
     revoked: str | None = None
     unleased = queued = False
     try:
         while True:
+            wait = None if unleased else lease.due_in()
+            if wait is not None and follower is not None and follower.busy():
+                wait = min(wait, _FOLLOW_S)
             try:
-                code = child.wait(timeout=None if unleased else lease.due_in())
+                code = child.wait(timeout=wait)
                 break
             except subprocess.TimeoutExpired:
                 pass
+            if follower is not None and lease.due_in() > 0:
+                follower.step()
+                continue
             renewal = lease.renew()
             status = None if renewal is None else renewal["status"]
             if status == "ok":
                 queued = False
+                if follower is not None:
+                    follower.heard(renewal)
+                    follower.step()
             if status == "revoked":
                 revoked = renewal.get("reason") or "revoked"
             elif lease.kind in PREEMPTIBLE and (

@@ -133,9 +133,13 @@ def _range(x: Mapping) -> tuple[int, int]:
 
 
 def _weight_cell(x: Mapping) -> str:
-    """A lease's weight, as the W column shows it: `3`, or `3/2-4` when it asked a range."""
+    """A lease's weight, as the W column shows it: `3`, `3/2-4` when it asked a range, and
+    `3>4/2-4` when an elastic lease's target is not its weight."""
     least, most = _range(x)
     weight = str(x.get("weight"))
+    target = x.get("target")
+    if target is not None and str(target) != weight:
+        weight = f"{weight}>{target}"
     return weight if least == most else f"{weight}/{least}-{most}"
 
 
@@ -662,6 +666,9 @@ def _leases(v: _View) -> _Section:
         row.put(x.get("lease_id"))
         if x.get("revoked"):
             row.put(f"  revoked: {x.get('revoke_reason') or ''}", "bad")
+        elif x.get("giving_back"):
+            back = x.get("giving_back")
+            row.put(f"  giving back {_slots(back)}: waiting for its jobs to finish", "warn")
         what = _what(x.get("labels"))
         if what:
             row.put(f"  {what}", "dim")
@@ -769,6 +776,13 @@ def _granted(e: Mapping) -> str:
     return f"{_who(e)} took {_size(e)} in {e.get('pool')}{after}"
 
 
+def _resized(e: Mapping) -> str:
+    before = int(e.get("previous_weight") or 0)
+    after = int(e.get("weight") or 0)
+    how = "took" if after > before else "gave back"
+    return f"{_who(e)} {how} {_slots(abs(after - before))} in {e.get('pool')}, now {after}"
+
+
 def _pool_max(e: Mapping) -> str:
     how = "set to" if e.get("overridden") else "reset to"
     return f"pool {e.get('pool')} max {how} {e.get('max')}"
@@ -809,6 +823,7 @@ _EVENTS: dict[EventType, _Shown] = {
         "lend off", "warn", lambda e: f"lending closed: {e.get('reason')}"
     ),
     EventType.POOL_MAX: _Shown("pool max", "bold", _pool_max),
+    EventType.RESIZED: _Shown("resized", "", _resized),
     EventType.LEND_SWITCH: _Shown(
         "switch",
         "bold",

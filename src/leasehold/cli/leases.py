@@ -55,8 +55,8 @@ def _lease_options(s: argparse.ArgumentParser) -> None:
         type=_weight,
         metavar="N|MIN-MAX",
         help="slots to hold, or a range: wait for MIN, and be granted from MIN to MAX, fixed "
-        "for the lease's life (hold: as the [commands] rules weigh the command, else 1; "
-        "acquire: 1)",
+        "for the lease's life unless it is elastic (hold: as the [commands] rules weigh the "
+        "command, else 1; acquire: 1)",
     )
     s.add_argument("--label", action="append", default=[], metavar="K=V", help="repeatable")
     s.add_argument(
@@ -99,6 +99,15 @@ def register(sub) -> None:
         "--jobserver",
         action="store_true",
         help="hand the command a GNU make jobserver holding its lease's job count",
+    )
+    s.add_argument(
+        "--elastic",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="make the lease elastic: it grows into free slots and gives them back when "
+        "asked, between the --weight range's MIN and MAX, once the command's jobs take "
+        "jobserver tokens. Only the jobserver's tokens and the command's scope follow it. "
+        "Needs --jobserver (exit 2 without it). Default: on for a range with --jobserver",
     )
     s.add_argument(
         "--no-job-env",
@@ -182,6 +191,7 @@ def _hold(args, ctx) -> int:
         grace_s=args.grace,
         job_env=args.job_env,
         jobserver=args.jobserver,
+        elastic=args.elastic,
         memory=args.memory,
         memory_per_slot=args.memory_per_slot,
         threads=args.threads,

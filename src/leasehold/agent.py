@@ -47,7 +47,12 @@ ID_PATTERN = r"^[A-Za-z0-9_.:-]{1,64}$"
 _ID = re.compile(ID_PATTERN)
 _LENDING_OFF = "lending switched off"
 
-__all__ = ["SCOPE", "AcquireRequest", "Forbidden", "MachineAgent"]
+__all__ = ["SCOPE", "AcquireRequest", "Conflict", "Forbidden", "MachineAgent"]
+
+
+class Conflict(RuntimeError):
+    """A request that cannot be done now, though it may be later: an elastic lease asked to
+    grow past what is free, or a lease that is no longer held."""
 
 
 class AcquireRequest(BaseModel):
@@ -76,6 +81,10 @@ class AcquireRequest(BaseModel):
     #: The memory each slot granted will use, a size such as `2g`, instead of `memory`: counted
     #: at the size the lease is granted.
     memory_per_slot: str | None = None
+    #: An elastic lease (only for a range): its size may move between `weight` and
+    #: `max_weight` after it is granted. The holder takes slots when its target rises and gives
+    #: them back when it falls (`POST /v1/resize`, `leasehold.elastic`).
+    elastic: bool = False
 
     @field_validator("memory", "memory_per_slot")
     @classmethod
@@ -90,6 +99,8 @@ class AcquireRequest(BaseModel):
             raise ValueError(f"max_weight {self.max_weight} is below weight {self.weight}")
         if self.memory is not None and self.memory_per_slot is not None:
             raise ValueError("memory and memory_per_slot are both given: give one or the other")
+        if self.elastic and (self.max_weight or self.weight) <= self.weight:
+            raise ValueError("only a range (max_weight above weight) can be elastic")
         return self
 
     @field_validator("lease_id", "session")
@@ -152,6 +163,8 @@ class MachineAgent:
         )
         self._cpus = cpus
         self.ledger = ledger if ledger is not None else Ledger(config.ledger_path, now=clock)
+        self.ledger.settle_s = config.elastic.settle_s
+        self.ledger.headroom = config.elastic.headroom
         slices = list(dict.fromkeys(config.load.slices))
         self.loader = load if load is not None else LoadReader(slices)
         self._clock = clock
@@ -536,6 +549,7 @@ class MachineAgent:
             memory=memory,
             max_weight=req.max_weight,
             memory_per_slot=per_slot,
+            elastic=req.elastic,
         )
         ttl = req.ttl_s or self.config.lease_ttl_s
         with self._lock:
@@ -576,10 +590,13 @@ class MachineAgent:
             lease = self._lease(lease_id)
             if lease is not None:
                 lease["jobs"] = self.config.jobs.for_weight(lease["weight"])
+                lease["target_jobs"] = self.config.jobs.for_weight(lease["target"])
+                lease["max_jobs"] = self.config.jobs.for_weight(lease["max_weight"])
             return {
                 "status": "granted",
                 "lease": lease,
                 "contain": self.config.contain.model_dump(),
+                "elastic": self.config.elastic.model_dump(),
             }
         if isinstance(outcome, Queued):
             return {
@@ -637,8 +654,61 @@ class MachineAgent:
                 "max_weight": renewal.max_weight,
                 "pool": renewal.pool,
                 "jobs": self.config.jobs.for_weight(renewal.weight),
+                "target": renewal.target,
+                "target_jobs": self.config.jobs.for_weight(renewal.target or renewal.weight),
+                "elastic": renewal.elastic,
             }
         return answer
+
+    def resize(self, lease_id: str, weight: int, *, user: str | None) -> dict:
+        """Move the elastic lease `lease_id` to `weight` (`Ledger.resize`): give slots back, or
+        take the ones its target offers. A growth that no longer fits, or a lease no longer
+        held, is a `Conflict`; a lease that is not elastic, or a weight outside its range, a
+        ValueError."""
+        with self._lock:
+            self._check_owner(lease_id, user)
+            done = self.ledger.resize((SCOPE, lease_id), weight, self.policy())
+            if done.status == "resized":
+                self.ledger.settle(self.policy())
+                self._record()
+        if done.status == "unknown":
+            raise Conflict(f"lease {lease_id} is not held")
+        if done.status == "refused":
+            raise Conflict(f"lease {lease_id} cannot grow to {weight} now: {done.reason}")
+        self._notify()
+        assert done.weight is not None and done.target is not None
+        return {
+            "status": "resized",
+            "lease_id": lease_id,
+            "weight": done.weight,
+            "target": done.target,
+            "jobs": self.config.jobs.for_weight(done.weight),
+            "target_jobs": self.config.jobs.for_weight(done.target),
+        }
+
+    def make_elastic(self, lease_id: str, *, user: str | None) -> dict:
+        """Make the held range `lease_id` elastic from now on (`Ledger.make_elastic`): its
+        weight and target, and their job counts. A lease no longer held is a `Conflict`; one
+        with no range, a ValueError."""
+        with self._lock:
+            self._check_owner(lease_id, user)
+            done = self.ledger.make_elastic((SCOPE, lease_id), self.policy())
+            if done.status == "resized":
+                self.ledger.settle(self.policy())
+                self._record()
+        if done.status == "unknown":
+            raise Conflict(f"lease {lease_id} is not held")
+        self._notify()
+        assert done.weight is not None and done.target is not None
+        return {
+            "status": "elastic",
+            "lease_id": lease_id,
+            "elastic": True,
+            "weight": done.weight,
+            "target": done.target,
+            "jobs": self.config.jobs.for_weight(done.weight),
+            "target_jobs": self.config.jobs.for_weight(done.target),
+        }
 
     def release(self, lease_id: str, *, user: str | None) -> dict:
         with self._lock:

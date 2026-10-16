@@ -7,11 +7,12 @@ each one. An administrator-only route checks who asks before it reads the body.
 
 A well-formed request is answered 200 with a `status` field (the lend and pool routes answer
 their state); a malformed one 400, one the peer may not make 403, an unknown path 404, one the
-ledger cannot answer now 503, and one the daemon fails on 500, each with an `error` field
-(`bad_request`, `forbidden`, `not_found`, `ledger_unavailable`, `internal`) and a `detail`. The
-transport adds 400 `bad_request` for a malformed `Content-Length` and 413 `too_large` for a
-body over its limit. Every request is answered: no exception escapes `handle`, so a fault in the
-daemon never reads to a client as no daemon at all.
+ledger cannot answer now 503, one that cannot be done now but may be later 409, and one the
+daemon fails on 500, each with an `error` field (`bad_request`, `forbidden`, `not_found`,
+`conflict`, `ledger_unavailable`, `internal`) and a `detail`. The transport adds 400
+`bad_request` for a malformed `Content-Length` and 413 `too_large` for a body over its limit.
+Every request is answered: no exception escapes `handle`, so a fault in the daemon never reads
+to a client as no daemon at all.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from urllib.parse import parse_qsl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from leasehold.access import Forbidden, may_administer
-from leasehold.agent import AcquireRequest, MachineAgent
+from leasehold.agent import AcquireRequest, Conflict, MachineAgent
 from leasehold.events import CAPACITY
 from leasehold.ledger import LedgerUnavailable
 
@@ -45,6 +46,19 @@ class _LeaseRequest(BaseModel):
 
     lease_id: str = Field(min_length=1, max_length=64)
     ttl_s: float | None = Field(None, gt=0, le=3600)
+
+
+class _ResizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    lease_id: str = Field(min_length=1, max_length=64)
+    weight: int = Field(ge=1)
+
+
+class _ElasticRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    lease_id: str = Field(min_length=1, max_length=64)
 
 
 class _EventsRequest(BaseModel):
@@ -120,6 +134,14 @@ def _release(agent: MachineAgent, req: _LeaseRequest, peer: Peer, rest: str) -> 
     return agent.release(req.lease_id, user=peer.user)
 
 
+def _resize(agent: MachineAgent, req: _ResizeRequest, peer: Peer, rest: str) -> dict:
+    return agent.resize(req.lease_id, req.weight, user=peer.user)
+
+
+def _elastic(agent: MachineAgent, req: _ElasticRequest, peer: Peer, rest: str) -> dict:
+    return agent.make_elastic(req.lease_id, user=peer.user)
+
+
 def _lend(agent: MachineAgent, req: _LendRequest, peer: Peer, rest: str) -> dict:
     return agent.set_lend(req.open)
 
@@ -137,6 +159,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/v1/acquire"): Route(AcquireRequest, _acquire),
     ("POST", "/v1/renew"): Route(_LeaseRequest, _renew),
     ("POST", "/v1/release"): Route(_LeaseRequest, _release),
+    ("POST", "/v1/resize"): Route(_ResizeRequest, _resize),
+    ("POST", "/v1/elastic"): Route(_ElasticRequest, _elastic),
     ("POST", "/v1/lend"): Route(_LendRequest, _lend, admin=True),
     ("POST", "/v1/pools/<name>"): Route(_PoolRequest, _pool, admin=True, prefix=True),
 }
@@ -177,6 +201,8 @@ def handle(
         return 400, {"error": "bad_request", "detail": json.loads(json.dumps(detail, default=str))}
     except Forbidden as exc:
         return 403, {"error": "forbidden", "detail": str(exc)}
+    except Conflict as exc:
+        return 409, {"error": "conflict", "detail": str(exc)}
     except LedgerUnavailable as exc:
         return 503, {"error": exc.code, "detail": str(exc)}
     except Exception as exc:  # noqa: BLE001 -- answered as a 500, its traceback on stderr
