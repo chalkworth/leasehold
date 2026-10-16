@@ -99,6 +99,10 @@ class _Unreadable(Exception):
     """A config file pytest would fail on, or that is not read."""
 
 
+class _TooLarge(_Unreadable):
+    """A regular file larger than `MAX_CONFIG_BYTES`, which pytest would read."""
+
+
 def _option_like(word: str) -> bool:
     """Whether argparse reads `word` as an option rather than a value. A word with a space is
     one only when it starts with a short option (`-n 3`), or a long one and `=`."""
@@ -156,9 +160,9 @@ def _expand(
 ) -> tuple[list[str], bool] | None:
     """`words` with each `@file` replaced by the file's lines, one word each, as argparse does
     for pytest (`fromfile_prefix_chars="@"`), and whether some of them are unknown. A file
-    that is not a regular file of at most `MAX_CONFIG_BYTES`, or cannot be read, leaves its
-    word as it is. None when a file names itself, directly or through others: pytest fails on
-    that.
+    that is not a regular file, or cannot be read, leaves its word as it is; one larger than
+    `MAX_CONFIG_BYTES` does too, and its words are unknown. None when a file names itself,
+    directly or through others: pytest fails on that.
 
     Files give at most `MAX_WORDS` words in all, and are opened at most `_MAX_FILE_DEPTH`
     deep. Past either limit a file is left unread, or read only in part, and the words are
@@ -190,6 +194,10 @@ def _expand(
                 if key in open_files:
                     raise _Cycle
                 lines = _text(path).splitlines()
+            except _TooLarge:
+                unknown = True  # pytest reads it; leasehold does not
+                out.append(word)
+                continue
             except (_Unreadable, OSError, ValueError):
                 out.append(word)
                 continue
@@ -344,7 +352,7 @@ def _text(path: Path) -> str:
         with path.open("rb") as f:
             data = f.read(MAX_CONFIG_BYTES + 1)
         if len(data) > MAX_CONFIG_BYTES:
-            raise _Unreadable(path)
+            raise _TooLarge(path)
         return data.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         raise _Unreadable(path) from exc

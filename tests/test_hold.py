@@ -435,6 +435,12 @@ class _Rules:
         return {"rules": [], "wait_s": 1, "when_busy": "deny"}
 
 
+def test_a_pytest_run_no_rule_names_still_shares_its_jobs_among_its_workers(tmp_path):
+    found = hold_module.auto_size(_Rules(), ["pytest", "-n", "4"], env={}, cwd=tmp_path)
+    assert (found.weight, found.threads) == (1, "jobs/4")
+    assert hold_module.auto_size(_Rules(), ["pytest"], env={}, cwd=tmp_path).threads == "jobs"
+
+
 def test_a_weight_without_job_variables_never_asks_for_the_rules(monkeypatch):
     monkeypatch.setattr(hold_module, "wait_for_grant", lambda *a, **k: (EXIT_REFUSED, {}))
     client = _Rules()

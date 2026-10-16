@@ -232,15 +232,17 @@ def _threads(
 def within_lease(program: str, args: list[str], env: Mapping[str, str]) -> dict[str, str]:
     """The environment `program` runs with inside a lease already held: `env`, with each thread
     variable the lease set lowered to the count `program`'s own rule gives (`_threads`,
-    `jobs.resized`) where it is higher; never raised. `env` as it is when the lease recorded no
-    variables, its thread count is 1 already, no rule matches, the daemon does not answer with
+    `jobs.resized`) where it is higher; never raised. `OPENBLAS_NUM_THREADS` and
+    `MKL_NUM_THREADS` follow the user's own `OMP_NUM_THREADS` instead, even when it is higher.
+    At a thread count of 1 already, the daemon is not asked and the count stays 1. `env` as it
+    is when the lease recorded no variables, no rule matches, the daemon does not answer with
     rules within `WITHIN_LEASE_TIMEOUT_S`, or anything else fails."""
     try:
         lease_jobs = jobs.count_of(env.get("LEASEHOLD_JOBS"))
         if not jobs.recorded(env) or lease_jobs is None:
             return dict(env)
         if 1 in (lease_jobs, jobs.count_of(env.get("LEASEHOLD_THREADS"))):
-            return dict(env)
+            return jobs.resized(env, 1) or dict(env)
         try:
             client = Client(discovery.find(None, None, env), timeout=WITHIN_LEASE_TIMEOUT_S)
             rules = shell.served(client.commands()).rules

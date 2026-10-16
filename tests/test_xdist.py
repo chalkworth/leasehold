@@ -343,8 +343,12 @@ def test_arguments_from_a_file_are_read(tmp_path):
     assert run_starts_workers(["@args.txt"], {}, tmp_path)
     assert run_starts_workers(["@more.txt"], {}, tmp_path)
     assert not run_starts_workers(["@missing.txt"], {}, tmp_path)
-    (tmp_path / "big.txt").write_text("-n\nauto\n" + "x\n" * 600_000)
-    assert not run_starts_workers(["@big.txt"], {}, tmp_path)
+    (tmp_path / "big.txt").write_text("-n\n0\n" + "x\n" * 600_000)
+    assert xdist.workers(["@big.txt"], {}, tmp_path) == "auto"  # pytest reads it; we do not
+    assert xdist.workers(["@big.txt", "-n", "2"], {}, tmp_path) == "auto"
+    (tmp_path / "dir").mkdir()
+    assert xdist.workers(["@dir", "-n", "2"], {}, tmp_path) == 2  # not a regular file: as is
+    assert xdist.workers(["@missing.txt", "-n", "2"], {}, tmp_path) == 2
 
 
 @pytest.mark.parametrize(

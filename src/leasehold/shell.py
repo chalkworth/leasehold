@@ -464,8 +464,9 @@ def threads(
 ) -> int | str | None:
     """The thread count for a command line running the programs `found`, as a `threads`
     setting (`jobs.thread_count`): the smallest any of its programs allows, so none runs more
-    threads per process than its rule gives; None when no rule matches any of them.
-    "jobs/W:K" is the job count divided among W workers, and at most K.
+    threads per process than its rule gives. None when no rule matches any of them and no
+    pytest run on the line starts workers. "jobs/W:K" is the job count divided among W
+    workers, and at most K.
 
     A pytest run that starts xdist workers, whatever rule it matched or none, allows "jobs/W"
     for W workers and 1 for `-n auto` or `logical`; its rule's own `threads` can only lower
@@ -493,7 +494,7 @@ def threads(
             chosen.append(1)
         elif workers is not None:
             chosen.append(f"jobs/{workers}")
-    if not matched:
+    if not matched and not chosen:
         return None
     return _fewest(chosen)
 

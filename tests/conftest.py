@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
-from support import FACTS, FakeLoad, machine_config
+from support import FACTS, FakeLoad, machine_config, outer_lease
 
 from leasehold.agent import MachineAgent
 from leasehold.server import Daemon
+
+
+@pytest.fixture(autouse=True)
+def _outside_any_lease(monkeypatch):
+    """Each test starts with no lease's variables in its environment, even when the suite runs
+    inside `leasehold hold`."""
+    for name in [n for n in os.environ if outer_lease(n)]:
+        monkeypatch.delenv(name)
 
 
 @pytest.fixture

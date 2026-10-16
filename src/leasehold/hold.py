@@ -377,16 +377,17 @@ def auto_size(
     the agent hooks and `leasehold commands --test` match it, for its weight and memory. Its
     `threads` is the whole command line's (`shell.threads`), read with `env` and `cwd`
     (default ours): a count, "jobs", or a share of the job count ("jobs/N", "jobs/N:K").
-    `_UNSIZED` when no rule matches or the rules cannot be read."""
+    `_UNSIZED` when no rule matches, with the line's `threads` when a pytest run on it starts
+    xdist workers, and `_UNSIZED` when the rules cannot be read."""
     try:
         rules = shell.served(client.commands()).rules
         found = list(shell.programs(shlex.join(argv)))
         matched = shell.match_programs(rules, found)
-        if matched is None:
-            return _UNSIZED
         count = shell.threads(
             rules, found, env=os.environ if env is None else env, cwd=cwd or Path.cwd()
         )
+        if matched is None:
+            return dataclasses.replace(_UNSIZED, threads=count or _UNSIZED.threads)
     except (
         Unavailable,
         ApiError,

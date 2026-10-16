@@ -220,6 +220,15 @@ def test_a_rule_with_a_count_lowers_a_share_of_the_jobs():
     assert jobs.thread_count(found, 16) == 3 and jobs.thread_count(found, 4) == 2
 
 
+@pytest.mark.parametrize(
+    ("found", "threads"),
+    [([("pytest", ["-n", "4"])], "jobs/4"), ([("pytest", ["-n", "auto"])], 1),
+     ([("pytest", [])], None), ([("make", []), ("pytest", ["-n", "2"])], "jobs/2")],
+)  # fmt: skip
+def test_a_pytest_run_no_rule_names_still_shares_the_jobs_among_its_workers(found, threads):
+    assert shell.threads([], found) == threads
+
+
 _OWN_PYTEST = shell.Rule.of({"programs": ["pytest"], "weight": 2, "source": "config"})
 
 

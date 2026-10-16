@@ -43,6 +43,7 @@ here.
 - `hold` sets `LEASEHOLD_SOCKET` for its command to the socket of the daemon it found, made
   absolute, so a nested `hold` or a PATH shim reaches the same daemon.
   `leasehold.hold.run_leased` and `child_env` take `socket`.
+- An `@FILE` argument larger than 1 MiB makes a pytest run count as `-n auto`.
 - Library: `leasehold.jobs.WORKER_VARIABLES`, `THREAD_VARIABLES`, `BLAS_FAMILY`,
   `LEASEHOLD_SET`, `MAX_DIGITS`, `Threads`, `thread_count`, `count_of`, `recorded`,
   `leasehold_set`, `sized_env`, `unsized_env` and `resized`. The module `leasehold.xdist`.
@@ -52,13 +53,18 @@ here.
 
 ### Changed
 
+- A client's `--config` outranks `$LEASEHOLD_SOCKET`: it takes the socket of the config the
+  flag names before the environment's, so a command inside `hold` can still name another
+  daemon. `serve` is unchanged.
 - A variable already set is the user's, and `hold` leaves it alone unless the lease the
   command runs in set it to the value it still has.
 - A user's `OMP_NUM_THREADS` is copied to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` where
-  the user left them unset, and neither a nested `hold` nor a PATH shim lowers it or them.
+  the user left them unset, and neither a nested `hold` nor a PATH shim lowers it or them,
+  even inside a lease already at one thread.
 - A command line that runs several programs takes the fewest threads any of them allows,
   so `cargo test && pytest -n 4` gets the job count divided by 4. Programs on it that no rule
-  names get that count too.
+  names get that count too, and a pytest run with xdist workers limits it to its share even
+  when no rule names pytest.
 - `hold` without `--weight` reads its command as the agent hooks do, so `hold -- uv run pytest`,
   `hold -- uvx pytest` and `hold -- python -m pytest` match the pytest rules. It used to match
   on the first word only. Finding the program skips the options of `uv` (before and after

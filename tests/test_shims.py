@@ -249,6 +249,15 @@ def test_a_fault_sizing_threads_runs_the_program_as_it_is(monkeypatch):
     assert shims._threads([], "pytest", [], env) is None
 
 
+def test_at_one_thread_the_users_omp_still_reaches_the_blas_variables(monkeypatch):
+    """No daemon is asked at one thread, and the user's own OMP_NUM_THREADS still wins."""
+    monkeypatch.setattr(shims, "Client", None)  # never constructed
+    lease = jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer", "LEASEHOLD_SOCKET": "/x"}, 4, 1)
+    env = shims.within_lease("pytest", ["-n", "auto"], lease | {"OMP_NUM_THREADS": "8"})
+    assert env["OMP_NUM_THREADS"] == env["OPENBLAS_NUM_THREADS"] == env["MKL_NUM_THREADS"] == "8"
+    assert env["GOMAXPROCS"] == env["LEASEHOLD_THREADS"] == "1"
+
+
 def test_a_shim_divides_the_leases_jobs_among_its_workers(monkeypatch, tmp_path):
     monkeypatch.setattr(shims, "Client", _Served(_defaults()))
     monkeypatch.chdir(tmp_path)

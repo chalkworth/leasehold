@@ -85,9 +85,14 @@ def script_env(bin_dir: Path, sock: Path, **extra: str) -> dict[str, str]:
     }
 
 
-def run(script: Path, env: dict, **kw) -> subprocess.CompletedProcess:
+def run(script: Path, env: dict, *, orphan: bool = False, **kw) -> subprocess.CompletedProcess:
+    """`script` run to its end. With `orphan`, its parent exits at once (`support.Orphan`), and
+    it is done when its output closes; its exit code is then not known."""
+    argv = ["sh", str(script)]
+    if orphan:
+        argv = ["sh", "-c", 'sh "$0" </dev/null & exit 0', str(script)]
     done = subprocess.run(
-        ["sh", str(script)], env=env, capture_output=True, text=True, timeout=60, check=False, **kw
+        argv, env=env, capture_output=True, text=True, timeout=60, check=False, **kw
     )
     assert done.returncode == 0, done.stdout + done.stderr
     return done
@@ -197,7 +202,8 @@ def test_the_lent_job_is_stress_ng_when_it_is_installed(tmp_path):
 def test_observed_charges_the_running_program_and_frees_its_slots_when_it_ends(serve, bin_dir):
     sock = serve(example_config("observed"))
     toml = str(EXAMPLES / "observed" / "machine.toml")
-    done = run(EXAMPLES / "observed" / "run.sh", script_env(bin_dir, sock, LEASEHOLD_CONFIG=toml))
+    env = script_env(bin_dir, sock, LEASEHOLD_CONFIG=toml)
+    done = run(EXAMPLES / "observed" / "run.sh", env, orphan=True)  # observed: under no `hold`
     out = done.stdout + done.stderr
     assert "data-prep: weight 3 each, 1 running now" in out
     assert re.search(r"^  observed +3/4 held .* 1 running", out, re.M)

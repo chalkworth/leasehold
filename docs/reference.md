@@ -300,14 +300,14 @@ take leases is in its socket's group. As root:
 The service makes `/run/leasehold` (0750, the socket inside 0660) and `/var/lib/leasehold`
 (0700), and runs `serve --system`. `CPUWeight=idle` in `lend.slice` needs systemd 252 or later.
 
-Clients find a daemon from `--socket`, then `LEASEHOLD_SOCKET`, then the config file's `socket`;
-told none, they try the system socket, then their own, and use the first that answers.
-`leasehold doctor` lists each candidate and why it was taken or passed over.
-`hold` sets `LEASEHOLD_SOCKET` for the command it runs to the socket it found this way,
+Clients find a daemon from `--socket`, then the `socket` of the config `--config` names, then
+`LEASEHOLD_SOCKET`, then the `socket` of the config `LEASEHOLD_CONFIG` names, so a flag always
+outranks the environment. Told none, they try the system socket, then their own, and use the
+first that answers. `leasehold doctor` lists each candidate and why it was taken or passed
+over. `hold` sets `LEASEHOLD_SOCKET` for the command it runs to the socket it found this way,
 made absolute, so a nested `hold` and the PATH shims reach the same daemon, even when `hold`
-found it through `--config` or the search.
-`serve` listens on `--socket`, then `LEASEHOLD_SOCKET`, then the config's `socket`, then its
-mode's own.
+found it through `--config` or the search. `serve` listens on `--socket`, then
+`LEASEHOLD_SOCKET`, then the config's `socket`, then its mode's own.
 
 Run lent work in `lend.slice`, so `pressure_cgroups` leaves it out and the slice's limits
 apply:
@@ -471,7 +471,8 @@ The thread count is the job count unless the command's `threads` says otherwise:
 --threads N` or `--threads jobs`, else what the [`[commands]` rules](#which-commands-take-a-lease-commands)
 give the command line. Each program on the line takes its own rule's `threads`, and the line
 gets the smallest of them, so no program on it runs more threads per process than its rule
-allows. Programs on the line that no rule names get the line's count too. A pytest run with 4
+allows. Programs on the line that no rule names get the line's count too, and a pytest run
+that starts workers allows its share even with no rule of its own. A pytest run with 4
 workers gives the line a quarter of the job count whatever else runs on it:
 `hold -- sh -c "cargo test && pytest -n 4"` and `pytest -n 4; pytest -n 2` both get the job
 count divided by 4, and `cargo test && pytest -n auto` gets 1. A rule's count lowers a share
@@ -492,15 +493,18 @@ a `hold` inside it takes its values for yours.
 
 A `hold` inside a lease takes a lease of its own, and sets the recorded names to that lease's
 counts, larger or smaller than the enclosing lease's. A PATH shim inside a lease takes no lease
-of its own. It only lowers the lease's thread variables, each to the smaller of its current
-value and the count the shim's rule gives, so a program run through a shim never gets more
-threads than the lease around it. That holds for a count given with `hold --threads N` too.
+of its own. It only lowers the thread variables the lease set, each to the smaller of its
+current value and the count the shim's rule gives, so a program run through a shim never gets
+more threads than the lease around it. That holds for a count given with `hold --threads N`
+too. The exception is `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS`, which follow your own
+`OMP_NUM_THREADS` even when it is higher (below).
 
 When you set `OMP_NUM_THREADS` to a plain count, `hold` gives `OPENBLAS_NUM_THREADS` and
 `MKL_NUM_THREADS` the same value unless you set them too. OpenBLAS reads its own variable
 before `OMP_NUM_THREADS`, and PyTorch lets `MKL_NUM_THREADS` override it, so a different value
-there would undo yours. Your `OMP_NUM_THREADS` wins everywhere: a nested `hold` and a shim
-lowering the lease's count leave it, and the two copied from it, at your value. Your own
+there would undo yours. Your `OMP_NUM_THREADS` wins for the OpenMP and BLAS variables: a
+nested `hold` and a shim lowering the lease's count leave it, and the two copied from it, at
+your value. Your own
 `OPENBLAS_NUM_THREADS` or `MKL_NUM_THREADS` is left alone and copied nowhere. When your
 `OMP_NUM_THREADS` is not a plain count (`4,2`), it is not copied, and an enclosing lease's count
 in the other two stays. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are always the counts leasehold

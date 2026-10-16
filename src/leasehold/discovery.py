@@ -1,9 +1,11 @@
 """How a client finds the daemon to talk to.
 
-Named sockets are used as given and fail fast: `--socket`, then `$LEASEHOLD_SOCKET`, then the
-socket of a config named by `--config` or `$LEASEHOLD_CONFIG` (its `socket`, or its mode's
-default socket; a named config that cannot be read is an error, never a reason to look
-elsewhere). Otherwise the client tries the
+Named sockets are used as given and fail fast: `--socket`, then the socket of a config named
+by `--config`, then `$LEASEHOLD_SOCKET`, then the socket of a config named by
+`$LEASEHOLD_CONFIG`. A flag outranks the environment, so a command run inside `hold` (which
+exports `LEASEHOLD_SOCKET`) can still name another daemon. A config's socket is its `socket`,
+or its mode's default socket; a named config that cannot be read is an error, never a reason
+to look elsewhere. Otherwise the client tries the
 system daemon's socket, then the user's own, and takes the first that answers: a socket file
 that exists is not enough (it may be stale, or another user's). `leasehold doctor` prints every
 candidate and why it was taken or passed over.
@@ -92,11 +94,15 @@ def candidates(
     answers, is the one to use (`choose`)."""
     if socket:
         return [Candidate(Path(socket), "--socket", None, "named on the command line")]
+    if config:
+        return [
+            Candidate(named_socket(Path(config), env), f"config {config}", None, "its daemon's")
+        ]
     if env.get(ENV_SOCKET):
         return [
             Candidate(Path(env[ENV_SOCKET]), f"${ENV_SOCKET}", None, "named in the environment")
         ]
-    named = config or env.get(paths.ENV_CONFIG)
+    named = env.get(paths.ENV_CONFIG)
     if named:
         return [Candidate(named_socket(Path(named), env), f"config {named}", None, "its daemon's")]
     found = []
