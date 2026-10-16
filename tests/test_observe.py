@@ -10,7 +10,7 @@ import sys
 import uuid
 
 import pytest
-from support import FACTS, Clock, FakeLoad, cli, machine_config
+from support import FACTS, Clock, FakeLoad, Orphan, cli, machine_config
 
 from leasehold import proctable
 from leasehold.agent import AcquireRequest, MachineAgent
@@ -159,7 +159,7 @@ def prep():
     """A real process that looks like a data-prep run, under a name nothing else on the machine
     has (not even the shell that started these tests), so it is a root."""
     marker = f"prep_{uuid.uuid4().hex[:12]}.py"
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", marker])
+    child = Orphan([sys.executable, "-c", "import time; time.sleep(60)", marker])
     child.marker = marker
     try:
         yield child

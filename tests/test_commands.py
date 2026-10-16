@@ -3,10 +3,12 @@ line, the rules, their config, and the rules a daemon serves."""
 
 from __future__ import annotations
 
-import pytest
-from support import machine_config
+import json
 
-from leasehold import shell
+import pytest
+from support import CHILD_ENV, cli, machine_config
+
+from leasehold import jobs, shell
 from leasehold.client import Client
 from leasehold.commands import CommandSettings, match
 from leasehold.shell import programs
@@ -118,17 +120,171 @@ def test_a_rule_gives_its_processes_jobs_threads_or_a_count():
             threads(bad)
 
 
-def test_pytest_workers_get_one_thread_each_and_builds_the_job_count():
-    rules = {r.programs[0]: r for _src, r in CommandSettings().rules()}
-    assert rules["pytest"].threads == 1
-    assert rules["cargo"].threads == rules["make"].threads == "jobs"
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -n 4", "pytest -n4", "pytest -n=4", "pytest -nauto", "pytest --numprocesses=auto",
+     "pytest -x --numprocesses 3 tests", "py.test -n logical", "uv run pytest -n auto",
+     "python -m pytest -n 2"],
+)  # fmt: skip
+def test_an_xdist_run_gets_one_thread_per_worker(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.threads, found.rule.weight) in {
+        ("pytest", 1, 4), ("py.test", 1, 4),
+    }  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "command", ["pytest", "pytest -n 0", "pytest -k n", "pytest --no-header", "tox", "nox"]
+)
+def test_a_serial_run_and_tox_and_nox_get_the_job_count(command):
+    assert match(DEFAULTS, command).rule.threads == "jobs"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -k '-n 4'", "pytest -- -n 4", "pytest -n 0 tests"],
+)
+def test_xdist_options_are_read_as_arguments_not_as_text(command):
+    assert match(DEFAULTS, command).rule.threads == "jobs"
+
+
+@pytest.mark.parametrize("command", ["pytest -vn 4", "pytest -xn4", "uv run --with x pytest -n2"])
+def test_combined_short_flags_and_runner_options_still_find_xdist(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.threads) == ("pytest", 1)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["uvx --with pytest-xdist pytest -n 2", "uvx --from pytest pytest -n2",
+     "uv tool run --with x pytest -n 2", "python -X dev -m pytest -n 2",
+     "python3 -W error -m pytest -n 2", "python -O -u -I -m pytest -n 2",
+     "python -uXdev -m pytest -n 2", "python -mpytest -n 2"],
+)  # fmt: skip
+def test_uvx_and_python_options_before_m_still_find_pytest(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.threads) == ("pytest", 1)
+
+
+@pytest.mark.parametrize(
+    "command", ["python -c 'import pytest' -m pytest -n 2", "python script.py -m pytest -n 2"]
+)
+def test_python_running_a_script_or_a_command_is_not_pytest(command):
+    found = match(DEFAULTS, command)
+    assert found is None or found.program != "pytest"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["pytest --cov -n auto", "pytest --cov -n 4 tests", "pytest --pyargs -n 4 pkg",
+     "pytest -d --tx 4*popen", "pytest --maxfail 3 -n 2"],
+)  # fmt: skip
+def test_an_option_never_takes_a_following_option_as_its_value(command):
+    assert match(DEFAULTS, command).rule.threads == 1
+
+
+@pytest.mark.parametrize("command", ["pytest --maxfail -n 2", "pytest -k '-n 4' -n 2"])
+def test_an_option_missing_its_value_is_a_run_pytest_refuses(command):
+    assert match(DEFAULTS, command).rule.threads == "jobs"
+
+
+def test_uv_run_options_that_take_a_value_are_not_the_program():
+    words = list(shell.programs("uv run --with numpy -p 3.12 --group dev pytest -x"))
+    assert words == [("pytest", ["-x"])]
+    assert list(shell.programs("uv run --frozen -- pytest")) == [("pytest", [])]
+
+
+@pytest.mark.parametrize(
+    ("line", "threads"),
+    [
+        ("pytest -n 4; pytest -n 2", "jobs/4"),
+        ("pytest -n 4; pytest -n2 x", "jobs/4"),
+        ("pytest -n auto; pytest -n 2", 1),
+        ("cargo test && pytest -n auto", 1),
+        ("cargo test && pytest -n 4", "jobs/4"),
+        ("pytest -n 4 && pytest", "jobs/4"),
+        ("cargo test && make", "jobs"),
+        ("ls -l", None),
+    ],
+)
+def test_a_line_of_several_programs_takes_the_fewest_threads_any_of_them_allows(line, threads):
+    """No program on the line runs more threads per process than its own rule gives it."""
+    assert shell.threads(DEFAULTS.shell_rules(), list(shell.programs(line))) == threads
+
+
+def test_a_rule_with_a_count_lowers_a_share_of_the_jobs():
+    rules = [shell.Rule.of({"programs": ["tool"], "weight": 1, "threads": 3}),
+             *DEFAULTS.shell_rules()]  # fmt: skip
+    found = shell.threads(rules, list(shell.programs("tool; pytest -n 2")))
+    assert found == "jobs/2:3"
+    assert jobs.thread_count(found, 16) == 3 and jobs.thread_count(found, 4) == 2
+
+
+@pytest.mark.parametrize(
+    ("found", "threads"),
+    [([("pytest", ["-n", "4"])], "jobs/4"), ([("pytest", ["-n", "auto"])], 1),
+     ([("pytest", [])], None), ([("make", []), ("pytest", ["-n", "2"])], "jobs/2")],
+)  # fmt: skip
+def test_a_pytest_run_no_rule_names_still_shares_the_jobs_among_its_workers(found, threads):
+    assert shell.threads([], found) == threads
+
+
+_OWN_PYTEST = shell.Rule.of({"programs": ["pytest"], "weight": 2, "source": "config"})
+
+
+@pytest.mark.parametrize(
+    ("own", "line", "threads"),
+    [
+        (_OWN_PYTEST, "pytest -n auto", 1),
+        (_OWN_PYTEST, "pytest -n 4", "jobs/4"),
+        (_OWN_PYTEST, "pytest -n auto --maxprocesses 3", "jobs/3"),
+        (_OWN_PYTEST, "pytest", "jobs"),
+        (_OWN_PYTEST, "cargo test && pytest -n 4", "jobs/4"),
+        (_OWN_PYTEST, "cargo test && pytest -n auto", 1),
+        (shell.Rule.of({"programs": ["pytest"], "weight": 2, "threads": 3}), "pytest -n 2",
+         "jobs/2:3"),
+        (shell.Rule.of({"programs": ["pytest"], "weight": 2, "threads": 8}), "pytest -n auto", 1),
+    ],
+)  # fmt: skip
+def test_a_config_rule_for_pytest_still_shares_the_jobs_among_its_workers(own, line, threads):
+    """Whatever rule a pytest run matches, its workers share the job count; the rule's own
+    `threads` can only lower that."""
+    rules = [own, *DEFAULTS.shell_rules()]
+    assert shell.match_programs(rules, list(shell.programs(line))).rule.source == "config"
+    assert shell.threads(rules, list(shell.programs(line))) == threads
+
+
+@pytest.mark.parametrize(
+    ("line", "threads"),
+    [("tool", "jobs/4:2"), ("tool; pytest -n 8", "jobs/8:2"), ("tool; other", 1),
+     ("tool; cargo test", "jobs/4:2")],
+)  # fmt: skip
+def test_a_served_share_with_a_limit_is_read_whole(line, threads):
+    rules = [shell.Rule.of({"programs": ["tool"], "weight": 1, "threads": "jobs/4:2"}),
+             shell.Rule.of({"programs": ["other"], "weight": 1, "threads": 1}),
+             *DEFAULTS.shell_rules()]  # fmt: skip
+    assert shell.threads(rules, list(shell.programs(line))) == threads
+
+
+def test_builds_get_the_job_count():
+    rules = [r for _src, r in CommandSettings().rules()]
+    assert all(r.threads == "jobs" for r in rules if r.programs[0] != "pytest" or not r.args)
 
 
 def test_a_rule_served_without_threads_gives_the_job_count():
     """A daemon older than the setting serves rules without it."""
     assert shell.Rule.of({"programs": ["pytest"], "weight": 4}).threads == "jobs"
     assert shell.Rule.of({"programs": ["x"], "weight": 1, "threads": 2}).threads == 2
-    assert shell.Rule.of({"programs": ["x"], "weight": 1, "threads": 0}).threads == "jobs"
+    assert shell.Rule.of({"programs": ["x"], "weight": 1, "threads": "jobs"}).threads == "jobs"
+
+
+@pytest.mark.parametrize(
+    ("served", "threads"),
+    [("jobs/4", "jobs/4"), ("jobs/4:2", "jobs/4:2"), ("jobs/0", 1), ("jobs/x", 1),
+     ("jobs/4:", 1), ("half", 1), (0, 1), (True, 1), (2.5, 1)],
+)  # fmt: skip
+def test_a_served_share_is_kept_and_anything_unknown_gives_one_thread(served, threads):
+    assert shell.Rule.of({"programs": ["x"], "weight": 1, "threads": served}).threads == threads
 
 
 def test_the_daemon_serves_rules_its_pools_can_grant(daemon):
@@ -139,7 +295,8 @@ def test_the_daemon_serves_rules_its_pools_can_grant(daemon):
     assert all(r["pool"] == "work" and 1 <= r["weight"] <= 2 for r in answer["rules"])
     served = shell.served(answer)
     assert shell.match(served.rules, "uv run pytest").rule.weight == 2
-    assert shell.match(served.rules, "uv run pytest").rule.threads == 1
+    assert shell.match(served.rules, "uv run pytest -n 2").rule.threads == 1
+    assert shell.match(served.rules, "uv run pytest").rule.threads == "jobs"
     assert shell.match(served.rules, "cargo build").rule.threads == "jobs"
     assert all("threads" in r for r in answer["rules"])
 
@@ -205,3 +362,43 @@ def test_the_built_in_weights_come_from_the_config():
     assert [template.weights(n) for n in (1, 3, 4, 6, 14)] == [
         (1, 1), (3, 2), (2, 1), (3, 2), (7, 4),
     ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["uv --directory p run pytest -n 2", "uv --project p run pytest -n 2", "uv -q run pytest -n 2",
+     "uv --color never --offline run pytest -n 2", "uv --directory=p run --with x pytest -n 2",
+     "uv --cache-dir /c tool run pytest -n 2", "python3.13t -m pytest -n 2",
+     "python3t -m pytest -n 2", "pypy3 -m pytest -n 2", "pypy -m pytest -n 2",
+     "python3.13.1 -m pytest -n 2", "/usr/bin/python3.12.7t -m pytest -n 2"],
+)  # fmt: skip
+def test_uvs_global_options_and_more_pythons_still_find_pytest(command):
+    found = match(DEFAULTS, command)
+    assert (found.program, found.rule.weight) == ("pytest", 4)
+
+
+def test_uvs_directory_is_where_the_config_is_read(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "pytest.ini").write_text("[pytest]\naddopts = -n 2\n")
+    rules = DEFAULTS.shell_rules()
+    for command in ("uv --directory sub run pytest", "uv run --directory sub pytest",
+                    "uv --directory=sub run pytest"):  # fmt: skip
+        found = list(shell.programs(command))
+        assert shell.threads(rules, found, env={}, cwd=tmp_path) == "jobs/2", command
+    assert shell.threads(rules, list(shell.programs("uv run pytest")), env={}, cwd=tmp_path) == (
+        "jobs"
+    )
+
+
+def test_testing_a_line_reports_the_threads_hold_would_give_it(daemon, tmp_path):
+    env = {**CHILD_ENV, "PYTEST_ADDOPTS": ""}
+    text = cli(daemon.path, "commands", "--test", "cargo test && pytest -n 2", cwd=tmp_path,
+               env=env)  # fmt: skip
+    assert text.returncode == 0, text.stderr
+    assert "threads per process: the job count divided by 2" in text.stdout
+    done = cli(daemon.path, "commands", "--test", "cargo test && pytest -n 2", "--json",
+               cwd=tmp_path, env=env)  # fmt: skip
+    assert json.loads(done.stdout)["threads"] == "jobs/2"
+    (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = -n auto\n")
+    auto = cli(daemon.path, "commands", "--test", "pytest", "--json", cwd=tmp_path, env=env)
+    assert json.loads(auto.stdout)["threads"] == 1

@@ -4,15 +4,20 @@ a lease, and passes straight through whenever it should."""
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 from support import CHILD_ENV, FACTS, FakeLoad, cli, machine_config
 
-from leasehold import shims
+from leasehold import jobs, shims
 from leasehold.agent import MachineAgent
+from leasehold.client import Client
+from leasehold.commands import CommandSettings
 from leasehold.server import Daemon
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +76,195 @@ def test_a_matching_run_gets_a_lease_sized_to_its_rule(setup):
     assert done.returncode == 0, done.stderr
     assert "weight=2 jobs=2 omp=1 args=build --release" in done.stdout  # the rule's threads
     assert "lease=none" not in done.stdout
+
+
+def test_a_pytest_shim_under_a_lease_gives_its_xdist_workers_one_thread(tmp_path, sock_dir):
+    """`hold -- make test` running `pytest -n 2`: no second lease, the lease's job count, and
+    the xdist rule's one thread; a value the user set survives."""
+    config = machine_config(tmp_path, socket=str(sock_dir / "p.sock"))
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    real, shim_dir = tmp_path / "bin", tmp_path / "shims"
+    real.mkdir()
+    (real / "pytest").write_text(
+        '#!/bin/sh\necho "$LEASEHOLD_LEASE_ID $PYTEST_XDIST_AUTO_NUM_WORKERS $OMP_NUM_THREADS '
+        '$LEASEHOLD_THREADS"\n'
+    )
+    (real / "pytest").chmod(0o755)
+    shims.install(shim_dir, ["pytest"], python=sys.executable)
+    env = {
+        "PATH": f"{shim_dir}:{real}:/usr/bin:/bin",
+        "PYTHONPATH": str(ROOT / "src"),
+        "HOME": str(tmp_path),
+        "LEASEHOLD_SOCKET": str(daemon.path),
+    }
+
+    def under_lease(script: str, **extra: str) -> list[str]:
+        argv = [sys.executable, "-m", "leasehold", "--socket", str(daemon.path), "hold",
+                "--weight", "2", "--threads", "jobs", "--", "sh", "-c", script]  # fmt: skip
+        done = subprocess.run(
+            argv, env=env | extra, capture_output=True, text=True, timeout=30, check=False,
+            cwd=tmp_path,
+        )  # fmt: skip
+        assert done.returncode == 0, done.stderr
+        return done.stdout.split()
+
+    try:
+        lease, workers, omp, threads = under_lease("pytest -n 2")
+        assert lease != "" and (workers, omp, threads) == ("2", "1", "1")
+        assert under_lease("pytest")[1:] == ["2", "2", "2"]  # serial: the lease's own
+        assert under_lease("pytest -n 2", OMP_NUM_THREADS="6")[1:] == ["2", "6", "1"]
+        exported = under_lease("export OMP_NUM_THREADS=3; pytest -n 2")
+        assert exported[1:] == ["2", "3", "1"]  # set inside the lease: the user's
+        assert under_lease("OMP_NUM_THREADS=3 pytest -n 2")[1:] == ["2", "3", "1"]
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "pytest.ini").write_text("[pytest]\naddopts = -n 2\n")
+        lease, workers, omp, threads = under_lease("cd project && pytest")
+        assert (workers, omp, threads) == ("2", "1", "1")  # xdist from the config
+        done = subprocess.run(
+            ["pytest"], env=env, cwd=project, capture_output=True, text=True, timeout=30
+        )
+        lease, workers, omp, threads = done.stdout.split()  # its own lease, sized by the config
+        assert lease != "" and omp == "1", done.stderr
+        assert len(Client(daemon.path).leases()["leases"]) == 0
+    finally:
+        daemon.stop()
+
+
+def _leased(**extra: str) -> dict[str, str]:
+    """An environment as a lease of 4 jobs leaves it, with `extra`."""
+    return jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer", "PATH": "/bin"}, 4) | extra
+
+
+def test_within_a_lease_a_daemon_that_never_answers_costs_under_a_second(tmp_path):
+    path = tmp_path / "silent.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(4)
+    try:
+        env = _leased(LEASEHOLD_SOCKET=str(path))
+        started = time.monotonic()
+        assert shims.within_lease("pytest", ["-n", "2"], env) == env
+        assert time.monotonic() - started < 1.0
+    finally:
+        server.close()
+
+
+class _Served:
+    def __init__(self, answer) -> None:
+        self.answer, self.asked = answer, 0
+
+    def __call__(self, *_args, **_kw):
+        return self
+
+    def commands(self):
+        self.asked += 1
+        return self.answer
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"rules": [{"programs": 5, "weight": 1}]}, {"rules": [{"weight": "x"}]}, {"rules": None},
+     {"rules": [{"programs": ["pytest"], "weight": 1, "args": "("}]}, []],
+)  # fmt: skip
+def test_within_a_lease_malformed_rules_run_the_program_as_it_is(monkeypatch, answer):
+    monkeypatch.setattr(shims, "Client", _Served(answer))
+    env = _leased(LEASEHOLD_SOCKET="/nonexistent")
+    assert shims.within_lease("pytest", ["-n", "2"], env) == env
+
+
+def test_within_a_lease_of_one_thread_the_daemon_is_not_asked(monkeypatch):
+    served = _Served({"rules": [], "wait_s": 1, "when_busy": "deny"})
+    monkeypatch.setattr(shims, "Client", served)
+    one = jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer"}, 4, threads=1)
+    assert shims.within_lease("pytest", ["-n", "2"], one | {"LEASEHOLD_SOCKET": "/x"})
+    assert served.asked == 0
+    shims.within_lease("pytest", ["-n", "2"], _leased(LEASEHOLD_SOCKET="/x"))
+    assert served.asked == 1
+
+
+def _defaults() -> dict:
+    """The built-in rules, as a daemon serves them."""
+    rules = CommandSettings().rules()
+    return {
+        "rules": [rule.model_dump() | {"pool": "cpu", "source": src} for src, rule in rules],
+        "wait_s": 1,
+        "when_busy": "deny",
+    }
+
+
+@pytest.mark.parametrize("omp", ["1", "6"])
+def test_within_a_lease_each_thread_variable_is_lowered_and_never_raised(
+    monkeypatch, tmp_path, omp
+):
+    """The user's OMP_NUM_THREADS below and above the lease's 4 threads."""
+    monkeypatch.setattr(shims, "Client", _Served(_defaults()))
+    monkeypatch.chdir(tmp_path)
+    base = {"LEASEHOLD_LEASE_ID": "outer", "OMP_NUM_THREADS": omp, "LEASEHOLD_SOCKET": "/x"}
+    workers = shims.within_lease("pytest", ["-n", "auto"], jobs.sized_env(base, 4))
+    assert workers["GOMAXPROCS"] == workers["LOKY_MAX_CPU_COUNT"] == "1"
+    assert workers["RAYON_NUM_THREADS"] == workers["LEASEHOLD_THREADS"] == "1"
+    assert workers["OMP_NUM_THREADS"] == omp
+    serial = shims.within_lease("pytest", [], jobs.sized_env(base, 4, threads=1))
+    assert serial["GOMAXPROCS"] == serial["RAYON_NUM_THREADS"] == "1"
+
+
+def _finishes(work, seconds: float = 5.0):
+    """`work()`'s result, failing the test when it takes longer than `seconds`."""
+    done: list = []
+    thread = threading.Thread(target=lambda: done.append(work()), daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert done, "still running"
+    return done[0]
+
+
+def test_within_a_lease_no_directory_or_config_stops_the_program(monkeypatch, tmp_path):
+    monkeypatch.setattr(shims, "Client", _Served(_defaults()))
+    env = _leased(LEASEHOLD_SOCKET="/x")
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    for config in (str(fifo), "/dev/zero"):
+        out = _finishes(lambda c=config: shims.within_lease("pytest", ["-c", c], env))
+        assert out["GOMAXPROCS"] == "4"
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert shims.within_lease("pytest", [], env)["GOMAXPROCS"] == "4"
+    assert shims.within_lease("pytest", ["-n", "auto"], env)["GOMAXPROCS"] == "1"
+    assert shims.within_lease("pytest", ["-n", "2"], env)["GOMAXPROCS"] == "2"
+
+
+def test_a_fault_sizing_threads_runs_the_program_as_it_is(monkeypatch):
+    monkeypatch.setattr(shims, "Client", _Served(_defaults()))
+
+    def broken(*_args, **_kw):
+        raise RecursionError("anything at all")
+
+    monkeypatch.setattr(shims.shell, "threads", broken)
+    env = _leased(LEASEHOLD_SOCKET="/x")
+    assert shims.within_lease("pytest", ["-n", "2"], env) == env
+    assert shims._threads([], "pytest", [], env) is None
+
+
+def test_at_one_thread_the_users_omp_still_reaches_the_blas_variables(monkeypatch):
+    """No daemon is asked at one thread, and the user's own OMP_NUM_THREADS still wins."""
+    monkeypatch.setattr(shims, "Client", None)  # never constructed
+    lease = jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer", "LEASEHOLD_SOCKET": "/x"}, 4, 1)
+    env = shims.within_lease("pytest", ["-n", "auto"], lease | {"OMP_NUM_THREADS": "8"})
+    assert env["OMP_NUM_THREADS"] == env["OPENBLAS_NUM_THREADS"] == env["MKL_NUM_THREADS"] == "8"
+    assert env["GOMAXPROCS"] == env["LEASEHOLD_THREADS"] == "1"
+
+
+def test_a_shim_divides_the_leases_jobs_among_its_workers(monkeypatch, tmp_path):
+    monkeypatch.setattr(shims, "Client", _Served(_defaults()))
+    monkeypatch.chdir(tmp_path)
+    env = jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer", "LEASEHOLD_SOCKET": "/x"}, 8)
+    assert shims.within_lease("pytest", ["-n", "4"], env)["GOMAXPROCS"] == "2"
+    assert shims.within_lease("pytest", ["-n", "1"], env)["GOMAXPROCS"] == "8"
+    assert shims.within_lease("pytest", ["-n", "16"], env)["GOMAXPROCS"] == "1"
 
 
 def test_it_passes_through_when_it_should(setup):
@@ -241,5 +435,38 @@ def test_a_refused_run_exits_77_without_running_the_program(tmp_path, sock_dir):
         assert done.stdout == ""  # the program never ran
         assert "not running fakebuild: refused:" in done.stderr
         assert "per-user limit" in done.stderr
+    finally:
+        daemon.stop()
+
+
+def test_the_users_omp_wins_in_a_shim_as_in_hold(tmp_path, sock_dir):
+    """`OMP_NUM_THREADS=8 hold -- pytest -n 4` through the pytest shim: the user's 8 stays in
+    OMP_NUM_THREADS and the two BLAS variables copied from it, and the rest is shared."""
+    config = machine_config(tmp_path, socket=str(sock_dir / "o.sock"), jobs={"per_slot": 4})
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    real, shim_dir = tmp_path / "bin", tmp_path / "shims"
+    real.mkdir()
+    (real / "pytest").write_text(
+        '#!/bin/sh\necho "$OMP_NUM_THREADS $OPENBLAS_NUM_THREADS $MKL_NUM_THREADS '
+        '$RAYON_NUM_THREADS"\n'
+    )
+    (real / "pytest").chmod(0o755)
+    shims.install(shim_dir, ["pytest"], python=sys.executable)
+    env = {
+        "PATH": f"{shim_dir}:{real}:/usr/bin:/bin",
+        "PYTHONPATH": str(ROOT / "src"),
+        "HOME": str(tmp_path),
+        "LEASEHOLD_SOCKET": str(daemon.path),
+        "OMP_NUM_THREADS": "8",
+    }
+    argv = [sys.executable, "-m", "leasehold", "--socket", str(daemon.path), "hold",
+            "--weight", "2", "--", "pytest", "-n", "4"]  # fmt: skip
+    try:
+        done = subprocess.run(
+            argv, env=env, capture_output=True, text=True, timeout=30, check=False, cwd=tmp_path
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.split() == ["8", "8", "8", "2"]
     finally:
         daemon.stop()

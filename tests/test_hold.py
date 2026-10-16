@@ -11,6 +11,7 @@ import fcntl
 import http.server
 import json
 import os
+import shlex
 import signal
 import socketserver
 import subprocess
@@ -22,13 +23,15 @@ import time
 from pathlib import Path
 
 import pytest
-from support import CHILD_ENV, until
+from support import CHILD_ENV, FACTS, FakeLoad, machine_config, until
 
 from leasehold import hold as hold_module
 from leasehold import jobs
+from leasehold.agent import MachineAgent
 from leasehold.client import ApiError, Client
 from leasehold.exits import EXIT_BUSY, EXIT_REFUSED, EXIT_REVOKED, EXIT_UNAVAILABLE
 from leasehold.hold import waiting_line
+from leasehold.server import Daemon
 
 
 def hold(sock: Path, *args: str, wait: bool = True, **kw) -> subprocess.Popen:
@@ -240,8 +243,8 @@ def test_with_no_weight_hold_weighs_the_command_as_the_commands_rules_do(daemon,
 def test_thread_pools_get_the_rules_threads_or_the_flags_and_worker_counts_the_jobs(
     daemon, tmp_path
 ):
-    """The built-in pytest rule gives each worker one thread; `--threads` overrides it; a
-    variable already set is left alone."""
+    """The built-in xdist rule gives each worker one thread, a serial pytest the job count;
+    `--threads` overrides it; a variable the user set is left alone, with its family."""
     probe = '#!/bin/sh\necho "$PYTEST_XDIST_AUTO_NUM_WORKERS $OMP_NUM_THREADS $LEASEHOLD_THREADS"\n'
     for name in ("pytest", "other"):
         (tmp_path / name).write_text(probe)
@@ -255,13 +258,198 @@ def test_thread_pools_get_the_rules_threads_or_the_flags_and_worker_counts_the_j
 
     pytest_, other = str(tmp_path / "pytest"), str(tmp_path / "other")
     assert sizes("--", pytest_, "-n", "auto") == "2 1 1"  # weight 4, cut to 2 jobs
-    assert sizes("--weight", "2", "--", pytest_) == "2 1 1"  # the rule's threads still
-    assert sizes("--threads", "jobs", "--", pytest_) == "2 2 2"
+    assert sizes("--weight", "2", "--", pytest_, "-n4") == "2 1 1"  # the rule's still
+    assert sizes("--", pytest_) == "2 2 2"  # serial
+    assert sizes("--threads", "jobs", "--", pytest_, "-n", "2") == "2 2 2"
     assert sizes("--weight", "2", "--", other) == "2 2 2"  # no rule: the job count
     assert sizes("--weight", "2", "--threads", "1", "--", other) == "2 1 1"
-    assert sizes("--", pytest_, OMP_NUM_THREADS="6") == "2 6 1"  # the user's own wins
+    assert sizes("--", pytest_, "-n2", OMP_NUM_THREADS="6") == "2 6 1"  # the user's wins
     bad = hold(daemon.path, "--threads", "0", "--", other)
     assert bad.returncode == 2 and "count of at least 1" in bad.stderr.read()
+
+
+@pytest.fixture
+def roomy(tmp_path, sock_dir):
+    """A daemon on the small machine with 4 jobs per slot, so leases of weight 1 nest."""
+    config = machine_config(tmp_path, socket=str(sock_dir / "r.sock"), jobs={"per_slot": 4})
+    d = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    d.start()
+    try:
+        yield d
+    finally:
+        d.stop()
+
+
+def test_a_hold_inside_a_hold_sizes_to_its_own_lease_but_never_over_the_user(roomy, tmp_path):
+    probe = tmp_path / "probe"
+    probe.write_text('#!/bin/sh\necho "$CARGO_BUILD_JOBS $OMP_NUM_THREADS $MKL_NUM_THREADS"\n')
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold"]
+
+    def nested(outer: str, inside: str, **extra: str) -> str:
+        proc = hold(
+            roomy.path, "--weight", "1", "--threads", outer, "--",
+            *inner, "--weight", "1", "--threads", inside, "--", str(probe),
+            stdout=subprocess.PIPE, env=env | extra,
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().strip()
+
+    assert nested("2", "1") == "4 1 1"
+    assert nested("1", "3") == "4 3 3"
+    assert nested("2", "1", OMP_NUM_THREADS="6") == "4 6 6"  # the user's, MKL beside it
+    assert nested("2", "1", CARGO_BUILD_JOBS="9") == "9 1 1"
+
+
+def test_a_value_the_user_sets_inside_a_lease_survives_a_hold_inside_it(roomy, tmp_path):
+    probe = tmp_path / "probe"
+    probe.write_text('#!/bin/sh\necho "$OMP_NUM_THREADS $MKL_NUM_THREADS $LEASEHOLD_THREADS"\n')
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = shlex.join(
+        [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold", "--weight",
+         "1", "--threads", "1", "--", str(probe)]
+    )  # fmt: skip
+
+    def outer(script: str) -> str:
+        proc = hold(
+            roomy.path, "--weight", "1", "--threads", "2", "--", "sh", "-c", script,
+            stdout=subprocess.PIPE, env=env,
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().strip()
+
+    assert outer(inner) == "1 1 1"
+    assert outer(f"export OMP_NUM_THREADS=3; {inner}") == "3 3 1"
+    assert outer(f"OMP_NUM_THREADS=3 {inner}") == "3 3 1"
+    assert outer(f"unset OMP_NUM_THREADS; {inner}") == "1 1 1"  # unset: set again
+
+
+def test_no_job_env_passes_on_no_sizing_from_an_enclosing_lease(roomy, tmp_path):
+    probe = tmp_path / "probe"
+    probe.write_text(
+        '#!/bin/sh\necho "${LEASEHOLD_SET:-none} ${LEASEHOLD_JOBS:-none} '
+        "${LEASEHOLD_THREADS:-none} ${OMP_NUM_THREADS:-none} ${GOMAXPROCS:-none} "
+        '${CARGO_BUILD_JOBS:-none} ${RAYON_NUM_THREADS:-none}"\n'
+    )
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = [sys.executable, "-m", "leasehold", "--socket", str(roomy.path), "hold"]
+
+    def run(**extra: str) -> list[str]:
+        proc = hold(
+            roomy.path, "--weight", "1", "--", *inner, "--weight", "1", "--no-job-env", "--",
+            str(probe), stdout=subprocess.PIPE, env=env | extra,
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().split()
+
+    assert run() == ["none"] * 7  # every variable the enclosing lease set is gone
+    assert run(GOMAXPROCS="3") == ["none"] * 4 + ["3"] + ["none"] * 2  # the user's stays
+
+
+@pytest.fixture
+def wide(tmp_path, sock_dir):
+    """A daemon on the small machine with 8 jobs per slot."""
+    config = machine_config(tmp_path, socket=str(sock_dir / "w.sock"), jobs={"per_slot": 8})
+    d = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    d.start()
+    try:
+        yield d
+    finally:
+        d.stop()
+
+
+@pytest.mark.parametrize("omp", ["1", "6"])
+def test_a_hold_inside_a_lease_sizes_to_its_own_lease(wide, tmp_path, omp):
+    """A nested hold takes a lease of its own, so its own job count and rules size it, larger
+    or smaller than the lease around it, with the user's OMP_NUM_THREADS below or above."""
+    probe = tmp_path / "pytest"
+    probe.write_text(
+        '#!/bin/sh\necho "$GOMAXPROCS $RAYON_NUM_THREADS $LEASEHOLD_THREADS $OMP_NUM_THREADS"\n'
+    )
+    probe.chmod(0o755)
+    env = {k: v for k, v in CHILD_ENV.items() if k not in jobs.JOB_VARIABLES}
+    inner = [sys.executable, "-m", "leasehold", "--socket", str(wide.path), "hold", "--weight",
+             "1", "--", str(probe)]  # fmt: skip
+
+    def outer(threads: str, *args: str) -> str:
+        proc = hold(
+            wide.path, "--weight", "1", "--threads", threads, "--", *inner, *args,
+            stdout=subprocess.PIPE, env=env | {"OMP_NUM_THREADS": omp},
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.read()
+        return proc.stdout.read().strip()
+
+    assert outer("1") == f"8 8 8 {omp}"  # one thread outside, 8 jobs of its own inside
+    assert outer("1", "-n", "auto") == f"1 1 1 {omp}"  # xdist workers: one thread each
+    assert outer("jobs", "-n", "4") == f"2 2 2 {omp}"  # 8 jobs shared by 4 workers
+
+
+def test_auto_size_reads_the_command_line_as_the_hooks_do(daemon):
+    client = Client(daemon.path)
+    rule = hold_module.auto_size(client, ["uv", "run", "pytest", "-n", "auto"])
+    assert (rule.weight, rule.threads) == (2, 1)
+    rule = hold_module.auto_size(client, ["python3", "-m", "pytest", "-n4"])
+    assert (rule.weight, rule.threads) == (2, "jobs/4")  # the job count shared by 4 workers
+    assert hold_module.auto_size(client, ["python3", "-m", "pytest"]).threads == "jobs"
+    assert hold_module.auto_size(client, ["true"]).weight == 1
+    rule = hold_module.auto_size(client, ["uv", "run", "--with", "numpy", "pytest", "-n4"])
+    assert rule.threads == "jobs/4"
+
+
+def test_a_command_line_of_several_programs_takes_the_fewest_threads_any_allows(daemon):
+    client = Client(daemon.path)
+    mixed = hold_module.auto_size(client, ["sh", "-c", "cargo test && pytest -n 4"])
+    assert (mixed.weight, mixed.threads) == (2, "jobs/4")
+    both = hold_module.auto_size(client, ["sh", "-c", "pytest -n 4 tests/a; pytest -n2 tests/b"])
+    assert both.threads == "jobs/4"
+    auto = hold_module.auto_size(client, ["sh", "-c", "cargo test && pytest -n auto"])
+    assert auto.threads == 1
+
+
+def test_auto_size_sees_xdist_turned_on_by_the_config_or_pytest_addopts(daemon, tmp_path):
+    client = Client(daemon.path)
+    (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = -n 4\n")
+    found = hold_module.auto_size(client, ["pytest"], env={}, cwd=tmp_path)
+    assert found.threads == "jobs/4"
+    off = hold_module.auto_size(client, ["pytest", "-n", "0"], env={}, cwd=tmp_path)
+    assert off.threads == "jobs"
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "pytest.ini").write_text("[pytest]\n")
+    by_env = hold_module.auto_size(client, ["pytest"], env={"PYTEST_ADDOPTS": "-n2"}, cwd=plain)
+    assert by_env.threads == "jobs/2"
+    assert hold_module.auto_size(client, ["pytest"], env={}, cwd=plain).threads == "jobs"
+
+
+class _Rules:
+    """A client that only counts how often its rules are asked for."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    def commands(self) -> dict:
+        self.asked += 1
+        return {"rules": [], "wait_s": 1, "when_busy": "deny"}
+
+
+def test_a_pytest_run_no_rule_names_still_shares_its_jobs_among_its_workers(tmp_path):
+    found = hold_module.auto_size(_Rules(), ["pytest", "-n", "4"], env={}, cwd=tmp_path)
+    assert (found.weight, found.threads) == (1, "jobs/4")
+    assert hold_module.auto_size(_Rules(), ["pytest"], env={}, cwd=tmp_path).threads == "jobs"
+
+
+def test_a_weight_without_job_variables_never_asks_for_the_rules(monkeypatch):
+    monkeypatch.setattr(hold_module, "wait_for_grant", lambda *a, **k: (EXIT_REFUSED, {}))
+    client = _Rules()
+    assert hold_module.hold(client, ["true"], weight=2, job_env=False) == EXIT_REFUSED
+    assert client.asked == 0
+    assert hold_module.hold(client, ["true"], weight=2) == EXIT_REFUSED
+    assert client.asked == 1  # for the rule's threads
+    assert hold_module.hold(client, ["true"], job_env=False) == EXIT_REFUSED
+    assert client.asked == 2  # for the weight
 
 
 def on_a_terminal(script: str) -> tuple[int, str]:
@@ -528,3 +716,62 @@ def test_a_lost_work_lease_asked_for_again_says_the_answer_once(relay, again, sa
         assert asked_again == 1 and r.count("/v1/renew") == 1, r.asked  # not asked again
     else:
         assert asked_again >= 3, r.asked  # each renewal asks again, keeping the place
+
+
+def _granted() -> dict:
+    return {"grant": "g1", "pool": "work", "weight": 1}
+
+
+@pytest.mark.parametrize("job_env", [True, False])
+def test_with_no_enclosing_lease_nothing_is_taken_for_the_leases(job_env):
+    """A stale or spoofed LEASEHOLD_SET or LEASEHOLD_THREADS, with no LEASEHOLD_LEASE_ID."""
+    exported = hold_module.child_env(
+        "new", _granted(), 4, job_env=job_env, env={"LEASEHOLD_THREADS": "2", "PATH": "/bin"}
+    )
+    assert exported.get("LEASEHOLD_THREADS") == ("4" if job_env else None)
+    stale = {"LEASEHOLD_SET": "OMP_NUM_THREADS=2", "OMP_NUM_THREADS": "2"}
+    env = hold_module.child_env("new", _granted(), 4, job_env=job_env, env=stale)
+    assert env["OMP_NUM_THREADS"] == "2" and env["LEASEHOLD_LEASE_ID"] == "new"
+    if job_env:
+        assert env["OPENBLAS_NUM_THREADS"] == "2"  # the user's value, copied
+    spoof = {"LEASEHOLD_LEASE_ID": "outer", "LEASEHOLD_SET": "SHLVL=2", "SHLVL": "2"}
+    assert hold_module.child_env("new", _granted(), 4, job_env=job_env, env=spoof)["SHLVL"] == "2"
+
+
+def test_a_hold_inside_a_lease_resets_the_leases_variables_to_its_own(roomy):
+    outer = jobs.sized_env({"LEASEHOLD_LEASE_ID": "outer"}, 4, threads=1)
+    inner = hold_module.child_env("new", _granted(), 8, job_env=True, env=outer)
+    assert inner["GOMAXPROCS"] == inner["LEASEHOLD_THREADS"] == "8"
+    smaller = hold_module.child_env("new", _granted(), 2, job_env=True, env=jobs.sized_env(
+        {"LEASEHOLD_LEASE_ID": "outer"}, 8))  # fmt: skip
+    assert smaller["GOMAXPROCS"] == "2"
+
+
+def test_the_socket_hold_was_given_is_the_one_a_nested_client_finds(daemon, tmp_path):
+    """A nested `hold` or shim finds the daemon the outer `hold --socket` used."""
+    script = (
+        "import os, sys\n"
+        f"assert os.environ.get('LEASEHOLD_SOCKET') == {str(daemon.path)!r}, os.environ\n"
+    )
+    env = {k: v for k, v in CHILD_ENV.items() if k != "LEASEHOLD_SOCKET"}
+    proc = hold(daemon.path, "--", sys.executable, "-c", script, env=env)
+    assert proc.returncode == 0, proc.stderr.read()
+
+
+def test_the_socket_a_config_named_is_the_one_a_nested_client_finds(daemon, tmp_path):
+    """`hold --config` finds the daemon through the config; the command gets that socket."""
+    config = tmp_path / "named.toml"
+    config.write_text(f'mode = "user"\nsocket = "{daemon.path}"\n')
+    script = f"import os\nassert os.environ.get('LEASEHOLD_SOCKET') == {str(daemon.path)!r}\n"
+    env = {k: v for k, v in CHILD_ENV.items() if k != "LEASEHOLD_SOCKET"}
+    argv = [sys.executable, "-m", "leasehold", "--config", str(config), "hold", "--",
+            sys.executable, "-c", script]  # fmt: skip
+    done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30, check=False)
+    assert done.returncode == 0, done.stderr
+
+
+def test_a_relative_socket_is_passed_on_made_absolute(tmp_path):
+    env = hold_module.child_env("id", _granted(), 2, job_env=False, env={}, socket="run/s.sock")
+    assert env["LEASEHOLD_SOCKET"] == str(Path.cwd() / "run/s.sock")
+    assert "LEASEHOLD_SOCKET" not in hold_module.child_env("id", _granted(), 2, job_env=False,
+                                                           env={})  # fmt: skip

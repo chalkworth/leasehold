@@ -11,8 +11,11 @@ those.
 A shim passes straight to the real program, with no lease, when one is held already (a
 `make` under a leased `cargo`, any command under `leasehold hold`: `LEASEHOLD_LEASE_ID` is
 set; or an agent hook's lease for this program under this agent, `leasehold.hooknotes`), when
-`LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. A busy machine is
-`[commands] when_busy`'s: wait `wait_s`, then exit 75, or run without a lease. When the daemon
+`LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. Under a lease that
+set the job variables (`jobs.LEASEHOLD_SET`), a program whose own rule gives fewer threads
+(`pytest -n 4` under `hold -- make test`) runs with that thread count (`within_lease`). On a
+busy machine the shim does what `[commands] when_busy` says: wait `wait_s`, then exit 75, or
+run without a lease. When the daemon
 says no (a refusal, an error answer under 500, or a matching rule no lease could ever be
 granted for) the shim exits 77 without running the program; when it cannot answer (an error
 of 500 or more) the program runs without a lease, and the shim says why.
@@ -23,11 +26,12 @@ A shim costs a Python start (about 0.1 s) on every run of its program, `--versio
 from __future__ import annotations
 
 import os
+import re
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import busy, discovery, hooknotes, shell
+from leasehold import busy, discovery, hooknotes, jobs, shell
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, run_leased, wait_for_grant
@@ -149,8 +153,10 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         return EXIT_NOT_STARTED
     argv = command(target, args)
     target = argv[0]
-    if env.get("LEASEHOLD_LEASE_ID") or env.get("LEASEHOLD_SHIMS") == "off":
+    if env.get("LEASEHOLD_SHIMS") == "off":
         os.execv(target, argv)
+    if env.get("LEASEHOLD_LEASE_ID"):  # no second lease, but perhaps fewer threads
+        os.execve(target, argv, within_lease(program, args, env))
     covered = hooknotes.covering(env, program, os.getpid())
     if covered is not None:  # an agent hook holds this command's lease already
         os.execve(target, argv, {**env, "LEASEHOLD_LEASE_ID": covered})
@@ -169,6 +175,7 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     if found is None:
         os.execv(target, argv)
     rule = found.rule
+    threads = _threads(settings.rules, program, args, env) or rule.threads
     if rule.never is not None:
         _say(f"not running {program}: refused: {rule.never}")
         return EXIT_REFUSED
@@ -181,7 +188,7 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
     )
     code, answer = wait_for_grant(client, request, settings.wait_s, _say)
     if code is None:
-        return run_leased(client, argv, request, answer, memory=rule.memory, threads=rule.threads)
+        return run_leased(client, argv, request, answer, memory=rule.memory, threads=threads)
     if code == EXIT_BUSY and settings.when_busy == "deny":
         why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
         _say(f"not running {program}: {why}. {busy.ADVICE}")
@@ -198,6 +205,55 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         _say(f"not running {program}: refused: {why}")
         return EXIT_REFUSED
     os.execv(target, argv)
+
+
+#: What reading the rules inside a lease may raise: no daemon, a daemon that does not answer in
+#: time or answers no, and rows that are not rules.
+_ANY_FAULT = (
+    discovery.DiscoveryError, Unavailable, ApiError, OSError, LookupError, ValueError,
+    TypeError, AttributeError, re.error,
+)  # fmt: skip
+#: How long a shim inside a lease waits for the daemon's rules before running as it is.
+WITHIN_LEASE_TIMEOUT_S = 0.3
+
+
+def _threads(
+    rules: Sequence[shell.Rule], program: str, args: list[str], env: Mapping[str, str]
+) -> int | str | None:
+    """`program`'s thread count by the rules (`shell.threads`), reading a pytest run's config
+    and `PYTEST_ADDOPTS` from the directory it runs in; None when no rule matches or anything
+    fails, so the program still runs."""
+    try:
+        return shell.threads(rules, [(program, args)], env=env, cwd=Path.cwd)
+    except Exception:  # noqa: BLE001 - sizing threads must never stop the program running
+        return None
+
+
+def within_lease(program: str, args: list[str], env: Mapping[str, str]) -> dict[str, str]:
+    """The environment `program` runs with inside a lease already held: `env`, with each thread
+    variable the lease set lowered to the count `program`'s own rule gives (`_threads`,
+    `jobs.resized`) where it is higher; never raised. `OPENBLAS_NUM_THREADS` and
+    `MKL_NUM_THREADS` follow the user's own `OMP_NUM_THREADS` instead, even when it is higher.
+    At a thread count of 1 already, the daemon is not asked and the count stays 1. `env` as it
+    is when the lease recorded no variables, no rule matches, the daemon does not answer with
+    rules within `WITHIN_LEASE_TIMEOUT_S`, or anything else fails."""
+    try:
+        lease_jobs = jobs.count_of(env.get("LEASEHOLD_JOBS"))
+        if not jobs.recorded(env) or lease_jobs is None:
+            return dict(env)
+        if 1 in (lease_jobs, jobs.count_of(env.get("LEASEHOLD_THREADS"))):
+            return jobs.resized(env, 1) or dict(env)
+        try:
+            client = Client(discovery.find(None, None, env), timeout=WITHIN_LEASE_TIMEOUT_S)
+            rules = shell.served(client.commands()).rules
+        except _ANY_FAULT:
+            return dict(env)
+        wanted = _threads(rules, program, args, env)
+        if wanted is None:
+            return dict(env)
+        return jobs.resized(env, wanted) or dict(env)
+    except Exception:  # noqa: BLE001 - whatever goes wrong here, the program runs as it is
+        return dict(env)
 
 
 def _say(message: str) -> None:

@@ -3,6 +3,7 @@ the bits the tests that start real processes share."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -12,6 +13,55 @@ from pathlib import Path
 import pytest
 
 import leasehold
+from leasehold import jobs
+
+
+def outer_lease(name: str) -> bool:
+    """Whether `name` is a variable a lease the tests run inside would set: `LEASEHOLD_*`
+    (except the tests' own `LEASEHOLD_UPDATE_GOLDEN`), the job variables and make's flags.
+    The tests run as if outside any lease."""
+    if name == "LEASEHOLD_UPDATE_GOLDEN":
+        return False
+    return name.startswith("LEASEHOLD_") or name in {
+        *jobs.JOB_VARIABLES,
+        "MAKEFLAGS",
+        "MFLAGS",
+        "CARGO_MAKEFLAGS",
+    }
+
+
+for _name in [n for n in os.environ if outer_lease(n)]:
+    del os.environ[_name]
+
+
+class Orphan:
+    """A process started so that its parent exits at once: it belongs to no ancestor of these
+    tests, so a `leasehold hold` the tests run inside does not count as its own. The observer
+    leaves a process under `hold` alone, so a process it should see starts this way."""
+
+    def __init__(self, argv: list[str]) -> None:
+        started = subprocess.run(
+            ["sh", "-c", '"$@" </dev/null >/dev/null 2>&1 & echo $!', "sh", *argv],
+            capture_output=True, text=True, timeout=10, check=True,
+        )  # fmt: skip
+        self.pid = int(started.stdout)
+
+    def kill(self) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(self.pid, 9)
+
+    def wait(self, timeout: float = 10.0) -> None:
+        """Until the process is gone; its new parent reaps it."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                state = Path(f"/proc/{self.pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except (OSError, IndexError):
+                return
+            if state in ("Z", "X"):
+                return
+            time.sleep(0.02)
+
 
 #: The directory `leasehold` is imported from, for child processes' PYTHONPATH.
 SRC = Path(leasehold.__file__).resolve().parent.parent

@@ -14,10 +14,14 @@ config's `[commands]` (`leasehold.commands`).
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+
+from leasehold import xdist
 
 #: Words that end one simple command and start the next.
 _SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "|&", "(", ")", ";;", "\n"})
@@ -45,6 +49,31 @@ _WRAPPERS: dict[str, tuple[frozenset[str], int]] = {
     "bunx": (frozenset({"-p", "--package"}), 0),
     "pnpx": (frozenset({"-p", "--package"}), 0),
 }
+#: Options of `uv run` that take the next word as their value (`uv run --with X pytest`).
+_UV_RUN_VALUES = frozenset(
+    {
+        "--extra", "--no-extra", "--group", "--no-group", "--only-group", "--env-file",
+        "-w", "--with", "--with-editable", "--with-requirements", "--package",
+        "--no-editable-package", "--python-platform", "--index", "--default-index", "-i",
+        "--index-url", "--extra-index-url", "-f", "--find-links", "--index-strategy",
+        "--keyring-provider", "-P", "--upgrade-package", "--upgrade-group", "--resolution",
+        "--prerelease", "--prerelease-package", "--fork-strategy", "--exclude-newer",
+        "--exclude-newer-package", "--no-sources-package", "--reinstall-package", "--link-mode",
+        "-C", "--config-setting", "--config-settings-package", "--no-build-isolation-package",
+        "--no-build-package", "--no-binary-package", "--cache-dir", "--refresh-package", "-p",
+        "--python", "--color", "--allow-insecure-host", "--directory", "--project",
+        "--config-file",
+    }
+)  # fmt: skip
+#: uv's global options, given before its command, that take the next word as their value.
+_UV_GLOBAL_VALUES = frozenset(
+    {"--color", "--allow-insecure-host", "--directory", "--project", "--config-file",
+     "--cache-dir", "--python-preference"}
+)  # fmt: skip
+#: Python interpreters, free-threaded builds and PyPy included.
+_PYTHON = re.compile(r"(python|pypy)(\d(\.\d+){0,2})?t?")
+#: Options of `uvx` (`uv tool run`) that take the next word as their value.
+_UVX_VALUES = _UV_RUN_VALUES | {"--from"}
 #: `<runner> <verb> program ...`: run a project's tool inside its environment.
 _RUNNERS = {
     "uv": "run",
@@ -82,7 +111,7 @@ class Rule:
     @classmethod
     def of(cls, row: Mapping) -> Rule:
         """The rule a served row describes. A row without `threads` (a daemon older than the
-        setting), or with one that is not a count of at least 1, has `threads` "jobs"."""
+        setting) has `threads` "jobs", and one with a `threads` it does not know has 1."""
         return cls(
             programs=frozenset(row["programs"]), weight=int(row["weight"]), pool=row.get("pool"),
             args=row.get("args"), source=row.get("source", "config"), memory=row.get("memory"),
@@ -90,15 +119,31 @@ class Rule:
         )  # fmt: skip
 
     def matches(self, program: str, args: Sequence[str]) -> bool:
+        """Whether `program` with `args` is this rule's. A rule whose `args` is
+        `xdist.XDIST_ARGS` matches a pytest run whose own arguments start xdist workers
+        (`xdist.in_args`, which reads them one by one); any other `args` is searched in the
+        arguments joined by spaces."""
         if program.rsplit("/", 1)[-1] not in self.programs:
             return False
+        if self.args == xdist.XDIST_ARGS:
+            return xdist.in_args(args) is True
         return self.args is None or re.search(self.args, " ".join(args)) is not None
 
 
+#: A served `threads` share: the job count divided among N workers, and at most K.
+_SHARE = re.compile(r"jobs/[1-9][0-9]{0,5}(:[1-9][0-9]{0,5})?")
+
+
 def _threads(value: object) -> int | str:
+    """A served `threads`: "jobs" when missing, the value when it is "jobs", a count of at
+    least 1 or a share ("jobs/N", "jobs/N:K"), and 1 for anything else."""
+    if value is None or value == "jobs":
+        return "jobs"
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
         return value
-    return "jobs"
+    if isinstance(value, str) and _SHARE.fullmatch(value):
+        return value
+    return 1
 
 
 @dataclass(frozen=True)
@@ -243,21 +288,118 @@ def _unwrap(words: list[str], depth: int) -> Iterator[tuple[str, list[str]]]:
     if program in _WRAPPERS:
         yield from _unwrap(_after_options(program, rest), depth)
         return
+    if program == "uv":
+        directory, rest = _uv_options(rest, _UV_GLOBAL_VALUES)
+        if rest[:1] == ["run"]:
+            more, rest = _uv_options(rest[1:], _UV_RUN_VALUES)
+        elif rest[:2] == ["tool", "run"]:
+            more, rest = _uv_options(rest[2:], _UVX_VALUES)
+        else:
+            yield Found(program, rest)
+            return
+        yield from _within(_join(directory, more), _unwrap(rest, depth))
+        return
+    if program == "uvx":
+        directory, rest = _uv_options(rest, _UVX_VALUES)
+        yield from _within(directory, _unwrap(rest, depth))
+        return
     if _RUNNERS.get(program) and rest[:1] == [_RUNNERS[program]]:
-        rest = rest[1:]
-        while rest and rest[0].startswith("-"):
-            rest = rest[1:]
-        yield from _unwrap(rest, depth)
+        yield from _unwrap(_past_options(rest[1:], frozenset()), depth)
         return
-    if re.fullmatch(r"python(\d(\.\d+)?)?", program) and rest[:1] == ["-m"] and len(rest) > 1:
-        yield rest[1], rest[2:]
-        return
+    if _PYTHON.fullmatch(program):
+        module = _python_module(rest)
+        if module is not None:
+            yield module
+            return
     if program in _SHELLS and depth < 3:
         script = _shell_script(rest)
         if script is not None:
             yield from programs(script, depth=depth + 1)
             return
-    yield program, rest
+    yield Found(program, rest)
+
+
+class Found(tuple):
+    """A (program, arguments) pair `programs` found, and the directory it runs in relative
+    to the command line's (`uv --directory`), or None for the same one."""
+
+    directory: str | None
+
+    def __new__(cls, program: str, args: list[str], directory: str | None = None) -> Found:
+        found = super().__new__(cls, (program, args))
+        found.directory = directory
+        return found
+
+
+def _join(outer: str | None, inner: str | None) -> str | None:
+    if outer is None or inner is None:
+        return outer if inner is None else inner
+    return os.path.join(outer, inner)
+
+
+def _within(
+    directory: str | None, found: Iterable[tuple[str, list[str]]]
+) -> Iterator[tuple[str, list[str]]]:
+    """`found`, each running in `directory` (relative to its own)."""
+    for item in found:
+        if directory is None:
+            yield item
+        else:
+            yield Found(item[0], item[1], _join(directory, getattr(item, "directory", None)))
+
+
+def _uv_options(words: list[str], takes: frozenset[str]) -> tuple[str | None, list[str]]:
+    """The last `--directory` among uv's options at the start of `words`, and the words past
+    them (`_past_options`)."""
+    directory = None
+    while words and words[0].startswith("-") and words[0] != "--":
+        name, eq, value = words[0].partition("=")
+        if name == "--directory":
+            directory = value if eq else (words[1] if len(words) > 1 else None)
+        words = words[2:] if not eq and name in takes else words[1:]
+    return directory, words[1:] if words[:1] == ["--"] else words
+
+
+def _past_options(words: list[str], takes: frozenset[str]) -> list[str]:
+    """`words` past a runner's options, skipping the value of each option in `takes`, and
+    past a `--` that ends them."""
+    while words and words[0].startswith("-"):
+        if words[0] == "--":
+            return words[1:]
+        words = words[2:] if words[0] in takes else words[1:]
+    return words
+
+
+#: Python's options that take the next word as their value (`python -X dev -m pytest`).
+_PYTHON_VALUES = frozenset("XW")
+
+
+def _python_module(words: list[str]) -> tuple[str, list[str]] | None:
+    """The module and its arguments when Python runs one (`-m`), past Python's own options;
+    None when it runs a script, a command (`-c`) or its input."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--check-hash-based-pycs":
+            i += 1
+            continue
+        if not word.startswith("-") or word in ("-", "--") or word.startswith("--"):
+            return None
+        letters = word[1:]
+        for at, letter in enumerate(letters):
+            rest = letters[at + 1 :]
+            if letter == "m":
+                if rest:
+                    return rest, words[i:]
+                return (words[i], words[i + 1 :]) if i < len(words) else None
+            if letter == "c":
+                return None
+            if letter in _PYTHON_VALUES:
+                if not rest:
+                    i += 1
+                break
+    return None
 
 
 def _after_options(wrapper: str, words: list[str]) -> list[str]:
@@ -307,6 +449,84 @@ def match(rules: Iterable[Rule], command: str) -> Match | None:
     """The rule `command` takes a lease under: the heaviest match among the config's rules,
     else among the built-in ones; None when no rule matches."""
     return match_programs(rules, list(programs(command)))
+
+
+#: Programs that are pytest, for reading their configuration (`xdist`).
+_PYTEST = frozenset({"pytest", "py.test"})
+
+
+def threads(
+    rules: Iterable[Rule],
+    found: Sequence[tuple[str, Sequence[str]]],
+    *,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | Callable[[], Path] | None = None,
+) -> int | str | None:
+    """The thread count for a command line running the programs `found`, as a `threads`
+    setting (`jobs.thread_count`): the smallest any of its programs allows, so none runs more
+    threads per process than its rule gives. None when no rule matches any of them and no
+    pytest run on the line starts workers. "jobs/W:K" is the job count divided among W
+    workers, and at most K.
+
+    A pytest run that starts xdist workers, whatever rule it matched or none, allows "jobs/W"
+    for W workers and 1 for `-n auto` or `logical`; its rule's own `threads` can only lower
+    that. Its arguments say how many it starts (`xdist.workers_in_args`); with `env` and `cwd`,
+    so do `PYTEST_ADDOPTS` and its config's `addopts` (`xdist.workers`). `cwd` is a directory,
+    or a function giving it, called only for pytest."""
+    rules = list(rules)
+    chosen: list[int | str] = []
+    matched = False
+    for item in found:
+        program, args = item
+        own = match_programs(rules, [(program, args)])
+        if own is not None:
+            matched = True
+            if not (own.rule.source == "default" and own.rule.args == xdist.XDIST_ARGS):
+                chosen.append(own.rule.threads)  # the built-in xdist rule's is "auto"'s
+        if program.rsplit("/", 1)[-1] not in _PYTEST:
+            continue
+        if env is not None and cwd is not None:
+            here = _directory(cwd, getattr(item, "directory", None))
+            workers = xdist.workers(args, env, here)
+        else:
+            workers = xdist.workers_in_args(args)
+        if workers == "auto":
+            chosen.append(1)
+        elif workers is not None:
+            chosen.append(f"jobs/{workers}")
+    if not matched and not chosen:
+        return None
+    return _fewest(chosen)
+
+
+def _fewest(chosen: Sequence[int | str]) -> int | str:
+    """The `threads` setting no larger than any of `chosen`: the most workers any shares the
+    job count among, and the smallest count any gives."""
+    shares: list[int] = []
+    counts: list[int] = []
+    for value in chosen:
+        if isinstance(value, int):
+            counts.append(value)
+        elif value.startswith("jobs/"):
+            share, _, most = value[5:].partition(":")
+            shares.append(int(share))
+            if most:
+                counts.append(int(most))
+    if counts and min(counts) == 1:
+        return 1
+    if not shares:
+        return min(counts) if counts else "jobs"
+    return f"jobs/{max(shares)}" + (f":{min(counts)}" if counts else "")
+
+
+def _directory(cwd: Path | Callable[[], Path], relative: str | None) -> Callable[[], Path]:
+    """The directory a program runs in: `relative` to the command line's `cwd`."""
+
+    def directory() -> Path:
+        base = cwd() if callable(cwd) else cwd
+        return base if relative is None else Path(os.path.normpath(base / relative))
+
+    return directory
 
 
 def match_programs(
