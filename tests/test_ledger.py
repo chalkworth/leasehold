@@ -637,3 +637,165 @@ def test_a_0_2_ledger_gains_the_memory_columns_and_keeps_its_rows(tmp_path):
     assert row["item_id"] == "old" and row["memory"] is None
     assert ledger.settle(POLICY) == [("ci", "old")]
     assert ledger.leases()[0]["memory"] is None
+
+
+# --- ranges of weight ----------------------------------------------------------------------------
+
+#: Six slots in one pool.
+SIX = AdmissionPolicy(slots={MACHINE: 6}, pools={"ci": PoolPolicy(MACHINE, 0, 6)})
+
+
+def test_a_range_is_granted_a_size_kept_as_the_leases_weight(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite3", now=Clock())
+    ranged = LedgerItem("ci", "r", "work", "ann", "ci", 2, max_weight=4, memory_per_slot=1 << 30)
+    assert ledger.try_admit(ranged, SIX, ttl_s=10) == Admitted()
+    [row] = ledger.leases()
+    assert (row["weight"], row["min_weight"], row["max_weight"]) == (4, 2, 4)
+    # The total granted is recorded too, for a 0.3 process sharing the ledger.
+    assert row["memory_per_slot"] == 1 << 30 and row["memory"] == 4 << 30
+    assert ledger.snapshot()["pools"]["ci"]["held_weight"] == 4
+    renewal = ledger.renew(ranged.key)
+    assert (renewal.status, renewal.weight, renewal.min_weight, renewal.max_weight) == (
+        "ok",
+        4,
+        2,
+        4,
+    )
+    # A fixed weight is a range of one.
+    fixed = LedgerItem("ci", "f", "work", "bob", "ci", 2)
+    assert ledger.try_admit(fixed, SIX, ttl_s=10) == Admitted()
+    row = next(r for r in ledger.leases() if r["item_id"] == "f")
+    assert (row["weight"], row["min_weight"], row["max_weight"]) == (2, 2, 2)
+
+
+def test_a_range_waits_in_line_with_its_most_and_is_judged_by_its_least(ledger):
+    assert ledger.try_admit(item("held", weight=5), SIX) == Admitted()
+    ranged = LedgerItem("ci", "r", "work", "bob", "ci", 2, max_weight=60)
+    assert position(ledger.try_admit(ranged, SIX)) == 1  # never refused for its most
+    [row] = ledger.queued()
+    assert (row["weight"], row["max_weight"]) == (2, 60)
+    ledger.release(item("held"))
+    assert ledger.settle(SIX) == [("ci", "r")]
+    assert ledger.leases()[0]["weight"] == 6
+
+
+def test_asking_again_under_the_same_id_keeps_the_first_range(ledger):
+    assert ledger.try_admit(item("held", weight=6), SIX) == Admitted()
+    first = LedgerItem("ci", "r", "work", "bob", "ci", 1, max_weight=6)
+    assert position(ledger.try_admit(first, SIX)) == 1
+    again = LedgerItem("ci", "r", "work", "bob", "ci", 1, max_weight=2)
+    assert position(ledger.try_admit(again, SIX)) == 1
+    [row] = ledger.queued()
+    assert (row["weight"], row["max_weight"]) == (1, 6)
+
+
+def test_an_imposed_lease_counts_its_memory_per_slot(ledger, sleeper):
+    _proc, holder = sleeper
+    budget = AdmissionPolicy(
+        slots={MACHINE: 6}, pools={"ci": PoolPolicy(MACHINE, 0, 6)}, memory={MACHINE: 4 << 30}
+    )
+    seen = LedgerItem("observer", "seen", "observed", None, "ci", 3, memory_per_slot=1 << 30)
+    assert ledger.impose(seen, budget, holder=holder) is True
+    [row] = ledger.leases()
+    assert (row["weight"], row["min_weight"], row["max_weight"]) == (3, 3, 3)
+    assert row["memory_per_slot"] == 1 << 30 and row["memory"] == 3 << 30
+    heavy = LedgerItem("ci", "h", "work", "ann", "ci", 1, memory=2 << 30)
+    assert ledger.try_admit(heavy, budget) == Queued(
+        1,
+        "the memory budget is used: 3.0 GiB of 4.0 GiB counted; this counts its declared 2.0 GiB",
+    )
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"max_weight": 1}, "below weight"),
+        ({"memory": 1, "memory_per_slot": 1}, "one or the other"),
+        ({"memory_per_slot": -1}, "memory_per_slot"),
+    ],
+)
+def test_a_ledger_item_with_an_impossible_range_or_memory_is_an_error(fields, message):
+    with pytest.raises(ValueError, match=message):
+        LedgerItem("ci", "x", "work", "ann", "ci", 2, **fields)
+
+
+def test_a_0_3_ledger_gains_the_range_columns_in_place_and_keeps_its_rows(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    old_schema = ledger_module._SCHEMA
+    for line in ("min_weight INTEGER,", "max_weight INTEGER,", "memory_per_slot INTEGER,"):
+        old_schema = old_schema.replace(f"    {line}\n", "")
+    conn = sqlite3.connect(path)
+    conn.executescript(old_schema)
+    conn.execute(
+        "INSERT INTO leases (scope, item_id, kind, user, session, host, pool, weight, "
+        "holder_pid, holder_birth, holder_ns, beat_at, acquired_at, labels, ttl_s, expires_at, "
+        "grant_no, memory) VALUES ('ci', 'held', 'work', 'ann', NULL, 'machine', 'ci', 2, 1, "
+        "NULL, NULL, 0, 0, NULL, 1e12, 1e12, 1, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO queue (scope, item_id, kind, user, session, pool, weight, holder_pid, "
+        "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at, memory) "
+        "VALUES ('ci', 'old', 'work', 'bob', NULL, 'ci', 1, 1, NULL, NULL, 0, 0, NULL, 1e12, "
+        "1e12, NULL)"
+    )
+    conn.commit()
+    for table in ("leases", "queue"):
+        columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        assert "memory" in columns and not columns & {"max_weight", "memory_per_slot"}
+    conn.close()
+    ledger = Ledger(path)
+    [held] = ledger.leases()
+    assert held["item_id"] == "held" and held["min_weight"] is None and held["weight"] == 2
+    [waiting] = ledger.queued()
+    assert waiting["max_weight"] is None and waiting["memory_per_slot"] is None
+    assert ledger.settle(SIX) == [("ci", "old")]  # a row from before ranges: its weight alone
+    old = next(r for r in ledger.leases() if r["item_id"] == "old")
+    assert (old["weight"], old["min_weight"], old["max_weight"]) == (1, 1, 1)
+    assert ledger.renew(("ci", "held")).min_weight == 2  # read as a range of one
+
+
+def _contend_ranges(path: str, worker: int, results, release) -> None:
+    ledger = Ledger(Path(path))
+    admitted = 0
+    for i in range(10):
+        key = f"w{worker}-{i}"
+        ranged = LedgerItem(f"s{worker}", key, "work", f"u{worker}", "ci", 1, max_weight=3)
+        admitted += isinstance(ledger.try_admit(ranged, SIX), Admitted)
+    results.put((worker, admitted))
+    release.wait(60)  # hold the leases (stay alive) until the parent has looked
+
+
+def test_two_processes_granting_ranges_never_over_admit(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    results, release = ctx.Queue(), ctx.Event()
+    path = str(tmp_path / "ledger.sqlite3")
+    Ledger(tmp_path / "ledger.sqlite3")
+    procs = [ctx.Process(target=_contend_ranges, args=(path, w, results, release)) for w in (1, 2)]
+    for proc in procs:
+        proc.start()
+    try:
+        for _ in procs:
+            results.get(timeout=120)
+        leases = Ledger(tmp_path / "ledger.sqlite3").leases()
+        assert sum(r["weight"] for r in leases) <= 6
+        assert all(1 <= r["weight"] <= 3 for r in leases)
+    finally:
+        release.set()
+        for proc in procs:
+            proc.join(60)
+
+
+def test_a_per_slot_lease_counts_the_same_to_a_reader_from_before_memory_per_slot(tmp_path):
+    # A 0.3 process reads only `memory`: the total granted, which is what admission counts.
+    budget = AdmissionPolicy(
+        slots={MACHINE: 6}, pools={"ci": PoolPolicy(MACHINE, 0, 6)}, memory={MACHINE: 8 << 30}
+    )
+    ledger = Ledger(tmp_path / "l.sqlite3", now=Clock())
+    ranged = LedgerItem("ci", "r", "work", "ann", "ci", 2, max_weight=4, memory_per_slot=1 << 30)
+    assert ledger.try_admit(ranged, budget, ttl_s=10) == Admitted()
+    [row] = ledger.leases()
+    now = budget.counted(MACHINE, row["weight"], row["memory"], row["memory_per_slot"])
+    before = budget.counted(MACHINE, row["weight"], row["memory"])
+    assert now == before == 4 << 30
+    # Both set: the per-slot size wins, so a lease is never counted twice.
+    assert budget.counted(MACHINE, 4, 99, 1 << 30) == 4 << 30

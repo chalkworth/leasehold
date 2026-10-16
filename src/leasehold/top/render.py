@@ -124,6 +124,27 @@ def _slots(n: int) -> str:
     return f"{n} slot" if n == 1 else f"{n} slots"
 
 
+def _range(x: Mapping) -> tuple[int, int]:
+    """The least and the most weight a lease or waiting item asked for (its weight for one
+    from a daemon without ranges)."""
+    weight = int(x.get("weight") or 0)
+    least = int(x.get("min_weight") or weight)
+    return least, max(least, int(x.get("max_weight") or least))
+
+
+def _weight_cell(x: Mapping) -> str:
+    """A lease's weight, as the W column shows it: `3`, or `3/2-4` when it asked a range."""
+    least, most = _range(x)
+    weight = str(x.get("weight"))
+    return weight if least == most else f"{weight}/{least}-{most}"
+
+
+def _needs(x: Mapping) -> str:
+    """What a waiting item needs: `2 slots`, or `2-4 slots` for a range."""
+    least, most = _range(x)
+    return _slots(least) if least == most else f"{least}-{most} slots"
+
+
 def _pct(v: float) -> str:
     return f"{v:.1f}%"
 
@@ -624,7 +645,7 @@ def _leases(v: _View) -> _Section:
         _Column("USER", [text(x.get("user") or "-", "bold") for x in leases], 8),
         _Column("SESSION", [text(x.get("session") or "-", "dim") for x in leases], 3),
         _Column("POOL", [text(x.get("pool")) for x in leases], 1 if redundant else 5),
-        _Column("W", [[(str(x.get("weight")), "")] for x in leases], 7, right=True),
+        _Column("W", [[(_weight_cell(x), "")] for x in leases], 7, right=True),
         _Column("HELD", [held_for(x) for x in leases], 4, right=True),
         _Column("EXPIRES", [expires(x) for x in leases], 6, right=True),
     ]
@@ -681,7 +702,7 @@ def _queue(v: _View) -> _Section:
         if what:
             parts.append((3, [(f"  {_clean(what)}", "")]))
         parts.append((5, [(f"  {_clean(x.get('lease_id'))}", "dim")]))
-        right = _Out().put(f"needs {_slots(int(x.get('weight') or 0))}", "")
+        right = _Out().put(f"needs {_needs(x)}", "")
         if x.get("memory_counted_bytes"):
             right.put(f", {_gib(x['memory_counted_bytes'])}", "")
         if x.get("queued_at") is not None:
@@ -740,7 +761,7 @@ def _size(e: Mapping) -> str:
 
 def _queued(e: Mapping) -> str:
     place = f", #{e['position']}" if e.get("position") else ""
-    return f"{_who(e)} queued for {_size(e)} in {e.get('pool')}{place}"
+    return f"{_who(e)} queued for {_needs(e)} in {e.get('pool')}{place}"
 
 
 def _granted(e: Mapping) -> str:

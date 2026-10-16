@@ -85,8 +85,8 @@ def test_more_than_the_budget_or_the_ceiling_is_refused(tmp_path):
     assert over_budget["reason"] == "its declared 13.0 GiB is more than the 12.0 GiB memory budget"
     over_ceiling = ask(agent, "b", memory="20g")
     assert over_ceiling["status"] == "refused"
-    assert (
-        "more than the" in over_ceiling["reason"] and "[ceiling] memory" in over_ceiling["reason"]
+    assert over_ceiling["reason"] == (
+        "memory 20g is more than the 16.0 GiB one lease may be given (the machine's memory)"
     )
 
 

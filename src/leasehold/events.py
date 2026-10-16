@@ -6,7 +6,8 @@ lease that ends by any path, a release, an expired TTL, a holder that died, anot
 writing the same ledger, is reported the same way. Each event is a flat dict:
 
 * `seq` (increasing, never reused while the daemon runs), `time`, `type`;
-* for a lease or a place in line: `lease_id`, `kind`, `pool`, `user`, `session`, `weight`;
+* for a lease or a place in line: `lease_id`, `kind`, `pool`, `user`, `session`, `weight`
+  (a lease's granted size; a waiting item's least), `min_weight` and `max_weight`;
 * `type` is an `EventType`: `queued` (with `position`), `granted` (`waited`: it had been in
   line), `left` (gave up its place in line), `released`, `ended` (`reason`: `expired`,
   `holder gone`, or `no longer matched` for an observed process that runs on as something its
@@ -45,7 +46,16 @@ class EventType(StrEnum):
 #: How many events the ring keeps.
 CAPACITY = 500
 
-_LEASE_FIELDS = ("lease_id", "kind", "pool", "user", "session", "weight")
+_LEASE_FIELDS = (
+    "lease_id",
+    "kind",
+    "pool",
+    "user",
+    "session",
+    "weight",
+    "min_weight",
+    "max_weight",
+)
 
 
 def _about(row: Mapping) -> dict:

@@ -410,10 +410,10 @@ class MachineConfig(_Strict):
                 "GiB that [[standing]] memory holds, so nothing that counts memory could start"
             ]
         return [
-            f"commands.rule[{n}]: memory {rule.memory} cannot fit the {self.memory.budget} "
+            f"commands.rule[{n}]: {_declared(rule)} cannot fit the {self.memory.budget} "
             f"memory budget beside the {standing / 2**30:.1f} GiB of [[standing]] memory"
             for n, rule in enumerate(self.commands.rule)
-            if rule.memory is not None and standing + memory_to_bytes(rule.memory) > budget
+            if standing + (rule_memory(rule) or 0) > budget
         ]
 
     def rule_pool(self, rule: CommandRule) -> str:
@@ -424,9 +424,10 @@ class MachineConfig(_Strict):
         self, rule: CommandRule, policy: AdmissionPolicy, memory_bytes: int | None
     ) -> str | None:
         """Why no lease for `rule` could ever be granted under `policy` on a machine of
-        `memory_bytes` (None: unknown), or None when one can: its pool is not there; with
-        `[memory]`, its declared memory is more than one lease may be given (`[ceiling]
-        memory`, else the machine's); or no weight of it fits (`AdmissionPolicy.heaviest`:
+        `memory_bytes` (None: unknown), or None when one can: its pool is not there; its
+        declared memory at its least weight is more than one lease may be given (`[ceiling]
+        memory`, else the machine's), for a per-slot size always and a total with `[memory]`;
+        or no weight of it fits (`AdmissionPolicy.heaviest`:
         the slots, the reservations and standing work, the budget beside standing memory).
         Every limit a request meets when it is asked for that does not change while the
         daemon runs. A hook denies a command matching such a rule, and a shim refuses it."""
@@ -434,16 +435,18 @@ class MachineConfig(_Strict):
         if pool not in policy.pools:
             return f"there is no pool {pool!r}"
         memory = None if rule.memory is None else memory_to_bytes(rule.memory)
-        if memory is not None and self.memory is not None:
+        per_slot = None if rule.memory_per_slot is None else memory_to_bytes(rule.memory_per_slot)
+        least = rule_memory(rule)
+        # [ceiling] memory limits each lease: a per-slot size always, a total with a budget.
+        if least is not None and (self.memory is not None or per_slot is not None):
             ceiling = self.ceiling.memory
             limit = memory_to_bytes(ceiling) if ceiling is not None else memory_bytes
-            if limit is not None and memory > limit:
-                what = ceiling or f"{limit / 2**30:.1f} GiB"
-                return f"memory {rule.memory} is more than the {what} one lease may be given"
-        if policy.heaviest(pool, memory) >= 1:
+            if limit is not None and least > limit:
+                return f"{_declared(rule)} is more than {lease_memory_limit(ceiling, limit)}"
+        if policy.heaviest(pool, memory, per_slot) >= 1:
             return None
         asked = max(1, min(rule.weight, self.ceiling.slots))
-        return policy.refusal(pool, asked, memory) or (
+        return policy.refusal(pool, asked, memory, per_slot) or (
             f"no lease in pool {pool!r} could ever be granted"
         )
 
@@ -654,6 +657,7 @@ class MachineConfig(_Strict):
         memory_short: str | None = None,
         memory_pressing: bool = False,
         memory_overdue: frozenset[tuple[str, str]] = frozenset(),
+        lease_memory: int | None = None,
     ) -> AdmissionPolicy:
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
@@ -661,21 +665,31 @@ class MachineConfig(_Strict):
         `memory_bytes`, the memory budget too (with `[[standing]]` memory held), and
         `memory_free` (why: `memory_short`) as the most one decision may admit (an item short
         of it lets others by unless it is in `memory_overdue`), and with
-        `memory_pressing` nothing new admitted at all."""
+        `memory_pressing` nothing new admitted at all. `lease_memory` is the most memory one
+        lease may count (`[ceiling] memory`), with a budget or without one. The observed pool
+        is `observed`, since nothing waits in line for it, and its headroom is 0 unless the
+        config gives one."""
         pool_set = self.pool_set()
-        if max_overrides:
-            pools = {
-                name: pool.model_copy(update={"max": max_overrides.get(name, pool.max)})
-                for name, pool in pool_set.pools.items()
-            }
-            pool_set = PoolSet.model_construct(slots=pool_set.slots, pools=pools)
+        observed = self.observed_pool
+        pools = {}
+        for name, pool in pool_set.pools.items():
+            update: dict = {}
+            if max_overrides and name in max_overrides:
+                update["max"] = max_overrides[name]
+            if name == observed and pool.headroom == "auto":
+                update["headroom"] = 0
+            pools[name] = pool.model_copy(update=update) if update else pool
+        pool_set = PoolSet.model_construct(slots=pool_set.slots, pools=pools)
         budget = None if memory_bytes is None else self.memory_budget(memory_bytes)
+        unqueued = frozenset({observed}) if observed else frozenset()
         if budget is None:
             return AdmissionPolicy.from_pools(
                 pool_set,
                 closed=closed,
                 standing=self.standing_held(),
                 capped=frozenset(pool_set.pools) if capped else frozenset(),
+                lease_memory=lease_memory,
+                observed=unqueued,
             )
         return AdmissionPolicy.from_pools(
             pool_set,
@@ -689,6 +703,8 @@ class MachineConfig(_Strict):
             memory_short=memory_short,
             memory_pressing=memory_pressing,
             memory_overdue=memory_overdue,
+            lease_memory=lease_memory,
+            observed=unqueued,
         )
 
     @property
@@ -696,6 +712,34 @@ class MachineConfig(_Strict):
         if self.ledger_dir is None:
             raise ValueError("ledger_dir is unset: resolve() the config for a mode first")
         return self.ledger_dir / FILENAME
+
+
+def rule_memory(rule: CommandRule) -> int | None:
+    """The memory, in bytes, a `[commands]` rule declares at its least weight: its `memory`,
+    or its `memory_per_slot` times its `weight`; None when it declares neither."""
+    if rule.memory is not None:
+        return memory_to_bytes(rule.memory)
+    if rule.memory_per_slot is not None:
+        return rule.weight * memory_to_bytes(rule.memory_per_slot)
+    return None
+
+
+def lease_memory_limit(ceiling: str | None, limit: int) -> str:
+    """The most memory one lease may be given, in words: `[ceiling] memory` when the config
+    sets it (`ceiling`), else the machine's memory (`limit` bytes) in GiB."""
+    if ceiling is not None:
+        return f"the {ceiling} one lease may be given ([ceiling] memory)"
+    return f"the {limit / 2**30:.1f} GiB one lease may be given (the machine's memory)"
+
+
+def _declared(rule: CommandRule) -> str:
+    """What a rule declares of memory, in words."""
+    if rule.memory is not None:
+        return f"memory {rule.memory}"
+    total = rule.weight * memory_to_bytes(rule.memory_per_slot)
+    return (
+        f"memory_per_slot {rule.memory_per_slot} at weight {rule.weight} ({total / 2**30:.1f} GiB)"
+    )
 
 
 def default_pools(slots: int) -> dict[str, Pool]:

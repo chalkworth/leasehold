@@ -6,7 +6,15 @@ rule (`leasehold.shell`), it waits in line for that rule's weight, then lets the
 with a renewer keeping the lease (`leasehold keep`, watching the Claude Code process, so an
 agent that dies gives its leases back within one TTL). `PostToolUse` and `PostToolUseFailure`
 run `... post`, which releases it. The command itself is never changed, so the user's
-permission rules see exactly what the agent wrote.
+permission rules see exactly what the agent wrote, and the hook does not size it. A rule's
+range, or a `LEASEHOLD_WANT` range in Claude Code's own environment (`leasehold.weights`), is
+asked for as a range: from its least up to the rule's `hook_ceiling`, both ends cut to it.
+`hook_ceiling` is what the range alone would be granted on an idle machine
+(`leasehold.admission.alone`), served by the daemon. The request waits in line for its least
+and is granted a size as any range is. The note records the size granted, its job count and
+thread count, so a PATH shim the command runs through (under `leasehold run`) sizes it to the
+grant. A range granted less than its most also tells the agent the size, as context it reads
+before the command runs; a fixed weight tells it nothing.
 
 Each Claude Code session is its own leasehold session: one user's agents take turns with each
 other, and with that user's other work, as `admission` rotates sessions. A session's sub-agents
@@ -41,7 +49,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from leasehold import busy, handoff, hooknotes, programs, shell
+from leasehold import busy, handoff, hooknotes, programs, shell, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, wait_for_grant
@@ -115,6 +123,33 @@ def _message(text: str) -> dict:
     return {"systemMessage": f"leasehold: {text}"}
 
 
+def _threads(
+    settings: shell.Served, command: str, event: Mapping, env: Mapping[str, str]
+) -> int | str | None:
+    """The `threads` setting the whole command line gives (`shell.threads`, with Claude
+    Code's environment and the command's directory, so a pytest that starts xdist workers
+    through its config is seen): a count, "jobs", or a share of the job count ("jobs/N",
+    "jobs/N:K"), for a PATH shim under this lease; None when it cannot be read."""
+    cwd = event.get("cwd")
+    try:
+        found = list(shell.programs(command))
+        return shell.threads(
+            settings.rules, found, env=env, cwd=Path(cwd) if isinstance(cwd, str) else None
+        )
+    except (OSError, ValueError, LookupError, TypeError, AttributeError, re.error):
+        return None
+
+
+def _granted(program: str, weight: int, least: int, most: int) -> dict:
+    """What the agent reads before a command granted `weight` of the range `least`-`most`, less
+    than its most: the size to run it at."""
+    text = (
+        f"leasehold: {program} was granted {weight} of {weights.text(least, most)} slots; "
+        f"size it to {weight} jobs (or run the agent under `leasehold run`)"
+    )
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}}
+
+
 def _deny(reason: str) -> dict:
     return {
         "hookSpecificOutput": {
@@ -179,12 +214,22 @@ def pre(
         reply.log.append("no lease taken: no private directory to note it in for `post`")
         return reply
     rule = found.rule
+    least, most = weights.asked(env, rule.weight, rule.max_weight, reply.log.append, rule.ceiling)
+    if rule.hook_ceiling is not None and most > rule.hook_ceiling:
+        wanted = weights.text(least, most)
+        least, most = min(least, rule.hook_ceiling), rule.hook_ceiling
+        reply.log.append(
+            f"{found.program} asks {wanted}, cut to {weights.text(least, most)}: the rule's "
+            "hook_ceiling, what the range alone would be granted"
+        )
     request = lease_request(
         pool=rule.pool,
-        weight=rule.weight,
+        weight=least,
+        max_weight=most if most > least else None,
         labels=_labels(event, command),
         session=session(event),
         memory=rule.memory,
+        memory_per_slot=rule.memory_per_slot,
     ) | {"lease_id": lid}
     asked = time.monotonic()
     code, answer = wait_for_grant(client, request, settings.wait_s, reply.log.append)
@@ -192,6 +237,12 @@ def pre(
     if code is None:
         if waited >= WAIT_NOTED_S:
             reply.output = _message(f"{found.program} waited {waited:.0f}s in line for its lease")
+        lease = answer["lease"]
+        granted = int(lease["weight"])
+        top = int(lease.get("max_weight") or granted)
+        if granted < top:  # a range granted below its most: the agent sizes the command
+            low = int(lease.get("min_weight") or granted)
+            reply.output = (reply.output or {}) | _granted(found.program, granted, low, top)
         argv = handoff.keeper_argv(
             str(client.path), lid, ttl_s=float(answer["lease"]["ttl_s"]),
             max_hold_s=max_hold(event), watch_pid=watch_pid,
@@ -201,7 +252,18 @@ def pre(
         except OSError as exc:
             pid = None
             reply.log.append(f"cannot start the renewer, the lease ends in one TTL: {exc}")
-        if not hooknotes.write(directory, lid, pid, watch_pid, found.program):
+        jobs = int(lease.get("jobs") or lease["weight"])
+        noted = hooknotes.write(
+            directory,
+            lid,
+            pid,
+            watch_pid,
+            found.program,
+            jobs=jobs,
+            threads=_threads(settings, command, event, env) or rule.threads,
+            weight=granted,
+        )
+        if not noted:
             # Unnoted, `post` might never be run for it (the pre-filter): give it back now.
             if pid is not None:
                 with contextlib.suppress(OSError):

@@ -56,9 +56,98 @@ is short-lived: while the [memory guard](#memory-guard) settles, a request held 
 the memory measured free lets lighter work behind it start, for at most `settle_s`.
 
 Each waiting item says why it waits (`blocked`), for example "pool work holds 6 of 6; this
-needs 1" or "2 of 12 slots are free; this needs 4", and, with memory counted, "the memory
-budget is used: 9.0 of 11.7 GiB counted; this counts 5.9 GiB" or "memory is short (...): 0.4
-GiB may start now; this counts 5.9 GiB". `hold` and `acquire` print it once while they wait.
+needs 1" or "2 of 12 slots are free; this needs 4" ("this needs at least 2 (asks up to 4)" for
+a [range](#ranges-min-max-slots)), and, with memory counted, "the memory budget is used: 9.0 of
+11.7 GiB counted; this counts 5.9 GiB" or "memory is short (...): 0.4 GiB may start now; this
+counts 5.9 GiB". `hold` and `acquire` print it once while they wait.
+
+### Ranges: MIN-MAX slots
+
+A request may ask for a range of slots instead of one weight: `weight = "2-4"` in a
+[`[commands]` rule](#which-commands-take-a-lease-commands), `hold --weight 2-4`, or `weight`
+and `max_weight` in [`POST /v1/acquire`](#the-http-api). MIN is what the work needs, MAX what
+it can use; leasehold does not care how it uses them. The config's limits (each pool's `max`,
+what one lease could ever hold, the ceiling) stay the outer bounds. A waiting request keeps
+the MAX it asked for; when it is admitted, the daemon cuts it to the most one lease could be
+granted in its pool then, so a pool's `max` raised while it waits counts. Wherever a waiting
+request is shown (its queued answer, its `blocked` text, the status queue, `top` and events),
+its MAX is cut the same way. Whether a request can ever be granted, and whether a rule is
+marked as never granted, is judged by MIN alone. `weight = N` is the range N-N, and everything
+about it is as before ranges.
+
+A range waits in line, and is admitted, exactly as a request of MIN would be: every rule in
+[Pools and turns](#pools-and-turns) and [Memory](#memory) is applied at MIN, so ranges change
+no one's turn. A waiting range holds its place at the head of its pool's queue by its MIN, as
+any request does, so a large MIN waits for room and the requests in its pool wait behind it.
+Then, in the same decision, each request admitted in a pool that asks for more is offered a share of F, how much more the pool could hold when the decision began: its `max`
+less what it holds, and no more than the machine's free slots less those owed to other pools'
+reservations. F is shared evenly among the requests the pool admitted in this decision and
+those still waiting in it, each counted from its MIN up to its MAX. A request whose MAX is
+below its even share takes its MAX, and the rest of its share goes to the others.
+
+The extra slots are dealt one at a time, round the admitted requests in admission order, until
+each has its offer or its next slot would break a limit. A slot is dealt only if:
+
+- the memory guard has no allowance in force, does not hold the pools to their reservations,
+  and memory is not under pressure. While it does either, or memory is short, every request
+  is granted its MIN, and what the guard lets start is kept for the MIN of the requests that
+  come next;
+- the pool and the machine have room for it beside every request whose turn came in this
+  decision but which was not admitted, in any pool: that request's MIN stays free in its pool,
+  and on the machine as far as its pool's `max` would let it use it, and its memory stays free
+  in the budget. Other pools' reservations are never taken;
+- the pool still has its own `headroom` free after it, and the machine the largest `headroom`
+  of the pools an extra slot could land in;
+- the memory it counts fits the budget, beside the memory the machine's headroom would count
+  at `assumed_per_slot` or the extra slot's own per-slot size, whichever is larger, so the
+  request the headroom is kept for can start.
+
+A request kept for this way never waits on an extra slot. A closed pool admits nothing, so
+nothing is kept for its requests.
+
+Headroom (`[pools.<name>] headroom`) is how many of a pool's slots extra slots leave free, so
+a request that arrives a moment later starts at once instead of waiting for a range's whole
+life. It is a count, or `"auto"` (the default): `max // 4`, so 2 for a pool of 8, 1 for a pool
+of 4 to 7, and 0 below 4. It never holds back a MIN or a fixed weight, which may use the last
+slots as before. The free slots it keeps stack with other pools' unused reservations, which
+extra slots never take either: a pool with a reservation of 4 standing idle beside it leaves
+those 4 free too. The machine's headroom is the largest of the pools an extra slot could land
+in: a closed or capped pool, the observed pool (whose headroom is 0 unless the config sets
+one), and a pool whose headroom is at least the most it could hold (its `max`, clamped as
+[Pools and turns](#pools-and-turns) says) add nothing to it. `leasehold doctor`
+warns about a pool where a range alone is never granted more than its MIN. `leasehold status`
+shows each pool's headroom beside its reservation when it is not 0, and the status object
+gives it as a count.
+
+The size granted is the lease's `weight` for its life: its job count, thread counts, jobserver,
+`LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot, `MemoryHigh`. It does not grow or
+shrink while the lease is held. To ask for a different range, release the lease (or give up
+the place in line) and ask again under a new lease id: asking again under the same id keeps the
+first request's range.
+
+For example, on an idle `work` pool of 8 slots with the default headroom of 2:
+
+- one request of 1-8 alone gets 6 (its share is all 8, less the 2 kept as headroom), and a
+  request of 2 that arrives next fits in the 2 left;
+- two requests of 2-4 arriving together get 3 each (a share of 4 each, but only 6 can be
+  dealt before the headroom, one slot to each in turn);
+- a request of 1-2 and one of 1-8 arriving together get 2 and 4: the 1-2 is full at 2, so the
+  1-8's share is the other 6, cut to 4 by the headroom (with a headroom of 0, 2 and 6);
+- a request of 2-4 that arrives when only 2 slots are free gets 2;
+- a request of 2-4 admitted ahead of a request of 7 that does not fit gets 2: the slots left
+  are the 7's to wait for;
+- a request of 8, or of 7-8, gets 8 or 7: headroom never holds back a MIN.
+
+Headroom helps the requests whose MIN fits in it. A fixed request larger than the headroom
+(a fixed 4 beside a lone 1-8 that took 6) waits for the range to end.
+
+Memory is counted at the size granted. A request declares a total (`memory`), which does not
+grow with its size, or a size per slot (`memory_per_slot`: a rule key, `hold
+--memory-per-slot`, an acquire field), counted as size × it and held to that when contained;
+not both. One that declares neither counts size × `assumed_per_slot`. A per-slot size times
+MIN over `[ceiling] memory` is refused, and MAX is cut to the slots whose memory fits it,
+whether or not the machine has a memory budget. A per-slot lease also records the total it
+was granted as its `memory`, which is what leasehold 0.3 reads.
 
 ### Memory
 
@@ -99,7 +188,8 @@ granted, not refused), and `doctor` warns when that cuts the built-in rules. A d
 (`hold --memory`, a rule's `memory`, `POST /v1/acquire`'s `memory`) is more than 0; a size
 anywhere is at most 1 EiB.
 
-A declared size is also what a contained command is held to (`MemoryHigh`, see
+A declared size (or, for `memory_per_slot`, the size granted times it, see
+[Ranges](#ranges-min-max-slots)) is also what a contained command is held to (`MemoryHigh`, see
 [Containment](#containment)), which throttles it past that size but never kills it: the budget
 decides what starts, it does not bound what runs. A request that counts more than the whole
 budget, or declares more than `[ceiling] memory`, is refused. The budget counts only what
@@ -339,7 +429,7 @@ an example machine. An unknown key is an error.
 | `socket_group`, `socket_mode` | the daemon's group; `0660` (system) or `0600` (user) | who may use it |
 | `admin_group` | none | members may switch lending and change pool limits, as root and the daemon's own user always may |
 | `tick_s`, `lease_ttl_s` | `2`, `15` | the tick period and the lease TTL |
-| `[pools.<name>]` | the default split | `reserved`, `max`, `priority`, `queue_timeout_s`, and per-user limits: `per_user_max_running`, `per_user_max_queued`, `create_rate_per_min` |
+| `[pools.<name>]` | the default split | `reserved`, `max`, `priority`, `queue_timeout_s`, `headroom` (`"auto"`, see [Ranges](#ranges-min-max-slots)), and per-user limits: `per_user_max_running`, `per_user_max_queued`, `create_rate_per_min` |
 | `[kinds]` | each kind to its namesake | the pool each kind goes to |
 | `[lend]` | see [Lending](#lending) | `pools`, `quiet_s` (600), `cpu_pressure_max` (10), `memory_pressure_max` (5), `load_per_cpu_max` (0.25), `window` (as `"22:00-07:00"`), `revoke_grace_s` (30), `pressure_cgroups` |
 | `[load] slices` | none | the cgroups (systemd slices) whose CPU and memory `status` reports |
@@ -368,11 +458,14 @@ leasehold hold -- cargo test --workspace
 ```
 
 Without `--weight`, `hold` weighs the command as the [`[commands]` rules](#which-commands-take-a-lease-commands)
-weigh it (cargo test: `heavy_weight` slots, cut to what its pool may hold), and anything they
-do not name as 1 slot. A training script or other single process that runs many threads
-weighs 1 slot unless a rule names it, so give it `--weight N` for the N slots it uses.
-`--memory 6g` declares the memory it will use (default: its rule's
-`memory`), counted against the [memory budget](#memory) and held to when contained.
+weigh it (cargo test: `heavy_weight` slots, cut to what its pool may hold; a rule's range as
+a range), and anything they do not name as 1 slot. A training script or other single process
+that runs many threads weighs 1 slot unless a rule names it, so give it `--weight N` for the
+N slots it uses. `--weight 2-4` asks for a [range](#ranges-min-max-slots) and runs the
+command sized to the weight granted. `--memory 6g` declares the memory it will use (default:
+its rule's `memory`), counted against the [memory budget](#memory) and held to when
+contained; `--memory-per-slot 2g` declares it per slot granted instead (default: its rule's
+`memory_per_slot`).
 `--threads N` sets the parallelism inside each of its processes (default: its rule's
 `threads`, else the job count; see [sizing](#sizing-the-command-to-its-lease)). A PATH shim
 inside the command may still lower it. `hold` reads
@@ -383,7 +476,8 @@ the rules when no `--weight` is given, or for the threads when the job variables
 (every TTL/3, each renewal waiting at most TTL/3 for an answer), forwards SIGTERM, SIGINT and
 SIGHUP to the group, releases when the command ends, and exits with its code. The lease covers
 the group: anything left in it when the command ends is stopped too. The command sees
-`LEASEHOLD_LEASE_ID`, `LEASEHOLD_GRANT`, `LEASEHOLD_POOL` and `LEASEHOLD_WEIGHT`.
+`LEASEHOLD_LEASE_ID`, `LEASEHOLD_GRANT`, `LEASEHOLD_POOL` and `LEASEHOLD_WEIGHT` (the weight
+granted), and does not see `LEASEHOLD_WANT`, so the commands it runs ask for their own size.
 
 SIGTERM, SIGINT or SIGHUP before the command runs (while `hold` waits in line, or while it
 starts the command) gives back the place in line or the lease, stops anything already started,
@@ -432,7 +526,8 @@ command runs as before and the lease is advisory. `leasehold doctor` says which 
 
 ### Sizing the command to its lease
 
-A lease of weight W allows W × `[jobs] per_slot` jobs. `hold` sets two groups of variables.
+A lease of weight W (for a [range](#ranges-min-max-slots), the weight granted)
+allows W × `[jobs] per_slot` jobs. `hold` sets two groups of variables.
 `--no-job-env` sets none of them. It also removes an enclosing lease's sizing: every
 variable that lease set and that still has its value, along with `LEASEHOLD_SET`,
 `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS`, so each tool falls back to its own default.
@@ -620,7 +715,8 @@ does, and a later process gives it back (a CI runner's job-started and job-compl
 use `acquire` and `release` instead:
 
 - `acquire --lease-id ID` waits in line as `hold` does, with the same exit codes (75, 77, 69),
-  prints the granted lease as one JSON line and exits 0. The caller picks the id, so the
+  prints the granted lease as one JSON line (its `weight` the size granted, with `min_weight`
+  and `max_weight`; `--weight 2-4` asks a range) and exits 0. The caller picks the id, so the
   releasing process can name it.
 - `--keep` first starts a detached renewer (`leasehold keep ID`: its own session, stdio on
   /dev/null, so it keeps no pipe of the caller open), whose pid the JSON line carries as
@@ -724,6 +820,11 @@ threads = 1            # parallelism inside each process (OMP_NUM_THREADS ...); 
 programs = ["make"]
 weight = 2
 pool = "external"
+
+[[commands.rule]]
+programs = ["ninja"]
+weight = "2-6"           # a range: needs 2, can use 6, granted a size between when admitted
+memory_per_slot = "1g"   # instead of memory: counted, and held to, per slot granted
 ```
 
 The config's rules are tried first, then the built-in ones (`defaults = false` drops those):
@@ -732,14 +833,29 @@ bazel; `cmake --build`; go build and test; mvn and gradle; docker and podman bui
 yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. The
 builds and test runs weigh `heavy_weight` (4), the JavaScript tooling `light_weight` (2); lower
 them to run more at once ([two at once](#your-own-daemon), opt-in).
-A weight is both what a command costs in slots and the job count it is given. A rule's
+A weight is both what a command costs in slots and the job count it is given. It is a
+count (`weight = 4`) or a [range](#ranges-min-max-slots) (`weight = "2-4"`), whose command is
+granted a size between the two when admitted and run sized to it. A rule's
 `threads` sets the parallelism inside each process ([sizing](#sizing-the-command-to-its-lease)):
 `"jobs"`, the job count (the default), or a count of at least 1. The built-in xdist rule has
 1, and a pytest run that starts xdist workers, under any rule, shares the job count among
 them; a rule's own `threads` can only lower that
 ([sizing](#sizing-the-command-to-its-lease)). Among one source's rules the heaviest match
-wins. The daemon clamps each weight to the most its pool could ever grant one lease, beside
-the other pools' reservations and standing work. `leasehold commands` lists the rules;
+wins, by the least of a range; of equals, the first. The daemon clamps each weight, and each
+end of a range, to the most its pool could ever grant one lease, beside the other pools'
+reservations and standing work.
+
+A caller can ask for its own size with `LEASEHOLD_WANT=2-4` (or `=3`). A PATH shim reads it
+from its command's environment, so `LEASEHOLD_WANT=2-4 pytest -n auto` works through a shim;
+the Claude Code hook reads it from Claude Code's own environment, so it applies to the whole
+session, and a `LEASEHOLD_WANT=` written in front of the agent's command is not seen. Either
+way it replaces the weight of whichever rule the command matches, any rule. Both ends are cut
+to the most one lease under that rule could ever be granted (the rule's `ceiling` in
+`GET /v1/commands`), and leasehold says what it cut. `hold` and a shim size the command to
+the size granted, within the cut range; the hook does so only when the command then runs
+through a shim. A value that is not a weight is ignored, and said. `hold` removes it from
+the environment of the command it runs, and a shim ignores it while the agent it runs under
+holds a hook's lease for any command. `leasehold commands` lists the rules;
 `leasehold commands --test "CMD"` says which one a command matches and the threads it gets.
 
 A command line is read as the shell would split it, without running anything: `&&`, `||`,
@@ -771,9 +887,10 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
   after `wait_s`, it is refused with a message that says the command did not run and tells
   the agent to do lighter work first (`when_busy = "deny"`, the default), or it runs without
   a lease and the agent is told so (`"run"`). Either message names the heaviest lease in the
-  pool, by its command and session, and the command's place in line: `machine busy for 300s:
-  cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds 14 of 14;
-  this needs 4; queued #1`. `leasehold doctor` warns when `wait_s` is under 120 s.
+  pool, by its command and session, and the place in line the command gave up: `machine busy
+  for 300s: cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds
+  14 of 14; this needs 4; gave up its place in line (#1)`. `leasehold doctor` warns when
+  `wait_s` is under 120 s.
 - When the daemon says no, with a `refused` answer (a request that could never be granted, a
   per-user limit) or an error answer under 500 (such as 403 `forbidden`), or the command
   matches a rule that `leasehold commands` marks as never granted, the command is denied with
@@ -784,6 +901,19 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
   why. The same rule holds for listing the rules and for asking for the lease.
 - A command run in the background, and one inside a lease already held (`LEASEHOLD_LEASE_ID`
   set), pass straight through.
+- A rule's [range](#ranges-min-max-slots), or a range in `LEASEHOLD_WANT`, is asked for as a
+  range, with both ends cut to the rule's `hook_ceiling` (what the range alone would be
+  granted on an idle machine). It waits for its MIN only, and admission sizes it like any
+  other range. The hook notes the size granted, with its job count and threads. When a range
+  is granted less than its most, the hook tells the agent the size before the command runs
+  (`additionalContext`): "leasehold: pytest was granted 3 of 2-6 slots; size it to 3 jobs (or
+  run the agent under `leasehold run`)". A fixed weight, or a range granted its most, tells
+  it nothing. When the hook cuts either end to `hook_ceiling`, its log says so.
+- The hook does not change the command, so it cannot size it. Under `leasehold run`, the
+  command goes through a PATH shim, which finds the hook's lease, takes no second one, and
+  gives the command the job count and threads of the size granted. Outside `leasehold run`
+  the command is not sized and uses whatever it finds, as a command under a fixed heavy rule
+  did in 0.3.
 
 The hooks go through a pre-filter, `hooks/prefilter.sh`, so that an ordinary Bash command
 starts no Python (about 10 ms instead of a tenth of a second or more). It reads the command
@@ -834,7 +964,7 @@ Gemini CLI. Its tools:
 | Tool | What it does |
 |---|---|
 | `machine_status` | Free slots, each pool, who waits and why, pressure and lending, ending with a recommendation |
-| `acquire_lease` | Ask for a lease of a weight; answers granted (with the job count) or queued within 20 s |
+| `acquire_lease` | Ask for a lease of a weight (or, with `max_weight`, a [range](#ranges-min-max-slots)); answers granted (with the weight granted and the job count) or queued within 20 s |
 | `wait_for_capacity` | Wait up to 20 s more for a queued lease |
 | `release_lease` | Give back a lease this server made |
 | `list_my_leases` | What this server holds and has waiting |
@@ -893,9 +1023,9 @@ client for it.
 | `GET /v1/status` | | the machine: [below](#the-status-object) |
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
-| `GET /v1/commands` | | the `[commands]` rules, each weight clamped as the daemon would grant it; a rule no lease could ever be granted for carries `never`, the reason |
-| `POST /v1/acquire` | `kind`, `pool`, `weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` (a size such as `"6g"`) | `status`: `granted` (with `lease`), `queued` (with `position` and `blocked`) or `refused` (with `reason`) |
-| `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown` |
+| `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, and `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it); a rule no lease could ever be granted for carries `never`, the reason |
+| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`) | `status`: `granted` (with `lease`), `queued` (with `position`, `blocked`, and the `min_weight` and `max_weight` it waits with, as admission would cut them now) or `refused` (with `reason`) |
+| `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool` and `jobs` |
 | `POST /v1/release` | `lease_id` | `released` |
 | `POST /v1/lend` | `open`: true or false | the lend state; administrators only |
 | `POST /v1/pools/<name>` | `max`: a number, or null to reset | the pool; administrators only |
@@ -906,6 +1036,14 @@ with the same `lease_id` keeps the place in line, and is not a new request. A pl
 its pool's per-user limits (`per_user_max_queued`, `create_rate_per_min`) is `refused` with
 `code: "quota_exceeded"`; one that fits now is granted whatever the waiting limit. A 0.2
 daemon does not take `memory`; `leasehold.client.Client` then asks again without it.
+
+`weight` is the least the lease needs and `max_weight` (at least `weight`; absent: `weight`)
+the most it can use: a [range](#ranges-min-max-slots). A granted `lease` has `weight`, the size
+granted, `min_weight` and `max_weight` (the range, `max_weight` as cut by the daemon), and
+`jobs` for the size granted. `memory` and `memory_per_slot` together are a 400 `bad_request`,
+as is a `max_weight` below `weight`. A daemon from before ranges does not take `max_weight` or
+`memory_per_slot`; `leasehold.client.Client` then asks again without them (a per-slot size sent
+as the `memory` of `weight` slots), and is granted `weight`.
 
 An acquire naming a pool that does not exist is `refused` with `reason` `there is no pool
 'NAME'`.
@@ -923,6 +1061,8 @@ Events are kept in memory, the last 500, each with a `type`: `granted` (and whet
 `waited`), `queued` (with its `position`), `left` (the line, without a grant), `released`,
 `ended` (with a `reason`: `expired`, `holder gone`, or `no longer matched` for an observed
 program), `revoked`, `lend_opened` and `lend_closed`. A restarted daemon numbers them afresh.
+An event about a lease or a place in line carries its `weight` (a lease's size granted, a
+waiting item's least), `min_weight` and `max_weight`.
 
 ### The status object
 
@@ -932,8 +1072,9 @@ when a field is removed or changes meaning:
 - `version`, `mode` (`user` or `system`), `time`, `machine` (`name`, `labels`), `facts`;
 - `ceiling` (`slots`, `cpus`, `memory`, `memory_bytes`), and the machine's `slots`, `held` and
   `overcommitted`;
-- `pools`, per pool: `reserved`, `max`, `priority`, `preemptible`, `observed`, `closed`,
-  `held_weight`, `overcommitted`, `running`, `revoked`, `queued`, `memory_counted_bytes`. A
+- `pools`, per pool: `reserved`, `max`, `priority`, `headroom` (as a count),
+  `preemptible`, `observed`, `closed`, `held_weight`, `overcommitted`, `running`, `revoked`,
+  `queued`, `memory_counted_bytes`. A
   pool's `held_weight` includes its standing weight; `running` counts leases only;
   `memory_counted_bytes` is the memory admission counts there (0 without `[memory]`);
 - `load`: `pressure`, `loadavg`, `mem_available_bytes`, `mem_total_bytes`, `cgroup_v2`,
@@ -949,8 +1090,13 @@ when a field is removed or changes meaning:
 - `contain`: the daemon's `[contain]` settings, `mode` and `hard_cpu` (whether a given caller
   is contained is that caller's own `leasehold doctor`);
 - `standing`, `leases`, and `queue`, each queued item with its `position` and why it waits
-  (`blocked`). Each lease and queued item has `memory_bytes` (what it declared, or null) and
-  `memory_counted_bytes` (what admission counts for it).
+  (`blocked`). Each lease and queued item has `memory_bytes` (what it declared, or null; a
+  lease declaring memory per slot gives the total it was granted, its weight times the size),
+  `memory_per_slot_bytes` (what it declared per slot, or null) and `memory_counted_bytes`
+  (what admission counts for it), and `weight`, `min_weight` and `max_weight`: a lease's
+  `weight` is the size it was granted, a queued item's the least it needs, and `min_weight`
+  and `max_weight` are the [range](#ranges-min-max-slots) asked (both `weight` for a lease from
+  before ranges). A pool's `held_weight` counts the sizes granted.
 
 ## The command line
 
@@ -977,7 +1123,7 @@ leasehold run [--session SESSION] [--leave-running] [--quiet] [--no-contain] ...
 run a command under a lease:
 
 ```
-leasehold hold [--kind {work,external,lend}] [--pool POOL] [--weight WEIGHT] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--grace GRACE] [--jobserver] [--no-job-env] [--threads N|jobs] [--if-unavailable run|fail] ...
+leasehold hold [--kind {work,external,lend}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--grace GRACE] [--jobserver] [--no-job-env] [--threads N|jobs] [--if-unavailable run|fail] ...
 ```
 
 the machine live: slots, pressure, pools, leases, the queue and events:
@@ -1037,7 +1183,7 @@ leasehold observe [--json]
 wait for a lease another process will release:
 
 ```
-leasehold acquire --lease-id LEASE_ID [--kind {work,external,lend}] [--pool POOL] [--weight WEIGHT] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--keep] [--max-hold MAX_HOLD] [--watch-pid WATCH_PID]
+leasehold acquire --lease-id LEASE_ID [--kind {work,external,lend}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--keep] [--max-hold MAX_HOLD] [--watch-pid WATCH_PID]
 ```
 
 renew a lease until it is released or a limit is hit:

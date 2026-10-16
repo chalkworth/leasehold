@@ -142,6 +142,8 @@ class FakeLoad:
 FACTS = {"cpus_logical": 4, "memory_bytes": 16 << 30, "arch": "x86_64", "kvm": False}
 
 
+#: The default pools of `machine_config`, with no headroom in `work`: a range alone there
+#: grows to its most.
 def machine_config(tmp, **overrides):
     """A small machine with the default pools on 2 slots: `work` reserves 1 and may use 2,
     `external` and `lend` may use 1 each, `observed` 2. A dict override is merged into the

@@ -8,6 +8,8 @@ import socket
 from pathlib import Path
 from urllib.parse import quote
 
+from leasehold.units import memory_to_bytes
+
 
 class Unavailable(ConnectionError):
     """The daemon could not be reached."""
@@ -69,15 +71,21 @@ class Client:
 
     def acquire(self, **body) -> dict:
         """Ask for a lease (`POST /v1/acquire`); fields that are None are left out. A daemon
-        older than 0.3 does not take `memory`: the request is then made again without it."""
+        that does not take a newer field (`OPTIONAL`) is asked again without it: one older than
+        0.3 takes no `memory`, and one from before ranges no `max_weight` (it grants the
+        `weight`) and no `memory_per_slot` (declared instead as `memory`, the `weight`'s worth,
+        which is what such a daemon grants)."""
         body = {k: v for k, v in body.items() if v is not None}
-        try:
-            return self.request("POST", "/v1/acquire", body, extra_timeout=body.get("wait_s", 0))
-        except ApiError as exc:
-            if "memory" not in body or not _unknown_field(exc, "memory"):
-                raise
-        body.pop("memory")
-        return self.request("POST", "/v1/acquire", body, extra_timeout=body.get("wait_s", 0))
+        while True:
+            try:
+                return self.request(
+                    "POST", "/v1/acquire", body, extra_timeout=body.get("wait_s", 0)
+                )
+            except ApiError as exc:
+                unknown = _unknown_fields(exc)
+                if not unknown or not unknown <= OPTIONAL or not unknown & body.keys():
+                    raise
+            body = _without(body, unknown)
 
     def renew(self, lease_id: str, ttl_s: float | None = None) -> dict:
         body = {"lease_id": lease_id} | ({} if ttl_s is None else {"ttl_s": ttl_s})
@@ -94,12 +102,32 @@ class Client:
         return self.request("POST", f"/v1/pools/{quote(pool, safe='')}", {"max": maximum})
 
 
-def _unknown_field(exc: ApiError, name: str) -> bool:
-    """Whether the daemon refused a request only for not knowing the field `name`."""
+#: The acquire fields a daemon older than this client may not take, and so may be left out.
+OPTIONAL = frozenset({"memory", "max_weight", "memory_per_slot"})
+
+
+def _without(body: dict, unknown: set[str]) -> dict:
+    """`body` without the fields in `unknown`; a `memory_per_slot` left out becomes the
+    `memory` of the `weight` it is granted, where `memory` is a field still taken."""
+    out = {k: v for k, v in body.items() if k not in unknown}
+    per_slot = body.get("memory_per_slot")
+    if "memory_per_slot" in unknown and per_slot is not None and "memory" not in unknown:
+        out["memory"] = f"{int(body.get('weight', 1)) * memory_to_bytes(per_slot)}b"
+    return out
+
+
+def _unknown_fields(exc: ApiError) -> set[str]:
+    """The fields the daemon refused a request for not knowing, when that is its only reason;
+    an empty set otherwise."""
     detail = exc.payload.get("detail")
     if exc.status != 400 or not isinstance(detail, list) or not detail:
-        return False
-    return all(
-        isinstance(e, dict) and e.get("type") == "extra_forbidden" and e.get("loc") == [name]
-        for e in detail
-    )
+        return set()
+    names = set()
+    for e in detail:
+        if not isinstance(e, dict) or e.get("type") != "extra_forbidden":
+            return set()
+        loc = e.get("loc")
+        if not isinstance(loc, list) or len(loc) != 1:
+            return set()
+        names.add(loc[0])
+    return names

@@ -103,6 +103,15 @@ Threads = int | str
 
 _JOBSERVER_FLAGS = ("--jobserver-auth=", "--jobserver-fds=")
 
+#: A `threads` share: the job count divided among N workers ("jobs/N"), and at most K
+#: ("jobs/N:K"), each a count of 1 to 6 digits with no leading zero.
+_SHARE = re.compile(r"jobs/[1-9][0-9]{0,5}(:[1-9][0-9]{0,5})?")
+
+
+def is_share(value: object) -> bool:
+    """Whether `value` is a `threads` share, "jobs/N" or "jobs/N:K" (`_SHARE`)."""
+    return isinstance(value, str) and _SHARE.fullmatch(value) is not None
+
 
 def thread_count(threads: Threads, jobs: int) -> int:
     """The thread count `threads` gives a lease of `jobs` jobs, never more than `jobs` nor

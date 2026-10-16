@@ -38,6 +38,8 @@ def test_a_queued_answer_gives_the_place_and_why_it_waits(tmp_path):
         "lease_id": "F",
         "position": 1,
         "blocked": "pool external holds 1 of 1; this needs 1",
+        "min_weight": 1,
+        "max_weight": 1,
     }
     [queued] = agent.leases()["queue"]
     assert (queued["position"], queued["blocked"]) == (1, answer["blocked"])

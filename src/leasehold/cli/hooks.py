@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from leasehold import claude_code, programs, shell, shims
+from leasehold import claude_code, programs, shell, shims, weights
 from leasehold.client import ApiError, Unavailable
 
 
@@ -126,7 +126,11 @@ def _rule_line(rule: shell.Rule, threads: int | str | None = None) -> str:
     args = f" with arguments matching {rule.args!r}" if rule.args else ""
     never = f"; never granted, so refused: {rule.never}" if rule.never else ""
     count = _threads_text(rule.threads if threads is None else threads)
-    return f"weight {rule.weight} in pool {rule.pool}{args}; threads per process: {count}{never}"
+    weight = weights.text(rule.weight, rule.max_weight)
+    per_slot = f", {rule.memory_per_slot} a slot" if rule.memory_per_slot else ""
+    return (
+        f"weight {weight} in pool {rule.pool}{per_slot}{args}; threads per process: {count}{never}"
+    )
 
 
 def _describe(found: shell.Match, threads: int | str | None) -> dict:
@@ -138,6 +142,8 @@ def _describe(found: shell.Match, threads: int | str | None) -> dict:
         "programs": sorted(rule.programs),
         "args": rule.args,
         "weight": rule.weight,
+        "max_weight": rule.max_weight,
+        "memory_per_slot": rule.memory_per_slot,
         "pool": rule.pool,
         "source": rule.source,
         "never": rule.never,

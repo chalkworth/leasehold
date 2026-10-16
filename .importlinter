@@ -74,6 +74,7 @@ source_modules =
     leasehold.shell
     leasehold.terminal
     leasehold.hooknotes
+    leasehold.weights
 forbidden_modules =
     leasehold.admission
     leasehold.ledger

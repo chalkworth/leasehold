@@ -21,11 +21,11 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from leasehold import __version__, observe, proctable, status
 from leasehold.access import Forbidden
-from leasehold.admission import AdmissionPolicy
+from leasehold.admission import AdmissionPolicy, alone
 from leasehold.events import EventLog, EventType, Snapshot, changes
 from leasehold.facts import probe
 from leasehold.guard import Guard, Reading
@@ -33,7 +33,7 @@ from leasehold.kinds import GRANTED, PREEMPTIBLE, LeaseKind
 from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
 from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, some_avg10
-from leasehold.machine import MachineConfig
+from leasehold.machine import MachineConfig, lease_memory_limit
 from leasehold.proctable import Proc
 from leasehold.units import declared_to_bytes, memory_to_bytes
 
@@ -55,7 +55,11 @@ class AcquireRequest(BaseModel):
 
     kind: LeaseKind
     pool: str | None = None
+    #: The least weight the work needs: what it waits in line for.
     weight: int = Field(1, ge=1)
+    #: The most it can use (at least `weight`; None: `weight`). The lease is granted a size
+    #: between the two when it is admitted (`leasehold.admission.grants`) and keeps it.
+    max_weight: int | None = Field(None, ge=1)
     labels: dict[str, str] = Field(default_factory=dict)
     #: The caller's own id for the lease, so asking again is idempotent; one is made if absent.
     lease_id: str | None = None
@@ -69,13 +73,24 @@ class AcquireRequest(BaseModel):
     #: The memory the work will use, a size such as `4g`: counted against the machine's memory
     #: budget when it has one. None: the machine assumes some per slot of weight.
     memory: str | None = None
+    #: The memory each slot granted will use, a size such as `2g`, instead of `memory`: counted
+    #: at the size the lease is granted.
+    memory_per_slot: str | None = None
 
-    @field_validator("memory")
+    @field_validator("memory", "memory_per_slot")
     @classmethod
     def _memory(cls, value: str | None) -> str | None:
         if value is not None:
             declared_to_bytes(value)
         return value
+
+    @model_validator(mode="after")
+    def _consistent(self) -> AcquireRequest:
+        if self.max_weight is not None and self.max_weight < self.weight:
+            raise ValueError(f"max_weight {self.max_weight} is below weight {self.weight}")
+        if self.memory is not None and self.memory_per_slot is not None:
+            raise ValueError("memory and memory_per_slot are both given: give one or the other")
+        return self
 
     @field_validator("lease_id", "session")
     @classmethod
@@ -193,6 +208,7 @@ class MachineAgent:
             memory_short=self._memory_short() if free is not None else None,
             memory_pressing=guarding and counting and self.guard.pressing,
             memory_overdue=self._overdue() if free is not None else frozenset(),
+            lease_memory=self.limits.memory_bytes,
         )
 
     def memory_free(self) -> int:
@@ -208,7 +224,12 @@ class MachineAgent:
         recent = sum(
             row["memory"]
             if row["memory"] is not None
-            else row["weight"] * self.budget.assumed_per_slot
+            else row["weight"]
+            * (
+                row["memory_per_slot"]
+                if row["memory_per_slot"] is not None
+                else self.budget.assumed_per_slot
+            )
             for row in self.ledger.leases()
             if row["scope"] != OBSERVED_SCOPE
             and self._granted_at.get(_grant_key(row), since) >= since
@@ -425,10 +446,11 @@ class MachineAgent:
         ]
 
     def _snapshot(self) -> Snapshot:
-        lines = self.ledger.lines(self.policy())
+        policy = self.policy()
+        lines = self.ledger.lines(policy)
         leases = [status.public(r) | {"scope": r["scope"]} for r in self.ledger.leases()]
         queue = [
-            status.public(r)
+            status.public(r, policy)
             | {"scope": r["scope"], "position": lines.get((r["scope"], r["item_id"]), (None,))[0]}
             for r in self.ledger.queued()
         ]
@@ -485,12 +507,22 @@ class MachineAgent:
             return {"status": "refused", "reason": refused}
         lease_id = req.lease_id or uuid.uuid4().hex
         memory = None if req.memory is None else memory_to_bytes(req.memory)
-        if self.budget is not None and memory is not None and memory > self.limits.memory_bytes:
+        per_slot = None if req.memory_per_slot is None else memory_to_bytes(req.memory_per_slot)
+        least = memory if per_slot is None else req.weight * per_slot
+        # [ceiling] memory limits each lease: a per-slot size always, a total with a budget.
+        limited = self.budget is not None or per_slot is not None
+        if limited and least is not None and least > self.limits.memory_bytes:
+            what = (
+                f"memory {req.memory}"
+                if per_slot is None
+                else f"memory_per_slot {req.memory_per_slot} at weight {req.weight} "
+                f"({least / 2**30:.1f} GiB)"
+            )
+            limit = lease_memory_limit(self.config.ceiling.memory, self.limits.memory_bytes)
             return {
                 "status": "refused",
                 "lease_id": lease_id,
-                "reason": f"memory {req.memory} is more than the {self.limits.memory} one lease "
-                "may be given ([ceiling] memory)",
+                "reason": f"{what} is more than {limit}",
             }
         item = LedgerItem(
             scope=SCOPE,
@@ -502,6 +534,8 @@ class MachineAgent:
             labels=tuple(sorted(req.labels.items())),
             session=req.session_name(),
             memory=memory,
+            max_weight=req.max_weight,
+            memory_per_slot=per_slot,
         )
         ttl = req.ttl_s or self.config.lease_ttl_s
         with self._lock:
@@ -553,8 +587,21 @@ class MachineAgent:
                 "lease_id": lease_id,
                 "position": outcome.position,
                 "blocked": outcome.blocked,
+                **self._waiting_range(lease_id),
             }
         return {"status": "refused", "lease_id": lease_id, "reason": outcome.reason}
+
+    def _waiting_range(self, lease_id: str) -> dict:
+        """The range the item `lease_id` waits with, as admission would cut it now
+        (`AdmissionPolicy.most`): `min_weight` and `max_weight`; empty when it is not waiting."""
+        for row in self.ledger.queued():
+            if row["scope"] == SCOPE and row["item_id"] == lease_id:
+                weight = row["weight"]
+                most = self.policy().most(
+                    row["pool"], weight, row["max_weight"], row["memory"], row["memory_per_slot"]
+                )
+                return {"min_weight": weight, "max_weight": most}
+        return {}
 
     def acquire_wait(self, req: AcquireRequest, *, user: str | None) -> dict:
         """`acquire`, retried as capacity changes until granted, refused or `wait_s` is up. A
@@ -577,12 +624,21 @@ class MachineAgent:
         with self._lock:
             self._check_owner(lease_id, user)
             renewal = self.ledger.renew((SCOPE, lease_id), ttl_s=ttl_s)
-        return {
+        answer = {
             "status": renewal.status,
             "lease_id": lease_id,
             "expires_at": renewal.expires_at,
             "reason": renewal.reason,
         }
+        if renewal.weight is not None:
+            answer |= {
+                "weight": renewal.weight,
+                "min_weight": renewal.min_weight,
+                "max_weight": renewal.max_weight,
+                "pool": renewal.pool,
+                "jobs": self.config.jobs.for_weight(renewal.weight),
+            }
+        return answer
 
     def release(self, lease_id: str, *, user: str | None) -> dict:
         with self._lock:
@@ -633,7 +689,7 @@ class MachineAgent:
         queue = []
         for row in self.ledger.queued():
             place, blocked = lines.get((row["scope"], row["item_id"]), (None, None))
-            queue.append(status.public(row) | {"position": place, "blocked": blocked})
+            queue.append(status.public(row, policy) | {"position": place, "blocked": blocked})
         queue.sort(
             key=lambda q: (
                 pool_order.get(q["pool"], len(pool_order)),
@@ -663,23 +719,48 @@ class MachineAgent:
 
     def commands(self) -> dict:
         """Which commands take a lease, for agent hooks and shims to match against: each rule
-        with its pool named and its weight cut to the most one lease declaring its memory could
-        ever be admitted with in that pool (`AdmissionPolicy.heaviest`), so what it asks for can
-        be granted. A rule no lease could ever be granted for (`MachineConfig.never_reason`)
-        is served at its own weight with `never`, the reason: it still matches its commands,
-        and hooks and shims refuse them rather than take a lighter rule's lease."""
+        with its pool named and its weight and `max_weight` each cut to the most one lease
+        declaring its memory could ever be granted in that pool (`AdmissionPolicy.most`: what
+        fits the pool and the machine, and with a per-slot size `[ceiling] memory`), so what it
+        asks for can be granted, and that most as its `ceiling`. Its `hook_ceiling` is what the
+        rule's range alone would be granted on an idle machine (`admission.alone`): the most an
+        agent hook asks, cutting both ends of its range to it. All are computed when served,
+        from the pools as they are then. A rule declaring `memory_per_slot` alone is also served a
+        `memory`, its least weight's worth, for clients from before memory per slot. A rule no
+        lease could ever be granted for (`MachineConfig.never_reason`, which judges its least
+        weight) is served at its own weights with `never`, the reason: it still matches its
+        commands, and hooks and shims refuse them rather than take a lighter rule's lease."""
         settings = self.config.commands
         policy = self.policy()
         rules = []
         for src, rule in settings.rules():
-            served = rule.model_dump() | {"pool": self.config.rule_pool(rule), "source": src}
+            served = rule.model_dump() | {
+                "pool": self.config.rule_pool(rule),
+                "source": src,
+                "max_weight": rule.most,
+            }
             reason = self.config.never_reason(rule, policy, self.memory_bytes)
             if reason is not None:
                 rules.append(served | {"weight": rule.weight, "never": reason})
                 continue
             memory = None if rule.memory is None else memory_to_bytes(rule.memory)
-            top = policy.heaviest(served["pool"], memory)
-            rules.append(served | {"weight": min(rule.weight, top, self.config.ceiling.slots)})
+            per_slot = (
+                None if rule.memory_per_slot is None else memory_to_bytes(rule.memory_per_slot)
+            )
+            pool = served["pool"]
+            most = policy.most(pool, 1, self.config.ceiling.slots, memory, per_slot)
+            top = min(most, self.config.ceiling.slots)
+            least = min(rule.weight, top)
+            most = max(least, min(rule.most, top))
+            sizes = {
+                "weight": least,
+                "max_weight": most,
+                "ceiling": top,
+                "hook_ceiling": alone(policy, pool, least, most, memory, per_slot),
+            }
+            if per_slot is not None and memory is None:
+                sizes["memory"] = f"{least * per_slot}b"
+            rules.append(served | sizes)
         return {
             "rules": rules,
             "wait_s": settings.wait_s,

@@ -29,11 +29,16 @@ def _slots(n: int) -> str:
 
 
 def reason(
-    answer: Mapping, leases: Sequence[Mapping], *, pool: str | None, waited_s: float | None = None
+    answer: Mapping,
+    leases: Sequence[Mapping],
+    *,
+    pool: str | None,
+    waited_s: float | None = None,
+    gave_up: bool = False,
 ) -> str:
     """One line: the heaviest lease in `pool` (in any pool when `pool` holds none) and how much
-    the others hold, why the request waits (`blocked`) and its place in line (`position`). A
-    refusal adds `ADVICE`."""
+    the others hold, why the request waits (`blocked`) and its place in line (`position`), or,
+    with `gave_up`, the place it gave up. A refusal adds `ADVICE`."""
     mine = [lease for lease in leases if lease.get("pool") == pool]
     held = sorted(mine or leases, key=lambda lease: -int(lease.get("weight") or 0))
     parts = []
@@ -48,15 +53,17 @@ def reason(
     if answer.get("blocked"):
         parts.append(str(answer["blocked"]))
     if answer.get("position") is not None:
-        parts.append(f"queued #{answer['position']}")
+        place = answer["position"]
+        parts.append(f"gave up its place in line (#{place})" if gave_up else f"queued #{place}")
     head = "machine busy" if waited_s is None else f"machine busy for {waited_s:g}s"
     return f"{head}: {'; '.join(parts) or 'no room'}"
 
 
 def told(client: Client, answer: Mapping, *, pool: str | None, waited_s: float) -> str:
-    """`reason` with the leases the daemon lists now (none when it does not answer)."""
+    """`reason` for a request that waited `waited_s` and then gave up its place in line, with
+    the leases the daemon lists now (none when it does not answer)."""
     try:
         leases = client.leases()["leases"]
     except (Unavailable, ApiError):
         leases = []
-    return reason(answer, leases, pool=pool, waited_s=waited_s)
+    return reason(answer, leases, pool=pool, waited_s=waited_s, gave_up=True)

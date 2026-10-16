@@ -56,8 +56,8 @@ agent reads:
 
 ```
 leasehold: machine busy for 300s: cargo test (session claude_3f9a1c) holds 8 slots, 2 other
-leases hold 4; pool work holds 12 of 12; this needs 4; queued #1. The command did not run. Do
-lighter work first, then run it again.
+leases hold 4; pool work holds 12 of 12; this needs 4; gave up its place in line (#1). The
+command did not run. Do lighter work first, then run it again.
 ```
 
 In Claude Code, the plugin does the same through a hook, without the shims:

@@ -8,6 +8,8 @@ worth). Work holds a **weight** in slots while it runs. The slots are split into
   sit idle.
 * `max`: the most the pool may hold at once.
 * `priority`: pools are served in this order, lower first.
+* `headroom`: slots a range's extra slots leave free in the pool for requests that arrive
+  later (`leasehold.admission`); `"auto"`, the default, is a quarter of `max`, rounded down.
 * per-user limits: how many items one user may run (`per_user_max_running`) and have waiting
   (`per_user_max_queued`) in the pool, and how many they may submit per minute
   (`create_rate_per_min`).
@@ -18,7 +20,7 @@ writes a file.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -50,6 +52,16 @@ class Pool(_Strict):
     #: How many items one user may submit into this pool per minute (a sliding window the
     #: ledger keeps); None is unlimited.
     create_rate_per_min: int | None = Field(None, ge=1)
+    #: Slots a range's extra slots leave free in this pool for requests that arrive later (the
+    #: machine keeps the largest of its pools'); a request's own least may still use them. "auto"
+    #: is `max` // 4 (`headroom_slots`). One of `max` or more leaves no extra slots in the pool.
+    headroom: Literal["auto"] | Annotated[int, Field(ge=0, strict=True)] = "auto"
+
+    def headroom_slots(self) -> int:
+        """`headroom` as a count: "auto" is `max` // 4 (8 gives 2, 3 gives 0)."""
+        if self.headroom == "auto":
+            return self.max // 4
+        return self.headroom
 
 
 class PoolSet(_Strict):

@@ -27,6 +27,10 @@ runs (`leasehold.terminal`); otherwise it runs in a session of its own.
 
 Where the daemon allows it and the caller runs in the user's own session, the command is started
 in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it runs as is.
+
+A lease asked for as a range (`--weight 2-4`) is sized to the weight it was granted: its job
+and thread counts, jobserver, `LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot,
+`MemoryHigh`. The command does not inherit `LEASEHOLD_WANT` (`leasehold.weights`).
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, jobs, shell, terminal
+from leasehold import contain, jobs, shell, terminal, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -56,6 +60,7 @@ from leasehold.exits import (
     end_by,
 )
 from leasehold.kinds import PREEMPTIBLE
+from leasehold.units import memory_to_bytes
 
 __all__ = [
     "EXIT_BUSY",
@@ -168,7 +173,8 @@ def wait_for_grant(
 def waiting_line(request: dict, answer: dict) -> str:
     """What `hold` and `acquire` print while queued: what they wait for, their place and why."""
     weight = request.get("weight", 1)
-    slots = "1 slot" if weight == 1 else f"{weight} slots"
+    most = request.get("max_weight") or weight
+    slots = "1 slot" if most == weight == 1 else f"{weights.text(weight, most)} slots"
     where = f" in pool {request['pool']}" if request.get("pool") else ""
     line = f"waiting for {slots}{where} ({request['kind']}): place {answer.get('position')}"
     blocked = answer.get("blocked")
@@ -290,14 +296,17 @@ def hold(
     memory: str | None = None,
     threads: jobs.Threads | None = None,
     if_unavailable: str = "run",
+    max_weight: int | None = None,
+    memory_per_slot: str | None = None,
 ) -> int:
-    """Run `argv` under a lease, sized to it (`leasehold.jobs`): the job-count and thread-count
-    variables unless `job_env` is false, a make jobserver when `jobserver` is true, and when
-    contained a scope weighted to the lease and held to `memory` (a size such as `4g`) when
-    given. `memory` is also declared with the request, so a daemon with a memory budget counts
-    it. With no `weight`, the command is weighed as the daemon's `[commands]` rules weigh it
-    (`auto_size`); with no `threads`, its thread count is the matching rule's `threads`, and
-    "jobs" when no rule matches.
+    """Run `argv` under a lease of `weight` to `max_weight` slots (None: `weight`), sized to
+    the weight granted (`leasehold.jobs`): the job-count and thread-count variables unless
+    `job_env` is false, a make jobserver when `jobserver` is true, and when contained a scope
+    weighted to the lease and held to `memory` (a size such as `4g`), or to `memory_per_slot`
+    for each slot granted, when given. Either is also declared with the request, so a daemon
+    with a memory budget counts it. With no `weight`, the command is weighed as the daemon's
+    `[commands]` rules weigh it (`auto_size`), range and memory included; with no `threads`,
+    its thread count is the matching rule's `threads`, and "jobs" when no rule matches.
     With no daemon (`client` None: none could be found), `if_unavailable` `run` runs it without
     a lease (`run_unleased`), `fail` exits `EXIT_UNAVAILABLE`. A leased command gets the
     client's socket as `LEASEHOLD_SOCKET`, so a `hold` or shim inside it reaches the same
@@ -312,7 +321,9 @@ def hold(
             if weight is None or (threads is None and job_env):
                 rule = auto_size(client, argv) if client is not None else _UNSIZED
                 if weight is None:
-                    weight, memory = rule.weight, memory or rule.memory
+                    weight, max_weight = rule.weight, rule.max_weight
+                    if memory is None and memory_per_slot is None:
+                        memory, memory_per_slot = rule.memory, rule.memory_per_slot
                 if threads is None:
                     threads = rule.threads
             threads = "jobs" if threads is None else threads
@@ -324,6 +335,8 @@ def hold(
                 session=session,
                 ttl_s=ttl_s,
                 memory=memory,
+                max_weight=max_weight,
+                memory_per_slot=memory_per_slot,
             )
             if client is None:
                 code, answer = EXIT_UNAVAILABLE, {}
@@ -354,6 +367,7 @@ def hold(
                 memory=memory,
                 threads=threads,
                 socket=getattr(client, "path", None),
+                memory_per_slot=memory_per_slot,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -374,7 +388,7 @@ def auto_size(
     cwd: Path | None = None,
 ) -> shell.Rule:
     """The rule of the daemon's `[commands]` that `argv`, read as a command line, matches, as
-    the agent hooks and `leasehold commands --test` match it, for its weight and memory. Its
+    the agent hooks and `leasehold commands --test` match it, for its weights and memory. Its
     `threads` is the whole command line's (`shell.threads`), read with `env` and `cwd`
     (default ours): a count, "jobs", or a share of the job count ("jobs/N", "jobs/N:K").
     `_UNSIZED` when no rule matches, with the line's `threads` when a pytest run on it starts
@@ -411,9 +425,13 @@ def lease_request(
     session: str | None = None,
     ttl_s: float | None = None,
     memory: str | None = None,
+    max_weight: int | None = None,
+    memory_per_slot: str | None = None,
 ) -> dict:
-    """An acquire request for a new lease of its own id, as `hold` sends it. `memory` (a size
-    such as `4g`) is the memory the work declares; None declares none."""
+    """An acquire request for a new lease of its own id, as `hold` sends it: `weight` to
+    `max_weight` slots (None, or `weight`: no range is sent). `memory` (a size such as `4g`)
+    is the memory the work declares in all, `memory_per_slot` for each slot it is granted;
+    None declares none."""
     return {
         "kind": kind,
         "pool": pool,
@@ -423,6 +441,8 @@ def lease_request(
         "session": session,
         "ttl_s": ttl_s,
         "memory": memory,
+        "max_weight": max_weight if max_weight is not None and max_weight > weight else None,
+        "memory_per_slot": memory_per_slot,
     }
 
 
@@ -438,13 +458,17 @@ def run_leased(
     memory: str | None = None,
     threads: jobs.Threads = "jobs",
     socket: str | None = None,
+    memory_per_slot: str | None = None,
 ) -> int:
-    """`hold` once `request` is granted (`answer`): run `argv` sized to the lease (its thread
-    pools to `threads`, `jobs.thread_count`; `child_env`), renewing it, and release it when
-    the command ends; the command's exit code (`_ended`). SIGINT, SIGTERM or SIGHUP before
-    the command runs gives the lease back and stops what was started of it."""
+    """`hold` once `request` is granted (`answer`): run `argv` sized to the weight granted (its
+    thread pools to `threads`, `jobs.thread_count`; `child_env`; when contained, held to
+    `memory`, or to `memory_per_slot` for each slot granted), renewing the lease, and release
+    it when the command ends; the command's exit code (`_ended`). SIGINT, SIGTERM or SIGHUP
+    before the command runs gives the lease back and stops what was started of it."""
     lease_id, kind = request["lease_id"], request["kind"]
     granted = answer["lease"]
+    if memory is None and memory_per_slot is not None:
+        memory = f"{int(granted['weight']) * memory_to_bytes(memory_per_slot)}b"
     lease = _Lease(client, lease_id, kind, float(granted["ttl_s"]))
     count = int(granted.get("jobs") or granted["weight"])
     tty = terminal.owned()
@@ -526,14 +550,15 @@ def foreground(pgid: int) -> Iterator[None]:
 
 
 def run_unleased(argv: Sequence[str], *, grace_s: float = 30.0) -> int:
-    """Run `argv` as `hold` runs a leased command, but with no lease, scope or job variables:
-    its own process group (with the terminal, when this process has it), signals forwarded, and
-    what it leaves in the group stopped when it ends. The command's exit code (`_ended`)."""
+    """Run `argv` as `hold` runs a leased command, but with no lease, scope or job variables
+    (its environment is `own_env`): its own process group (with the terminal, when this
+    process has it), signals forwarded, and what it leaves in the group stopped when it ends.
+    The command's exit code (`_ended`)."""
     tty = terminal.owned()
     with contextlib.ExitStack() as stack:
         relay = stack.enter_context(_relayed())
         try:
-            child, _ = spawn(argv, None, dict(os.environ), tty=tty)
+            child, _ = spawn(argv, None, own_env(), tty=tty)
         except OSError as exc:
             _say(f"cannot run {argv[0]}: {exc}")
             return EXIT_NOT_STARTED
@@ -609,6 +634,12 @@ def scope_prefix(request: dict, answer: dict, memory: str | None) -> list[str] |
     )
 
 
+def own_env() -> dict[str, str]:
+    """This process's environment as every command `hold` runs starts from, leased or not:
+    without `LEASEHOLD_WANT`, which is what `hold` was asked for, not its command."""
+    return {k: v for k, v in os.environ.items() if k != weights.ENV_WANT}
+
+
 def child_env(
     lease_id: str,
     granted: dict,
@@ -619,13 +650,15 @@ def child_env(
     env: Mapping[str, str] | None = None,
     socket: str | None = None,
 ) -> dict[str, str]:
-    """The command's environment: `env` (default ours) with the lease's `LEASEHOLD_*`
-    variables, and with `job_env` the job-count and thread-count variables for this lease
-    (`jobs.sized_env`). Without `job_env`, the enclosing lease's sizing is removed
-    (`jobs.unsized_env`). Which variables an enclosing lease set is read from `env` before this
-    lease's id is added, so it counts only when `env` holds a `LEASEHOLD_LEASE_ID`. `socket`,
-    the daemon's, is passed on as `LEASEHOLD_SOCKET`, made absolute."""
-    outer = dict(os.environ if env is None else env)
+    """The command's environment: `env` (default ours) without `LEASEHOLD_WANT` (what this
+    lease was asked for is not what the commands it runs ask for), with the lease's
+    `LEASEHOLD_*` variables (`LEASEHOLD_WEIGHT` is the weight granted), and with `job_env` the
+    job-count and thread-count variables for this lease (`jobs.sized_env`). Without `job_env`,
+    the enclosing lease's sizing is removed (`jobs.unsized_env`). Which variables an enclosing
+    lease set is read from `env` before this lease's id is added, so it counts only when `env`
+    holds a `LEASEHOLD_LEASE_ID`. `socket`, the daemon's, is passed on as `LEASEHOLD_SOCKET`,
+    made absolute."""
+    outer = {k: v for k, v in (os.environ if env is None else env).items() if k != weights.ENV_WANT}
     lease = {
         "LEASEHOLD_LEASE_ID": lease_id,
         "LEASEHOLD_GRANT": str(granted["grant"]),

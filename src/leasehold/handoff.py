@@ -55,9 +55,13 @@ def acquire(
     timeout_s: float | None = None,
     ttl_s: float | None = None,
     memory: str | None = None,
+    max_weight: int | None = None,
+    memory_per_slot: str | None = None,
 ) -> tuple[int, dict | None]:
-    """Wait for the lease `lease_id`: `(0, lease)` once granted, else `(exit code, None)`.
-    `memory` (a size such as `4g`) is the memory the work declares."""
+    """Wait for the lease `lease_id` of `weight` to `max_weight` slots (None: `weight`):
+    `(0, lease)` once granted, its `weight` the size granted, else `(exit code, None)`.
+    `memory` (a size such as `4g`) is the memory the work declares in all, `memory_per_slot`
+    what it declares for each slot granted."""
     request = {
         "kind": kind,
         "pool": pool,
@@ -67,6 +71,8 @@ def acquire(
         "session": session,
         "ttl_s": ttl_s,
         "memory": memory,
+        "max_weight": max_weight if max_weight is not None and max_weight > weight else None,
+        "memory_per_slot": memory_per_slot,
     }
     code, answer = wait_for_grant(client, request, timeout_s, _say, fault=EXIT_REFUSED)
     if code is not None:
@@ -162,6 +168,8 @@ def acquire_main(client: Client, socket: str, args) -> int:
         timeout_s=args.timeout,
         ttl_s=args.ttl,
         memory=getattr(args, "memory", None),
+        max_weight=getattr(args, "max_weight", None),
+        memory_per_slot=getattr(args, "memory_per_slot", None),
     )
     if lease is None:
         return code
