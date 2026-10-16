@@ -1,0 +1,82 @@
+# leasehold config for your own daemon on bench.
+# Sized for 8 CPUs and 16 GiB: one slot per CPU; 2 CPUs are kept for you, and at most three quarters of the memory to any one lease.
+# Made by `leasehold init` (or `leasehold setup`); `leasehold doctor` checks it. Only
+# [ceiling] slots is required; the reference (docs/reference.md) lists every key.
+
+name = "bench"
+mode = "user"
+ledger_dir = "ledger"            # your own daemon; `leasehold init --system` writes the machine's
+# socket and ledger_dir: by default $XDG_RUNTIME_DIR/leasehold/leasehold.sock and
+# $XDG_STATE_HOME/leasehold; the socket is yours alone (mode 0600)
+
+# Slots are what leases share, one per CPU given to leasehold's work; what is left is kept for
+# you (your editor, browser and shell). cpus and memory are the most one lease may be given.
+[ceiling]
+slots = 6
+cpus = 6
+memory = "11g"
+
+# Two pools. Your agents' and your own commands go in `work`; `hold --kind external` (a CI
+# runner's job, a batch run) goes in `background`, which never takes work's reserved slots and
+# is served after it.
+[pools.work]
+reserved = 3
+max = 6
+priority = 0
+
+[pools.background]
+reserved = 0
+max = 3
+priority = 1
+
+[kinds]
+work = "work"
+external = "background"
+
+[lend]
+pools = []               # no lending on a personal machine; see docs/reference.md, Lending
+
+# Containment: commands leasehold starts run in a systemd user scope weighted to their lease
+# (CPUWeight 100 per slot) where your systemd user manager allows it.
+[contain]
+mode = "auto"            # "off": never
+hard_cpu = false         # true: also cap a command at its weight in CPUs
+
+# Memory admission: a command starts only while the memory it counts fits the budget. It
+# counts what its rule or `hold --memory` declares, or, declaring none, its weight times
+# assumed_per_slot ("auto": the budget over the slots, so full slots are a full budget).
+[memory]
+budget = "auto"          # the machine's memory less `kept`; or a size such as "12g"
+kept = "25%"             # kept back for you: a share of the memory, or a size such as "4g"
+assumed_per_slot = "auto"
+
+# While memory is short, what runs keeps running and new work starts only within the memory
+# measured free: none while pressure is high, then a little at a time as it eases. What waits
+# says why.
+[guard]
+memory_pressure_on = 20.0     # PSI some avg10, percent
+memory_pressure_off = 5.0
+# min_available = "2g"        # default: 5% of memory, at least 512 MiB
+settle_s = 30
+
+# Which commands take a lease when an agent (or you, through the shims) runs them. The built-in
+# rules cover common builds and test runs; `leasehold commands` lists them.
+[commands]
+heavy_weight = 4
+wait_s = 300             # how long a command waits in line for its lease...
+when_busy = "deny"       # ...then: "deny" it with the reason, or "run" it without a lease
+
+# The built-in rules weigh 4 slots (builds and test runs: pytest, cargo, make, ...) and 2
+# (JavaScript tooling: npm test, jest, tsc, ...), in slots and in jobs.
+# On 6 slots, one of them runs at a time.
+# To run two at once instead, each with fewer jobs (opt-in):
+# heavy_weight = 3
+# light_weight = 2
+# A command that declares no memory then counts its weight times the budget over the
+# slots, which may be less than it uses: declare memory for memory-heavy work (a rule's
+# `memory`, or `hold --memory`).
+
+# [[commands.rule]]
+# programs = ["pytest"]
+# weight = 3
+# memory = "8g"          # counted against [memory]; held to this when contained (MemoryHigh)
