@@ -139,6 +139,12 @@ here.
   `leasehold.shims.covered_env`; `leasehold.doctor.check_headroom`;
   `leasehold.mcp_server.Held.waiting`, and `Held.sizes` returns None when the daemon has said
   no range; `leasehold.client.OPTIONAL`.
+- A policy simulator for the benchmark, `python -m bench.sim` (`run`, `calibrate`, `study`).
+  Simulated agents run the benchmark's plans, or replay a measured run, and leasehold's own
+  `admission.grants` decides when each job starts and at what size. It is calibrated against
+  the runs under `bench/results/8cpu-16g/` and compares weight defaults (docs/sim.md). It needs
+  SimPy, from a new `bench` dependency group that only `uv sync --group bench` installs; the
+  package's own dependencies are unchanged.
 - Elastic leases: a range can grow and shrink after it is admitted (`elastic: true` in
   `POST /v1/acquire`, or `POST /v1/elastic` for a range already held). Its holder promises to
   take slots when they are offered and to give them back when asked. The daemon works out

@@ -1,0 +1,82 @@
+{
+ "params": {
+  "core_share": 0.5,
+  "smt_yield": 0.999999999534473,
+  "rate_cpu": 1296525223.5738144,
+  "rate_mem": 914657963.6374966,
+  "touch_s_per_gib": 0.050000000000000724,
+  "cpu": {
+   "A": 5.697503361112216,
+   "sigma": 0.42276632172577244
+  },
+  "mem": {
+   "A": 4.9413656381212725,
+   "sigma": 0.18781096842965125
+  },
+  "noise_cv": 0.03764053054703716,
+  "swap_slowdown": 0.8039491459368647,
+  "swap_reserve_gib": 1.6611885629794034
+ },
+ "overheads": {
+  "start": 0.37877750396728516,
+  "end": 0.10503625869750977,
+  "start_unmanaged": 0.08030378818511963,
+  "end_unmanaged": 0.013708114624023438
+ },
+ "fit": {
+  "loss": 0.002622274831423632,
+  "swap_loss": 0.019341427712716647,
+  "evaluations": 2000,
+  "iterations": 1373,
+  "converged": false,
+  "at_bounds": [
+   "smt_yield",
+   "touch_s_per_gib"
+  ]
+ },
+ "bounds": {
+  "smt_yield": [
+   0.0,
+   1.0
+  ],
+  "rate_cpu": [
+   100000000.0,
+   10000000000.0
+  ],
+  "rate_mem": [
+   100000000.0,
+   10000000000.0
+  ],
+  "touch_s_per_gib": [
+   0.05,
+   5.0
+  ],
+  "cpu_A": [
+   1.0,
+   64.0
+  ],
+  "cpu_sigma": [
+   0.0,
+   2.0
+  ],
+  "mem_A": [
+   1.0,
+   64.0
+  ],
+  "mem_sigma": [
+   0.0,
+   2.0
+  ]
+ },
+ "swap_bounds": {
+  "swap_slowdown": [
+   0.0,
+   4.0
+  ],
+  "swap_reserve_gib": [
+   0.0,
+   8.0
+  ]
+ },
+ "tolerance": 0.15
+}

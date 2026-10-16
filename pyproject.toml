@@ -56,6 +56,9 @@ packages = ["src/leasehold"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "import-linter>=2.1", "mcp>=2.3"]
+# The policy simulator (`python -m bench.sim`), installed only on request (`uv sync --group
+# bench`); never a dependency of the package itself.
+bench = ["simpy>=4.1"]
 
 [tool.ruff]
 line-length = 100
@@ -67,8 +70,8 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "BLE"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["leasehold"]
+known-first-party = ["leasehold", "bench"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
