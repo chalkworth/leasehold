@@ -106,13 +106,15 @@ _JOBSERVER_FLAGS = ("--jobserver-auth=", "--jobserver-fds=")
 
 def thread_count(threads: Threads, jobs: int) -> int:
     """The thread count `threads` gives a lease of `jobs` jobs, never more than `jobs` nor
-    less than 1: `jobs` for "jobs"; `jobs // N` for "jobs/N", or at least K for "jobs/N:K";
+    less than 1: `jobs` for "jobs"; `jobs // N` for "jobs/N", and at most K for "jobs/N:K";
     else `threads`."""
     if threads == "jobs":
         return jobs
     if isinstance(threads, str) and threads.startswith("jobs/"):
-        share, _, least = threads[5:].partition(":")
-        count = max(jobs // (count_of(share) or 1), count_of(least) or 1)
+        share, _, most = threads[5:].partition(":")
+        count = jobs // (count_of(share) or 1)
+        if count_of(most) is not None:
+            count = min(count, count_of(most) or jobs)
         return max(1, min(count, jobs))
     return max(1, min(int(threads), jobs))
 
@@ -178,8 +180,9 @@ def job_env(
             out[name] = str(jobs)
         elif omp is not None and name in BLAS_FAMILY:
             copied = count_of(omp)
-            if copied is not None and cap and name in ours:
-                out[name] = str(min(copied, capped(env[name])))
+            lease_set = recorded(env).get(name) if cap else None
+            if copied is not None and lease_set is not None:
+                out[name] = str(min(copied, capped(lease_set)))
             elif copied is not None:
                 out[name] = str(copied)
             elif name in ours:

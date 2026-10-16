@@ -61,12 +61,15 @@ def _commands(args, ctx) -> int:
         return _programs(settings, write=args.write, env=ctx.env)
     if args.test is not None:
         found = shell.match(settings.rules, args.test)
+        line = list(shell.programs(args.test))
+        threads = shell.threads(settings.rules, line, env=ctx.env, cwd=Path.cwd)
         if args.json:
-            print(json.dumps(None if found is None else _describe(found)))
+            print(json.dumps(None if found is None else _describe(found, threads)))
         elif found is None:
             print("no rule: it runs without a lease")
         else:
-            print(f"{found.program}: {_rule_line(found.rule)} ({found.rule.source} rule)")
+            described = _rule_line(found.rule, threads)
+            print(f"{found.program}: {described} ({found.rule.source} rule)")
         return 0 if found is not None else 1
     if args.json:
         print(json.dumps(answer, indent=2))
@@ -107,14 +110,28 @@ def _busy(when_busy: str) -> str:
     return "run without a lease" if when_busy == "run" else "are told the machine is busy"
 
 
-def _rule_line(rule: shell.Rule) -> str:
+def _threads_text(threads: int | str) -> str:
+    """A `threads` setting in words."""
+    if threads == "jobs":
+        return "the job count"
+    if isinstance(threads, str) and threads.startswith("jobs/"):
+        share, _, most = threads[5:].partition(":")
+        text = f"the job count divided by {share}"
+        return f"{text}, at most {most}" if most else text
+    return str(threads)
+
+
+def _rule_line(rule: shell.Rule, threads: int | str | None = None) -> str:
+    """A rule in words; `threads`, when given, is the whole command line's (`shell.threads`)."""
     args = f" with arguments matching {rule.args!r}" if rule.args else ""
     never = f"; never granted, so refused: {rule.never}" if rule.never else ""
-    threads = "the job count" if rule.threads == "jobs" else str(rule.threads)
-    return f"weight {rule.weight} in pool {rule.pool}{args}; threads per process: {threads}{never}"
+    count = _threads_text(rule.threads if threads is None else threads)
+    return f"weight {rule.weight} in pool {rule.pool}{args}; threads per process: {count}{never}"
 
 
-def _describe(found: shell.Match) -> dict:
+def _describe(found: shell.Match, threads: int | str | None) -> dict:
+    """`--test --json`: the rule matched, and the command line's `threads` as `hold` or a shim
+    would use it."""
     rule = found.rule
     return {
         "program": found.program,
@@ -124,7 +141,7 @@ def _describe(found: shell.Match) -> dict:
         "pool": rule.pool,
         "source": rule.source,
         "never": rule.never,
-        "threads": rule.threads,
+        "threads": rule.threads if threads is None else threads,
     }
 
 

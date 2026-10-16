@@ -1,14 +1,21 @@
-"""Whether a pytest run starts pytest-xdist worker processes. The answer comes from the run's
-arguments, from `PYTEST_ADDOPTS`, and from the `addopts` of the config file pytest reads.
+"""Whether a pytest run starts pytest-xdist worker processes, and how many. The answer comes
+from the run's arguments, from `PYTEST_ADDOPTS`, and from the `addopts` of the config file
+pytest reads.
 
 pytest reads the config's `addopts` first, then `PYTEST_ADDOPTS`, then the command line. When
-an option is repeated, the last one wins. Workers start when the last `-n` or `--numprocesses`
-is `auto`, `logical` or a count above 0, or when `--tx` is given. `-n 0` starts none. With
-`-p no:xdist` anywhere, xdist is off.
+an option is repeated, the last one wins. The count follows pytest-xdist 3:
+
+- Workers start when the last `-n` or `--numprocesses` is `auto`, `logical` or a count above
+  0. `--maxprocesses M` limits the count to M, and `auto` to the smaller of the job count and
+  M.
+- `--tx` starts workers only with `--dist` (other than `no`) or `-d`. `4*popen` counts 4.
+  `-n 0` clears `--tx`.
+- `--collect-only` starts none, and neither does `--pdb`.
+- The last of `-p no:xdist`, `-p xdist` and `-p xdist.plugin` decides whether xdist loads.
 
 Words are read the way argparse reads them. An option that takes a value takes the next word,
 unless that word looks like an option. `-vn4` means `-v -n 4`. Nothing after `--` is an
-option.
+option. `@FILE` stands for the lines of FILE.
 
 The config file is found the way pytest 9 finds it (`_pytest.config.findpaths`). The last
 `-c` or `--config-file`, from `PYTEST_ADDOPTS` or the arguments, names it. Without one, the
@@ -75,6 +82,8 @@ MAX_CONFIG_BYTES = 1 << 20
 #: The longest `-n` count read; a longer one is not a count.
 _MAX_DIGITS = 6
 _NEGATIVE = re.compile(r"-\d+$|-\d*\.\d+$")
+#: The most words `@file` arguments expand to.
+MAX_WORDS = 10_000
 #: How deep `@file` arguments may name further `@file` arguments.
 _MAX_FILE_DEPTH = 8
 #: pytest-xdist's `--tx` spec with a count: `4*popen`.
@@ -91,17 +100,28 @@ class _Unreadable(Exception):
 
 
 def _option_like(word: str) -> bool:
-    """Whether argparse reads `word` as an option rather than a value."""
-    return word.startswith("-") and word != "-" and " " not in word and not _NEGATIVE.match(word)
+    """Whether argparse reads `word` as an option rather than a value. A word with a space is
+    one only when it starts with a short option (`-n 3`), or a long one and `=`."""
+    if not word.startswith("-") or word == "-" or _NEGATIVE.match(word):
+        return False
+    if " " not in word:
+        return True
+    if word.startswith("--"):
+        name, eq, _ = word.partition("=")
+        return bool(eq) and " " not in name
+    return word[1].isalpha()
 
 
 def _count(value: str) -> int | str | None:
-    """An `-n` value: "auto" for `auto` and `logical`, a count of at most `_MAX_DIGITS`
-    digits, or None when it is neither."""
+    """An `-n` value as pytest-xdist reads it (`parse_numprocesses`): "auto" for `auto` and
+    `logical`, else a count, which `int` reads with any surrounding whitespace and a leading
+    `+`. None for anything else, or a count of more than `_MAX_DIGITS` digits."""
     if value in ("auto", "logical"):
         return "auto"
-    if value.isascii() and value.isdigit() and len(value) <= _MAX_DIGITS:
-        return int(value)
+    digits = value.strip()
+    digits = digits[1:] if digits.startswith("+") else digits
+    if digits.isascii() and digits.isdigit() and len(digits) <= _MAX_DIGITS:
+        return int(digits)
     return None
 
 
@@ -110,7 +130,8 @@ class _Read:
     """What a list of pytest words sets: the xdist options, `--pdb` and `--collect-only`, the
     last config file and `--rootdir` named, the `-o` overrides, and the free arguments.
     `plugin` is the last `-p` that loads or blocks xdist; `seen` whether any xdist option or
-    such a `-p` was given."""
+    such a `-p` was given; `missing` whether pytest refuses the words: an option that needs a
+    value had none, or an `@file` names itself."""
 
     numprocesses: int | str | None = None
     maxprocesses: int | None = None
@@ -119,6 +140,7 @@ class _Read:
     tx: list[str] = field(default_factory=list)
     usepdb: bool = False
     collectonly: bool = False
+    missing: bool = False
     plugin: bool | None = None
     seen: bool = False
     config: str | None = None
@@ -127,31 +149,51 @@ class _Read:
     free: list[str] = field(default_factory=list)
 
 
-def _expand(
-    words: Sequence[str], cwd: Path | Callable[[], Path] | None, depth: int = 0
-) -> list[str]:
+def _expand(words: Sequence[str], cwd: Path | Callable[[], Path] | None) -> list[str] | None:
     """`words` with each `@file` replaced by the file's lines, one word each, as argparse does
     for pytest (`fromfile_prefix_chars="@"`). A file that is not a regular file of at most
-    `MAX_CONFIG_BYTES`, or cannot be read, leaves its word as it is."""
+    `MAX_CONFIG_BYTES`, or cannot be read, leaves its word as it is. None when a file names
+    itself, directly or through others: pytest fails on that. At most `MAX_WORDS` words come
+    out."""
     out: list[str] = []
-    base: Path | None = None
-    for word in words:
-        if not word.startswith("@") or depth >= _MAX_FILE_DEPTH:
-            out.append(word)
-            continue
-        try:
-            if base is None:
-                base = Path.cwd() if cwd is None else cwd() if callable(cwd) else cwd
-            lines = _text(_absolute(base, word[1:])).splitlines()
-        except (_Unreadable, OSError, ValueError):
-            out.append(word)
-            continue
-        out += _expand(lines, base, depth + 1)
+    base: list[Path] = []
+
+    def expand(items: Sequence[str], open_files: frozenset[str]) -> None:
+        for word in items:
+            if len(out) >= MAX_WORDS:
+                return
+            if not word.startswith("@") or len(open_files) >= _MAX_FILE_DEPTH:
+                out.append(word)
+                continue
+            try:
+                if not base:
+                    base.append(Path.cwd() if cwd is None else cwd() if callable(cwd) else cwd)
+                path = _absolute(base[0], word[1:])
+                key = os.path.realpath(path)
+                if key in open_files:
+                    raise _Cycle
+                lines = _text(path).splitlines()
+            except (_Unreadable, OSError, ValueError):
+                out.append(word)
+                continue
+            expand(lines, open_files | {key})
+
+    try:
+        expand(words, frozenset())
+    except _Cycle:
+        return None
     return out
 
 
+class _Cycle(Exception):
+    """An `@file` that names itself."""
+
+
 def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = None) -> _Read:
-    words = _expand(words, cwd)
+    expanded = _expand(words, cwd)
+    if expanded is None:
+        return _Read(missing=True)
+    words = expanded
     read = _Read()
     i = 0
 
@@ -162,6 +204,11 @@ def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = No
             return words[i - 1]
         return None
 
+    def needed() -> str | None:
+        value = value_after()
+        read.missing = read.missing or value is None
+        return value
+
     def take(name: str, value: str | None) -> None:
         if value is None:
             return
@@ -170,7 +217,8 @@ def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = No
             if found is not None:
                 read.numprocesses, read.seen = found, True
         elif name == "--maxprocesses":
-            read.maxprocesses = _count(value) if value.isdigit() else None
+            limit = _count(value)
+            read.maxprocesses = limit if isinstance(limit, int) else None
         elif name == "--dist":
             read.dist, read.seen = value, True
         elif name == "--tx":
@@ -205,10 +253,12 @@ def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = No
                 read.collectonly = True
             elif eq:
                 take(name, attached)
-            elif name in _LONG_VALUE or name in _LONG_OPTIONAL:
+            elif name in _LONG_VALUE:
+                take(name, needed())
+            elif name in _LONG_OPTIONAL:
                 take(name, value_after())
         elif word == "-p":
-            plugin(value_after())
+            plugin(needed())
         elif word.startswith("-p"):
             plugin(word[2:])
         else:
@@ -221,7 +271,7 @@ def _read_words(words: Sequence[str], cwd: Path | Callable[[], Path] | None = No
                 rest = letters[at + 1 :]
                 if rest.startswith("="):
                     rest = rest[1:]
-                take(f"-{letter}", rest if rest else value_after())
+                take(f"-{letter}", rest if rest else needed())
                 break
     return read
 
@@ -239,13 +289,15 @@ def _workers(read: _Read) -> int | str | None:
         numprocesses, dist = 0, "no"
     if numprocesses:
         dist = "load" if dist == "no" else dist
-        if numprocesses != "auto" and read.maxprocesses:
+        if read.maxprocesses and numprocesses == "auto":
+            numprocesses = int(read.maxprocesses)  # min(the job count, M): `jobs/M` gives that
+        elif read.maxprocesses:
             numprocesses = min(int(numprocesses), int(read.maxprocesses))
         tx = ["popen"] * (1 if numprocesses == "auto" else int(numprocesses))
     if numprocesses == 0:
         dist, tx = "no", []
-    if read.collectonly or dist == "no" or not tx or read.usepdb:
-        return None  # collecting only, not distributing, or a usage error with --pdb
+    if read.collectonly or dist == "no" or not tx or read.usepdb or read.missing:
+        return None  # collecting only, not distributing, or a usage error
     if numprocesses:
         return numprocesses
     return sum(int(m[1]) if (m := _TX_COUNT.match(spec)) and len(m[1]) <= _MAX_DIGITS else 1

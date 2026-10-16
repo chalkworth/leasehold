@@ -104,8 +104,8 @@ def register(sub) -> None:
         metavar="N|jobs",
         help="the thread count OMP_NUM_THREADS and the other per-process thread-pool variables "
         "get: N (at most the job count) or jobs, the job count. Default: the matching "
-        "[commands] rule's threads, else jobs. Inside another lease the default only lowers the "
-        "thread variables that lease set",
+        "[commands] rule's threads, else jobs. Inside another lease it sets them for this "
+        "lease's own job count",
     )
     s.add_argument(
         "--if-unavailable",
@@ -166,6 +166,7 @@ def _hold(args, ctx) -> int:
         memory=args.memory,
         threads=args.threads,
         if_unavailable=args.if_unavailable,
+        socket=ctx.socket,
     )
 
 

@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import os
 import shlex
+import time
 from pathlib import Path
 
 import pytest
 
-from leasehold import xdist
+from leasehold import jobs, shell, xdist
+from leasehold.commands import CommandSettings
 from leasehold.xdist import config_addopts, in_args, run_starts_workers
 
 
@@ -26,7 +28,8 @@ def test_arguments_that_start_workers(args):
 @pytest.mark.parametrize(
     "args",
     [[], ["-k", "-n 4"], ["-k-n4"], ["--", "-n", "4"], ["-n", "0"], ["-n", "2", "-n", "0"],
-     ["-p", "no:xdist"], ["-m", "-n 4"], ["--no-header"], ["-kn", "4"]],
+     ["-p", "no:xdist"], ["-m", "-n 4"], ["--no-header"], ["-kn", "4"],
+     ["--maxfail", "-n", "2"], ["-n", "2", "-k"], ["-k", "-n 4", "-n", "2"]],
 )  # fmt: skip
 def test_arguments_that_do_not(args):
     assert in_args(args) is not True
@@ -111,7 +114,7 @@ def test_a_config_that_cannot_be_read_counts_as_none(tmp_path, name, text):
     "args",
     [["--cov", "-n", "auto"], ["--cov", "-n", "4", "tests"], ["--pyargs", "-n", "4", "pkg"],
      ["--cache-show", "-n", "2"], ["--dist", "load", "--tx", "4*popen"], ["-d", "--tx=popen"],
-     ["-k", "x", "-n", "2"], ["--maxfail", "-n", "2"]],
+     ["-k", "x", "-n", "2"]],
 )  # fmt: skip
 def test_options_take_no_word_that_looks_like_an_option(args):
     assert in_args(args) is True
@@ -355,3 +358,59 @@ def test_arguments_from_a_file_are_read(tmp_path):
 )  # fmt: skip
 def test_workers_are_counted_as_pytest_xdist_does(args, expected):
     assert xdist.workers_in_args(args) == expected
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [(["-n", "auto", "--maxprocesses", "3"], 3), (["-n", "logical", "--maxprocesses=2"], 2),
+     (["--maxprocesses", "3", "-n", "auto", "--pdb"], None)],
+)  # fmt: skip
+def test_auto_with_maxprocesses_starts_at_most_that_many(args, expected):
+    """`-n auto` starts the job count of workers, or M with `--maxprocesses M` when fewer:
+    a share of `jobs/M` gives each the same threads either way."""
+    assert xdist.workers_in_args(args) == expected
+
+
+def test_a_line_running_auto_with_maxprocesses_shares_the_jobs_among_them():
+    rules = CommandSettings().shell_rules()
+    found = list(shell.programs("pytest -n auto --maxprocesses 4"))
+    assert shell.threads(rules, found) == "jobs/4"
+    assert jobs.thread_count("jobs/4", 16) == 4 and jobs.thread_count("jobs/4", 2) == 1
+
+
+def test_an_args_file_that_names_itself_starts_nothing_and_stops(tmp_path):
+    """pytest fails on such a file, so it runs nothing."""
+    (tmp_path / "self.txt").write_text("-v\n@self.txt\n")
+    (tmp_path / "a.txt").write_text("@b.txt\n")
+    (tmp_path / "b.txt").write_text("-n\n4\n@a.txt\n")
+    started = time.monotonic()
+    assert xdist._expand(["@self.txt"], tmp_path) is None
+    assert xdist._expand(["@a.txt"], tmp_path) is None
+    assert xdist.workers(["@a.txt"], {}, tmp_path) is None
+    assert xdist.workers(["-n", "2", "@self.txt"], {}, tmp_path) is None
+    assert xdist.workers(["-n", "2", "@b.txt"], {"PYTEST_ADDOPTS": ""}, tmp_path) is None
+    assert time.monotonic() - started < 2
+
+
+def test_args_files_expand_to_at_most_max_words(tmp_path):
+    (tmp_path / "wide.txt").write_text("-v\n" * 2_000)
+    (tmp_path / "fan.txt").write_text("@wide.txt\n" * 50)
+    started = time.monotonic()
+    assert len(xdist._expand(["@fan.txt", "-n", "4"], tmp_path)) == xdist.MAX_WORDS
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["-n 3"], ["-n", " 3"], ["-n", "+3"], ["--numprocesses", "3 "], ["-n", "3", "--setup-plan"],
+     ["-n", "3", "--setup-only"], ["-n", "5", "--maxprocesses", " 3"]],
+)  # fmt: skip
+def test_counts_are_read_as_pytest_xdist_reads_them(args):
+    """xdist reads `-n` and `--maxprocesses` with `int`, so spaces and a `+` are fine, and
+    `--setup-plan` still runs on its workers."""
+    assert xdist.workers_in_args(args) == 3
+
+
+def test_an_args_file_line_with_a_space_is_one_word(tmp_path):
+    (tmp_path / "args.txt").write_text("-n 3\n")
+    assert xdist.workers(["@args.txt"], {}, tmp_path) == 3

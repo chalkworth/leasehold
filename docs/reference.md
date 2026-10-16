@@ -303,6 +303,8 @@ The service makes `/run/leasehold` (0750, the socket inside 0660) and `/var/lib/
 Clients find a daemon from `--socket`, then `LEASEHOLD_SOCKET`, then the config file's `socket`;
 told none, they try the system socket, then their own, and use the first that answers.
 `leasehold doctor` lists each candidate and why it was taken or passed over.
+`hold --socket PATH` sets `LEASEHOLD_SOCKET` to that path, made absolute, for the command it
+runs, so a nested `hold` and the PATH shims find the same daemon.
 `serve` listens on `--socket`, then `LEASEHOLD_SOCKET`, then the config's `socket`, then its
 mode's own.
 
@@ -464,9 +466,14 @@ With `PYTHON_CPU_COUNT` at the same count, `os.cpu_count()` agrees with Numba's 
 The thread count is the job count unless the command's `threads` says otherwise: `hold
 --threads N` or `--threads jobs`, else what the [`[commands]` rules](#which-commands-take-a-lease-commands)
 give the command line. Each program on the line takes its own rule's `threads`, and the line
-gets the largest of them. If any rule has `"jobs"`, the line gets the job count, so `hold --
-sh -c "cargo test && pytest -n 4"` gets the job count. A count above the job count is cut to
-it. With the default every variable gets the job count, as in 0.3.0.
+gets the smallest of them, so no program on it runs more threads per process than its rule
+allows. A pytest run with 4 workers gives the line a quarter of the job count whatever else
+runs on it: `hold -- sh -c "cargo test && pytest -n 4"` and `pytest -n 4; pytest -n 2` both
+get the job count divided by 4, and `cargo test && pytest -n auto` gets 1. A rule's count
+lowers a share too: a program whose rule gives 3 beside `pytest -n 2` makes the line's count
+the smaller of 3 and half the job count. A count above the job count is cut to it. With the
+default every variable gets the job count, as in 0.3.0. `leasehold commands --test LINE` shows
+the count a line gets.
 
 A variable already set when `hold` starts is yours, and `hold` leaves it alone unless the
 lease the command runs in set it to the value it still has. `hold` records each name it set,
@@ -488,7 +495,8 @@ When you set `OMP_NUM_THREADS` to a plain count, `hold` gives `OPENBLAS_NUM_THRE
 `MKL_NUM_THREADS` the same value unless you set them too. OpenBLAS reads its own variable
 before `OMP_NUM_THREADS`, and PyTorch lets `MKL_NUM_THREADS` override it, so a different value
 there would undo yours. A shim lowering a lease's count never raises those two above what the
-lease set. Your own `OPENBLAS_NUM_THREADS` or `MKL_NUM_THREADS` is left alone and copied
+lease recorded for them, even when one is unset: each gets the smallest of your
+`OMP_NUM_THREADS`, the lease's recorded value and the shim's count. Your own `OPENBLAS_NUM_THREADS` or `MKL_NUM_THREADS` is left alone and copied
 nowhere. When your `OMP_NUM_THREADS` is not a plain count (`4,2`), it is not copied, and an
 enclosing lease's count in the other two stays. `LEASEHOLD_JOBS` and `LEASEHOLD_THREADS` are
 always the counts leasehold chose for this lease. A count of more than 6 digits is never read
@@ -506,20 +514,26 @@ leasehold reads the config file's `addopts`, then `PYTEST_ADDOPTS`, then the com
 pytest does, and decides as pytest-xdist 3 does:
 
 - Workers start when the last `-n` or `--numprocesses` is above 0, `auto` or `logical`.
-  `--maxprocesses M` limits a count to M. `-nN`, `-n=N`, `--numprocesses=N`, `-vn 4` and
-  `-vn=4` all count.
+  `--maxprocesses M` limits a count to M, and `auto` to the smaller of the job count and M,
+  so each worker gets the job count divided by M, and at least 1. `-nN`, `-n=N`,
+  `--numprocesses=N`, `-vn 4`, `-vn=4`, `'-n 4'` and `-n ' +4'` all count, as xdist reads
+  counts with `int`.
 - `--tx` starts workers only with `--dist` (other than `no`) or `-d`. `4*popen` counts as 4.
   `-n 0` clears `--tx`.
 - `--collect-only` (`--co`) starts none. `--pdb` with `-n auto` runs serially, and `--pdb`
-  with any other workers is an error, so neither counts.
+  with any other workers is an error, so neither counts. `--setup-plan` and `--setup-only`
+  still start the workers.
 - The last of `-p no:xdist`, `-p xdist` and `-p xdist.plugin` decides whether xdist is
   loaded at all.
 
 Arguments are read one word at a time, the way pytest's argument parser reads them. An option
-that takes a value takes the next word unless that word starts with `-`, so `-k '-n 4'` starts
-no workers and `--cov -n 4` does. Nothing after `--` counts. A word `@FILE` stands for the
-lines of FILE, one argument each, when FILE is a regular file of at most 1 MiB. A count of more
-than 6 digits is not read.
+that takes a value takes the next word unless that word looks like an option, and `--cov`
+takes it only then, so `--cov -n 4` starts workers. An option that needs a value and gets
+none is an error pytest stops on, so `-k '-n 4' -n 2` and `--maxfail -n 2` start none. Nothing
+after `--` counts. A word `@FILE` stands for the lines of FILE, one argument each, when FILE is
+a regular file of at most 1 MiB. Files may name further files, up to 10,000 words in all; a
+file that names itself, directly or through another, is an error pytest stops on, so it starts
+none. A count of more than 6 digits is not read.
 
 The config file is located the way pytest 9 does it. The last `-c` or `--config-file`, from
 `PYTEST_ADDOPTS` or the command line, names it. Otherwise the search starts at the common

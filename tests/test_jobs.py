@@ -322,7 +322,11 @@ def test_resizing_never_copies_the_users_omp_above_what_the_lease_recorded():
     assert inside["OMP_NUM_THREADS"] == "8"  # the user's own
     unset = {k: v for k, v in outer.items() if k != "MKL_NUM_THREADS"}
     filled = jobs.resized(unset | {"OMP_NUM_THREADS": "8"}, 1)
-    assert filled["MKL_NUM_THREADS"] == "8"  # unset: the user's value fills it, as always
+    assert filled["MKL_NUM_THREADS"] == "1"  # unset, but recorded at 2: at most the new count
+    roomy = jobs.resized(unset | {"OMP_NUM_THREADS": "8"}, 4)
+    assert roomy["MKL_NUM_THREADS"] == "2"  # at most what the lease recorded
+    low = jobs.resized(unset | {"OMP_NUM_THREADS": "1"}, 4)
+    assert low["MKL_NUM_THREADS"] == "1"  # at most the user's own
 
 
 def test_a_record_of_names_that_are_not_job_variables_is_not_believed():
@@ -335,7 +339,14 @@ def test_a_record_of_names_that_are_not_job_variables_is_not_believed():
 
 @pytest.mark.parametrize(
     ("threads", "count"),
-    [("jobs/1", 8), ("jobs/4", 2), ("jobs/16", 1), ("jobs/4:3", 3), ("jobs/2:1", 4)],
+    [
+        ("jobs/1", 8),
+        ("jobs/4", 2),
+        ("jobs/16", 1),
+        ("jobs/4:3", 2),
+        ("jobs/2:1", 1),
+        ("jobs/1:3", 3),
+    ],
 )
 def test_a_share_of_the_jobs_divides_them_among_workers(threads, count):
     assert jobs.thread_count(threads, 8) == count

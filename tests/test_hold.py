@@ -399,12 +399,14 @@ def test_auto_size_reads_the_command_line_as_the_hooks_do(daemon):
     assert rule.threads == "jobs/4"
 
 
-def test_a_command_line_of_several_programs_takes_the_most_threads_any_needs(daemon):
+def test_a_command_line_of_several_programs_takes_the_fewest_threads_any_allows(daemon):
     client = Client(daemon.path)
     mixed = hold_module.auto_size(client, ["sh", "-c", "cargo test && pytest -n 4"])
-    assert (mixed.weight, mixed.threads) == (2, "jobs")
+    assert (mixed.weight, mixed.threads) == (2, "jobs/4")
     both = hold_module.auto_size(client, ["sh", "-c", "pytest -n 4 tests/a; pytest -n2 tests/b"])
-    assert both.threads == "jobs/2"
+    assert both.threads == "jobs/4"
+    auto = hold_module.auto_size(client, ["sh", "-c", "cargo test && pytest -n auto"])
+    assert auto.threads == 1
 
 
 def test_auto_size_sees_xdist_turned_on_by_the_config_or_pytest_addopts(daemon, tmp_path):
@@ -737,3 +739,21 @@ def test_a_hold_inside_a_lease_resets_the_leases_variables_to_its_own(roomy):
     smaller = hold_module.child_env("new", _granted(), 2, job_env=True, env=jobs.sized_env(
         {"LEASEHOLD_LEASE_ID": "outer"}, 8))  # fmt: skip
     assert smaller["GOMAXPROCS"] == "2"
+
+
+def test_the_socket_hold_was_given_is_the_one_a_nested_client_finds(daemon, tmp_path):
+    """A nested `hold` or shim finds the daemon the outer `hold --socket` used."""
+    script = (
+        "import os, sys\n"
+        f"assert os.environ.get('LEASEHOLD_SOCKET') == {str(daemon.path)!r}, os.environ\n"
+    )
+    env = {k: v for k, v in CHILD_ENV.items() if k != "LEASEHOLD_SOCKET"}
+    proc = hold(daemon.path, "--", sys.executable, "-c", script, env=env)
+    assert proc.returncode == 0, proc.stderr.read()
+
+
+def test_a_relative_socket_is_passed_on_made_absolute(tmp_path):
+    env = hold_module.child_env("id", _granted(), 2, job_env=False, env={}, socket="run/s.sock")
+    assert env["LEASEHOLD_SOCKET"] == str(Path.cwd() / "run/s.sock")
+    assert "LEASEHOLD_SOCKET" not in hold_module.child_env("id", _granted(), 2, job_env=False,
+                                                           env={})  # fmt: skip

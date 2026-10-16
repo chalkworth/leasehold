@@ -71,7 +71,7 @@ _UV_GLOBAL_VALUES = frozenset(
      "--cache-dir", "--python-preference"}
 )  # fmt: skip
 #: Python interpreters, free-threaded builds and PyPy included.
-_PYTHON = re.compile(r"(python|pypy)(\d(\.\d+)?)?t?")
+_PYTHON = re.compile(r"(python|pypy)(\d(\.\d+){0,2})?t?")
 #: Options of `uvx` (`uv tool run`) that take the next word as their value.
 _UVX_VALUES = _UV_RUN_VALUES | {"--from"}
 #: `<runner> <verb> program ...`: run a project's tool inside its environment.
@@ -130,10 +130,20 @@ class Rule:
         return self.args is None or re.search(self.args, " ".join(args)) is not None
 
 
+#: A served `threads` share: the job count divided among N workers, and at most K.
+_SHARE = re.compile(r"jobs/[1-9][0-9]{0,5}(:[1-9][0-9]{0,5})?")
+
+
 def _threads(value: object) -> int | str:
+    """A served `threads`: "jobs" when missing, the value when it is "jobs", a count of at
+    least 1 or a share ("jobs/N", "jobs/N:K"), and 1 for anything else."""
+    if value is None or value == "jobs":
+        return "jobs"
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
         return value
-    return "jobs"
+    if isinstance(value, str) and _SHARE.fullmatch(value):
+        return value
+    return 1
 
 
 @dataclass(frozen=True)
@@ -453,8 +463,9 @@ def threads(
     cwd: Path | Callable[[], Path] | None = None,
 ) -> int | str | None:
     """The thread count for a command line running the programs `found`, as a `threads`
-    setting (`jobs.thread_count`): the largest of their own rules' `threads`, "jobs" when any
-    rule has it, and None when no rule matches.
+    setting (`jobs.thread_count`): the smallest any of their own rules gives, so no program on
+    the line runs more threads per process than its rule allows; None when no rule matches.
+    "jobs/W:K" is the job count divided among W workers, and at most K.
 
     A pytest run under a built-in rule that starts xdist workers takes the built-in xdist
     rule's `threads` for `-n auto` or `logical`, and "jobs/N", the job count divided among
@@ -488,13 +499,13 @@ def threads(
         chosen.append(count)
     if not chosen:
         return None
-    if "jobs" in chosen:
-        return "jobs"
     shares = [int(str(c)[5:]) for c in chosen if str(c).startswith("jobs/")]
-    counts = [int(c) for c in chosen if not str(c).startswith("jobs/")]
+    counts = [int(c) for c in chosen if c != "jobs" and not str(c).startswith("jobs/")]
     if not shares:
-        return max(counts)
-    return f"jobs/{min(shares)}" + (f":{max(counts)}" if counts else "")
+        return min(counts) if counts else "jobs"
+    if counts and min(counts) == 1:
+        return 1
+    return f"jobs/{max(shares)}" + (f":{min(counts)}" if counts else "")
 
 
 def _directory(cwd: Path | Callable[[], Path], relative: str | None) -> Callable[[], Path]:

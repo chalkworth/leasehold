@@ -290,6 +290,7 @@ def hold(
     memory: str | None = None,
     threads: jobs.Threads | None = None,
     if_unavailable: str = "run",
+    socket: str | None = None,
 ) -> int:
     """Run `argv` under a lease, sized to it (`leasehold.jobs`): the job-count and thread-count
     variables unless `job_env` is false, a make jobserver when `jobserver` is true, and when
@@ -351,6 +352,7 @@ def hold(
                 jobserver=jobserver,
                 memory=memory,
                 threads=threads,
+                socket=socket,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -371,11 +373,10 @@ def auto_size(
     cwd: Path | None = None,
 ) -> shell.Rule:
     """The rule of the daemon's `[commands]` that `argv`, read as a command line, matches, as
-    the agent hooks and `leasehold commands --test` match it (`uv run pytest` and `python -m
-    pytest` are pytest), for its weight and memory; its `threads` is the command line's
-    (`shell.threads`: the largest of its programs' rules', a pytest run's read from its config
-    and `PYTEST_ADDOPTS` too, with `env` (default ours) and `cwd` (default ours)). `_UNSIZED`
-    when no rule matches or the rules cannot be read."""
+    the agent hooks and `leasehold commands --test` match it, for its weight and memory. Its
+    `threads` is the whole command line's (`shell.threads`), read with `env` and `cwd`
+    (default ours): a count, "jobs", or a share of the job count ("jobs/N", "jobs/N:K").
+    `_UNSIZED` when no rule matches or the rules cannot be read."""
     try:
         rules = shell.served(client.commands()).rules
         found = list(shell.programs(shlex.join(argv)))
@@ -434,6 +435,7 @@ def run_leased(
     jobserver: bool = False,
     memory: str | None = None,
     threads: jobs.Threads = "jobs",
+    socket: str | None = None,
 ) -> int:
     """`hold` once `request` is granted (`answer`): run `argv` sized to the lease (its thread
     pools to `threads`, `jobs.thread_count`; `child_env`), renewing it, and release it when
@@ -452,6 +454,7 @@ def run_leased(
             count,
             job_env=job_env,
             threads=threads,
+            socket=socket,
         )
         if jobserver:
             try:
@@ -612,12 +615,14 @@ def child_env(
     job_env: bool,
     threads: jobs.Threads = "jobs",
     env: Mapping[str, str] | None = None,
+    socket: str | None = None,
 ) -> dict[str, str]:
     """The command's environment: `env` (default ours) with the lease's `LEASEHOLD_*`
     variables, and with `job_env` the job-count and thread-count variables for this lease
     (`jobs.sized_env`). Without `job_env`, the enclosing lease's sizing is removed
     (`jobs.unsized_env`). Which variables an enclosing lease set is read from `env` before this
-    lease's id is added, so it counts only when `env` holds a `LEASEHOLD_LEASE_ID`."""
+    lease's id is added, so it counts only when `env` holds a `LEASEHOLD_LEASE_ID`. A `socket`
+    given to `hold` (`--socket`) is passed on as `LEASEHOLD_SOCKET`, made absolute."""
     outer = dict(os.environ if env is None else env)
     lease = {
         "LEASEHOLD_LEASE_ID": lease_id,
@@ -625,6 +630,8 @@ def child_env(
         "LEASEHOLD_POOL": granted["pool"],
         "LEASEHOLD_WEIGHT": str(granted["weight"]),
     }
+    if socket:
+        lease["LEASEHOLD_SOCKET"] = os.path.abspath(socket)
     if job_env:
         return {**jobs.sized_env(outer, count, threads), **lease}
     return {**jobs.unsized_env(outer), **lease}
