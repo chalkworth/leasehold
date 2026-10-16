@@ -66,7 +66,11 @@ numerically.
 A/A runs one workload, and its SDs stand for all of GATE's. `--write FILE` freezes the plan
 there (rounds, margins after widening, the A/A's SDs, the SHA-256 of its results and its
 commit), from an A/A that passed. A confirmatory gate names that file in `[plan] frozen`, gives
-no verdict without it, and takes its planned rounds and margins from it.
+no verdict without it, and takes its planned rounds and margins from it. The file is checked
+first: its cycle, alpha, workloads and target must be the gate's, and the plan recomputed from
+its SDs under the gate's rule must match it. With the A/A results at hand (the paths it records,
+or `--aa DIR`), their SHA-256 and SDs must be the plan's; without them the report says the A/A
+provenance was not checked.
 
 The blind look applies the same rule, with no widening, to the pooled SDs of the first
 `rounds.look_after` rounds: the frozen rounds, or more by whole cycles up to `extend_to`. The
@@ -96,6 +100,9 @@ from pathlib import Path
 
 import conditions as conds
 import schedule
+
+#: The checkout `bench/` is in; plan files record paths relative to it.
+ROOT = Path(__file__).resolve().parent.parent
 
 PERMUTATION_EXACT_UP_TO = 12
 PERMUTATION_DRAWS = 20_000
@@ -415,10 +422,12 @@ def frozen_text(planned: dict, *, gate: str, arms: int, alpha: float, aa: dict) 
         f"workloads = {planned['workloads']}",
         f"alpha = {alpha}",
         f"target = {planned['target']}",
-        f"joint_power = {planned['joint_power']:.4f}",
+        f"joint_power = {planned['joint_power']!r}",
         f"reached = {'true' if planned['reached'] else 'false'}",
         f"aa_gate = {json.dumps(aa['gate'])}",
         f"aa_dirs = {json.dumps(aa['dirs'])}",
+        f"aa_paths = {json.dumps(aa['paths'])}",
+        f"aa_gate_file = {json.dumps(aa['gate_file'])}",
         f"aa_data_sha256 = {json.dumps(aa['digest'])}",
         f"aa_git_sha = {json.dumps(aa['git_sha'] or '')}",
         "",
@@ -426,7 +435,7 @@ def frozen_text(planned: dict, *, gate: str, arms: int, alpha: float, aa: dict) 
         *[f"{m['metric']} = {m['margin']}" for m in planned["metrics"]],
         "",
         "[sds]",
-        *[f"{m['metric']} = {m['sd']:.6f}" for m in planned["metrics"] if m["sd"] is not None],
+        *[f"{m['metric']} = {m['sd']!r}" for m in planned["metrics"] if m["sd"] is not None],
     ]
     return "\n".join(lines) + "\n"
 
@@ -489,6 +498,85 @@ def load_gate(path: Path) -> dict:
     return gate
 
 
+def frozen_mismatch(gate: dict, frozen: dict) -> list[str]:
+    """How the frozen plan `frozen` differs from what `gate`'s `[plan]` rule gives at the plan's
+    own recorded SDs, for the gate's arm count, alpha and workloads (empty: it does not)."""
+    arms = 1 + len(gate["arms"]["candidates"])
+    cycle = len(schedule.williams(arms))
+    alpha = gate["test"]["alpha"]
+    workloads = len(gate["workloads"])
+    why = [
+        f"{key} is {frozen.get(key)!r}, and the gate's is {want!r}"
+        for key, want in (
+            ("cycle", cycle),
+            ("alpha", alpha),
+            ("workloads", workloads),
+            ("target", gate["plan"].get("joint_power", 0.8)),
+        )
+        if frozen.get(key) != want
+    ]
+    sds = frozen.get("sds", {})
+    if not sds:
+        return [*why, "it records no SDs"]
+    try:
+        again = plan(sds, gate["metrics"], gate["plan"], alpha, workloads, cycle=cycle)
+    except ValueError as exc:
+        return [*why, str(exc)]
+    if frozen.get("rounds") != again["rounds"]:
+        why.append(f"rounds is {frozen.get('rounds')!r}, and the rule gives {again['rounds']}")
+    for m in again["metrics"]:
+        if frozen.get("margins", {}).get(m["metric"]) != m["margin"]:
+            why.append(
+                f"the {m['metric']} margin is {frozen['margins'].get(m['metric'])!r}, and the "
+                f"rule gives {m['margin']}"
+            )
+    if not math.isclose(frozen.get("joint_power", -1.0), again["joint_power"], abs_tol=1e-9):
+        why.append(
+            f"joint_power is {frozen.get('joint_power')!r}, and the rule gives "
+            f"{again['joint_power']!r}"
+        )
+    if frozen.get("reached") != again["reached"]:
+        why.append(f"reached is {frozen.get('reached')!r}, and the rule gives {again['reached']}")
+    return why
+
+
+def check_aa(frozen: dict, given: list[Path] | None) -> str:
+    """Check the frozen plan's A/A provenance: with its results (`given`, or the paths the plan
+    records, when present), their SHA-256 and paired SDs must be the plan's. Refused if they
+    differ; otherwise what was checked, for the report."""
+    names = frozen.get("aa_dirs", [])
+    dirs = given or [ROOT / p for p in frozen.get("aa_paths", [])]
+    if not dirs or not all((d / "spec.json").exists() for d in dirs):
+        return (
+            f"The A/A provenance was not checked: its results ({', '.join(names) or 'none'}) "
+            "were not found. Pass --aa DIR to check them."
+        )
+    digest = data_digest(dirs)
+    if digest != frozen.get("aa_data_sha256"):
+        raise Refused(
+            f"the A/A results in {', '.join(map(str, dirs))} are not the ones the frozen plan "
+            f"was written from (SHA-256 {digest}, the plan records {frozen.get('aa_data_sha256')})"
+        )
+    aa_gate = load_gate(ROOT / frozen.get("aa_gate_file", "bench/gates/aa.toml"))
+    sds = judge(aa_gate, dirs)["sds"]
+    recorded = frozen.get("sds", {})
+    if {k: v for k, v in sds.items() if v is not None} != recorded:
+        raise Refused(f"the A/A results give SDs {sds}, and the frozen plan records {recorded}")
+    return (
+        f"The A/A provenance was checked: {', '.join(d.name for d in dirs)} match the plan's "
+        "SHA-256 and SDs."
+    )
+
+
+def _repo_relative(path: Path) -> str:
+    """`path` relative to the checkout when it is inside it, else only its name, so that a
+    plan file never records a path on the machine."""
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
 def apply_frozen(gate: dict, where: Path) -> None:
     """Set `gate`'s planned rounds and its margins from the frozen plan at `where`; a
     SystemExit if there is none, or it was planned for another gate or another arm count."""
@@ -512,6 +600,11 @@ def apply_frozen(gate: dict, where: Path) -> None:
     missing = [m["name"] for m in gate["metrics"] if m["name"] not in margins]
     if missing:
         raise SystemExit(f"{where} has no margin for {', '.join(missing)}")
+    if why := frozen_mismatch(gate, frozen):
+        raise SystemExit(
+            f"{where} is not the plan the gate's [plan] rule gives at its recorded SDs: "
+            f"{'; '.join(why)}. Write it again with compare --plan --write; do not edit it"
+        )
     for m in gate["metrics"]:
         m["margin"] = margins[m["name"]]
     gate["rounds"]["planned"] = frozen["rounds"]
@@ -927,6 +1020,7 @@ def confirmatory(gate: dict, records: list[dict]) -> dict:
         "blind": look,
         "joint_power": power,
         "plan_file": frozen.get("path"),
+        "aa_check": frozen.get("aa_check"),
         "results": results,
     }
 
@@ -1145,6 +1239,8 @@ def report(gate: dict, result: dict, dirs: list[Path]) -> str:
         lines += [f"Rounds the verdict uses: {result['rounds_needed']}{how}", ""]
         if result.get("plan_file"):
             lines += [f"Planned rounds and margins come from `{result['plan_file']}`.", ""]
+        if result.get("aa_check"):
+            lines += [result["aa_check"], ""]
         if result.get("joint_power") is not None:
             lines += [
                 f"Joint power at {result['rounds_needed']} rounds, at the frozen plan's A/A "
@@ -1229,6 +1325,13 @@ def main(argv: list[str]) -> int:
         "--write", type=Path, help="with --plan: write the frozen plan the gate runs by here"
     )
     parser.add_argument(
+        "--aa",
+        type=Path,
+        action="append",
+        help="the A/A results a confirmatory gate's frozen plan came from, to check them "
+        "(default: the paths the plan records); may repeat",
+    )
+    parser.add_argument(
         "--out", type=Path, help="report path without suffix (default: DIR/compare-<gate name>)"
     )
     args = parser.parse_args(argv)
@@ -1236,6 +1339,8 @@ def main(argv: list[str]) -> int:
         parser.error("--write and --arms go with --plan")
     gate = load_gate(args.gate)
     try:
+        if gate.get("frozen_plan"):
+            gate["frozen_plan"]["aa_check"] = check_aa(gate["frozen_plan"], args.aa)
         if args.blind_sd:
             records, infos = collect(args.dirs)
             check_provenance(gate, records, infos)
@@ -1285,7 +1390,9 @@ def main(argv: list[str]) -> int:
                 return 2
             aa_facts = {
                 "gate": gate["gate"]["name"],
+                "gate_file": _repo_relative(args.gate),
                 "dirs": [d.name for d in args.dirs],
+                "paths": [_repo_relative(d) for d in args.dirs],
                 "digest": data_digest(args.dirs),
                 "git_sha": result["code"]["git_sha"],
             }

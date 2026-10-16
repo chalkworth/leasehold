@@ -1041,12 +1041,15 @@ def test_compare_refuses_mixed_harness_settings():
         gate.check_provenance(_gate(), _records(8), [a, b])
 
 
-def test_a_gate_run_refuses_a_dirty_checkout(monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize(
+    "run", [["--quick", "--dir"], ["--tiny", "--dir"], ["--tiny", "--round", "1", "--dir"]]
+)
+def test_a_gate_run_refuses_a_dirty_checkout(monkeypatch, capsys, tmp_path, run):
     import manifest
 
     monkeypatch.setattr(manifest, "git_state", lambda *a: {"sha": "a" * 40, "dirty": True})
     with pytest.raises(SystemExit) as stop:
-        bench.main(["--quick", "--no-wait", "--no-scope", "--dir", str(tmp_path / "r")])
+        bench.main([*run, str(tmp_path / "r"), "--no-wait", "--no-scope"])
     assert stop.value.code == 2 and "--allow-dirty" in capsys.readouterr().err
     assert not (tmp_path / "r").exists()
     args = bench.build_parser().parse_args(["--allow-dirty", "--no-scope"])
@@ -1111,12 +1114,65 @@ def test_the_gate_runs_by_its_frozen_plan(tmp_path, monkeypatch, capsys):
     assert "| makespan_s | 8 | 1.0" in out and "| 1.1 |" in out
     assert "Planned rounds and margins come from `g.plan.toml`." in out
     assert "Joint power at 8 rounds, at the frozen plan's A/A SDs" in out
+    # The A/A results are outside the checkout, so they are checked only when named.
+    assert "The A/A provenance was not checked: its results (aa) were not found" in out
+    assert gate.main([str(full_dir), "--gate", str(g), "--aa", str(aa_dir)]) == 0
+    assert "The A/A provenance was checked: aa match" in capsys.readouterr().out
+    (aa_dir / "extra.json").write_text("{}")
+    assert gate.main([str(full_dir), "--gate", str(g), "--aa", str(aa_dir)]) == 2
+    assert "are not the ones the frozen plan was written from" in capsys.readouterr().err
     # A plan for another arm count is refused.
     with pytest.raises(SystemExit, match="planned for 2 arms, and the gate has 3"):
         gate.apply_frozen(
             _gate(candidates=(CAND, "lh-enforced@w=3,h=1")) | {"gate": {"name": "g"}},
             tmp_path / "g.plan.toml",
         )
+
+
+@pytest.mark.parametrize(
+    ("edit", "why"),
+    [
+        (("rounds = 8", "rounds = 2"), "rounds is 2, and the rule gives 8"),
+        (("makespan_s = 1.1\n", "makespan_s = 100.0\n"), "the makespan_s margin is 100.0"),
+        (("cycle = 2", "cycle = 6"), "cycle is 6, and the gate's is 2"),
+        (("workloads = 2", "workloads = 1"), "workloads is 1"),
+        (("alpha = 0.05", "alpha = 0.2"), "alpha is 0.2"),
+    ],
+)
+def test_a_tampered_frozen_plan_is_refused(tmp_path, monkeypatch, edit, why):
+    plan_file = _frozen_plan(tmp_path, monkeypatch)
+    text = plan_file.read_text()
+    assert edit[0] in text
+    plan_file.write_text(text.replace(edit[0], edit[1], 1))
+    with pytest.raises(SystemExit, match="is not the plan the gate's"):
+        gate.load_gate(tmp_path / "g.toml")
+    with pytest.raises(SystemExit, match=why):
+        gate.load_gate(tmp_path / "g.toml")
+
+
+def test_a_frozen_plan_with_edited_sds_is_refused(tmp_path, monkeypatch):
+    plan_file = _frozen_plan(tmp_path, monkeypatch)
+    raw = tomllib.loads(plan_file.read_text())
+    sd = raw["sds"]["makespan_s"]
+    plan_file.write_text(plan_file.read_text().replace(f"makespan_s = {sd!r}", "makespan_s = 0.01"))
+    with pytest.raises(SystemExit, match="joint_power is"):
+        gate.load_gate(tmp_path / "g.toml")
+
+
+def _frozen_plan(tmp_path: Path, monkeypatch) -> Path:
+    aa_dir = tmp_path / "aa"
+    aa_dir.mkdir()
+    (aa_dir / "spec.json").write_text("{}")
+    monkeypatch.setattr(
+        gate,
+        "collect",
+        lambda dirs: (_aa_records(4, None, 0.045), [_info(seed_base=200, rounds_seen=4)]),
+    )
+    g = _gate_file(tmp_path)
+    argv = [str(aa_dir), "--gate", str(BENCH / "gates" / "aa.toml"), "--plan", str(g)]
+    assert gate.main([*argv, "--write", str(tmp_path / "g.plan.toml")]) == 0
+    gate.load_gate(g)  # the untouched plan loads
+    return tmp_path / "g.plan.toml"
 
 
 def test_no_plan_is_written_from_an_aa_that_failed(tmp_path, monkeypatch):
@@ -1183,6 +1239,9 @@ def test_rounds_run_one_at_a_time_into_one_directory_and_compare(tmp_path):
     common = [
         "--tiny",
         "--no-scope",
+        # A gate's results directory refuses a checkout with uncommitted changes; this test may
+        # run on one.
+        "--allow-dirty",
         "--agents",
         "1",
         "--rounds",
@@ -1274,6 +1333,6 @@ def test_rounds_run_one_at_a_time_into_one_directory_and_compare(tmp_path):
         "no_scope": True,
         "no_wait": True,
         "drop_caches": False,
-        "allow_dirty": False,
+        "allow_dirty": True,
     }
     assert "git_dirty" in spec

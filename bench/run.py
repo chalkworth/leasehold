@@ -1370,7 +1370,10 @@ def main(argv: list[str] | None = None) -> int:
         washout.check_probes()
     if args.drop_caches:
         washout.check_drop_caches()
-    if not args.dry_run and not args.tiny and not args.allow_dirty:
+    # A results directory (--dir, --round) is what a gate judges, whatever the preset; only
+    # a throwaway --tiny smoke run into --out is exempt.
+    resumable = args.dir is not None or args.round is not None
+    if not args.dry_run and (resumable or not args.tiny) and not args.allow_dirty:
         git = manifest.git_state()
         if git and git["dirty"]:
             parser.error(

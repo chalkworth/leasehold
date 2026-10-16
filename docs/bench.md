@@ -402,8 +402,8 @@ lose at most a round when it stops. A run that is run again moves its old direct
 `DIR/superseded/`.
 
 A run refuses to start when tracked files have uncommitted changes, since the recorded commit
-would not be the code that ran. `--allow-dirty` runs anyway and is recorded. `--tiny` and
-`--dry-run` skip the check.
+would not be the code that ran. `--allow-dirty` runs anyway and is recorded. `--dry-run`
+skips the check, and so does a `--tiny` smoke run that names neither `--dir` nor `--round`.
 
 A run that ran is still invalid if its inner process failed, if a thread of the harness (an
 agent or the sampler) raised, or if the number of jobs that ran is not the number its plan
@@ -569,6 +569,13 @@ passed. The gate names the file in `[plan] frozen`. `compare` gives no verdict o
 without it, or with a plan for another arm count. It takes the gate's planned rounds and
 margins from the file, in place of those written in the gate. The report names the file and
 gives the joint power at the rounds the verdict used.
+
+Before any verdict or blind look, `compare` checks the file. Its cycle, alpha, workload count
+and target must be the gate's. The plan recomputed from its recorded SDs under the gate's
+`[plan]` rule must give the same rounds, margins and joint power. A hand-edited plan fails
+this. The file also records where the A/A results were, relative to the checkout. When they
+are there, or `--aa DIR` names them, their SHA-256 and SDs must match the plan's. When they
+are not found, the report says the A/A provenance was not checked.
 
 **The blind look.** A confirmatory gate's runs are scheduled for `extend_to` rounds from the
 start (`--rounds 12`) and stop after the rounds the gate needs. After `look_after` rounds,

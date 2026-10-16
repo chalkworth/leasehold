@@ -170,12 +170,15 @@ here.
     over every metric and workload is 0.8, with the throughput margins widened to 1.10 if
     needed. `--write FILE` freezes that plan, with the A/A results' SHA-256. A confirmatory
     gate names the file in `[plan] frozen`, gives no verdict without it, and takes its rounds
-    and margins from it.
+    and margins from it. `compare` refuses a plan file that its gate's rule does not give at
+    the file's own SDs, and, when the A/A results are at hand (`--aa DIR`), one whose SHA-256
+    or SDs they do not match.
   - `--blind-sd` gives each metric's pooled SD for the blind look, which may add whole cycles
     to the frozen rounds. The look is fixed the first time it is ready (`blind-<gate>.json`).
   - `spec.json` records `harness` (`--no-scope`, `--no-wait`, `--drop-caches`,
     `--allow-dirty`) and whether tracked files had uncommitted changes. A run refuses to start
-    on a checkout with uncommitted changes unless `--allow-dirty` is given.
+    on a checkout with uncommitted changes unless `--allow-dirty` is given; only a `--tiny`
+    run without `--dir` or `--round` is exempt.
 
 ### Changed
 
