@@ -150,14 +150,21 @@ here.
     `--round N` with `--dir DIR` runs one round of a schedule into a results directory.
   - Before each run, the harness waits for swap-in, memory pressure and dirty pages to settle
     as well as load. A wait that times out is retried once and then leaves the run invalid.
-    `--drop-caches` empties the page cache first.
+    A source the wait cannot read counts as not quiet, and the harness stops before the first
+    run if it cannot read them all. `--drop-caches` empties the page cache first.
+  - A run is invalid if its inner process failed, if an agent or sampler thread raised (which
+    aborts the run), or if the number of jobs that ran differs from its plan.
   - `--machine-class`, `--note` and `--workload`. Each run gets a `manifest.json`: the commit,
     the leasehold version, the condition and its config, the seed, and the machine, without
     its name.
-  - Pre-registered gate files (`bench/gates/aa.toml`, `pilot.toml`, `defaults.toml`) and
-    `bench/run.py compare`, which judges results by one: paired log ratios per round, one-sided
-    t bounds, the intersection-union verdict, hard rules, a sign-permutation check, and
-    `--blind-sd`.
+  - Pre-registered gate files (`bench/gates/aa.toml`, `pilot.toml`, `defaults.toml`), each
+    pinning its workloads' `args`, and `bench/run.py compare`, which judges results by one.
+    It uses paired log ratios over exactly the first N valid rounds, one-sided t bounds, an
+    intersection-union verdict, hard rules on every candidate run (memory pressure relative to
+    the control's), and a sign-permutation check. It refuses results with another seed base,
+    other `args`, duplicate rounds, mixed commits, leasehold versions or machine classes, or a
+    pair with two seeds. `--blind-sd` gives each metric's pooled SD for the blind look, and
+    `--plan GATE` applies a gate's `[plan]` rule (rounds for 80% power, from an A/A run's SDs).
 
 ### Changed
 
@@ -167,9 +174,12 @@ here.
 - The benchmark's `--rounds` gives each round a new seed; it used to run every round on one
   plan. With three or more conditions, the order is a Williams design instead of every other
   round reversed. `spec.json` says whether `git status` was timed instead of naming the
-  repository, holds the config `init` wrote (named `bench`) instead of the plan, and the
-  leasehold conditions' config and ledger now sit beside the daemon's socket, with a copy
+  repository, holds the config `init` wrote (named `bench`) instead of the plan, and records
+  the run's sizes (`args`), commit and leasehold version. A resumed run must match all of them.
+  The leasehold conditions' config and ledger now sit beside the daemon's socket, with a copy
   in each run's `config.toml`.
+- The benchmark's wait for a quiet machine needs memory pressure under 0.5%, not 1%. The
+  default results directory is named after `--machine-class` when one is given.
 - A variable already set is the user's, and `hold` leaves it alone unless the lease the
   command runs in set it to the value it still has.
 - A user's `OMP_NUM_THREADS` is copied to `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` where

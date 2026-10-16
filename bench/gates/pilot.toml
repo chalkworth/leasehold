@@ -1,13 +1,16 @@
-# Pilot screen: which ranged defaults are worth a confirmatory gate. It only drops arms and
-# never promotes one; its seeds are never pooled with the gate's. Judge with:
+# Pilot screen: which ranged leases are worth a confirmatory gate. It only drops arms and never
+# promotes one; its seeds are never pooled with the gate's. Run and judge with:
+#   python bench/run.py --conditions 'lh-enforced@w=4,lh-enforced@w=3-3,h=1,lh-enforced@w=2-4,lh-enforced@w=2-3,kept=3,lh-enforced@w=4-8' \
+#       --rounds 3 --seed-base 100 --workload full --dir DIR \
+#       --agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo
 #   python bench/run.py compare DIR --gate bench/gates/pilot.toml
 
 [gate]
 name = "pilot"
 kind = "screen"
-intent = "Narrow the candidate heavy-rule weights to the ones a confirmatory gate should test."
-objective = "Per arm against fixed 4: the geometric-mean wake p99 and makespan ratios over 3 rounds, and the hard rules."
-stop = "3 rounds (seeds 101 to 103), run in full; no early stop."
+intent = "Narrow the candidate hold --weight ranges and pool settings (kept CPUs, headroom) to the ones a confirmatory gate should test."
+objective = "Per arm against fixed weight 4: the geometric-mean wake p99 and makespan ratios over 3 rounds, and the hard rules."
+stop = "3 rounds (seeds 101 to 103), run in full; no early stop. Fewer than 3 valid rounds is incomplete."
 decision = "The arms that survive, at most two, go to bench/gates/defaults.toml as its candidates, in an order the owner sets."
 
 [arms]
@@ -21,7 +24,7 @@ candidates = [
 
 [[workloads]]
 name = "full"
-args = "--agents 8 --duration 240 --git-repo /var/tmp/bigrepo"
+args = "--agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo"
 
 [rounds]
 planned = 3
@@ -31,7 +34,7 @@ seed_base = 100
 wake_metric = "wake_same_p99_ms"
 wake_ratio_above = 2.0      # drop: geometric mean of the wake p99 ratio above this
 makespan_ratio_above = 1.15 # drop: geometric mean of the makespan ratio above this
-hard_rules = true           # drop: any failed job, OOM kill or PSI above psi_max in a round
+hard_rules = true           # drop: any failed job, OOM kill or abort, or memory PSI as in [hard]
 max_survivors = 2
 rank_by = "makespan_s"      # which survivors stay when more than max_survivors pass
 
@@ -39,3 +42,4 @@ rank_by = "makespan_s"      # which survivors stay when more than max_survivors 
 failed_jobs = 0
 oom_kills = 0
 psi_max = 10.0
+psi_over_control = 5.0

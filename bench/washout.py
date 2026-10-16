@@ -38,15 +38,18 @@ DROP_CACHES = "/proc/sys/vm/drop_caches"
 
 @dataclass(frozen=True)
 class Reading:
+    """One look at the machine. A field is None when its source could not be read, which is
+    never quiet."""
+
     t: float  # monotonic seconds
-    load1: float
-    cpu_some: float
-    mem_some: float
-    pswpin: int  # pages read back from swap since boot
-    dirty_bytes: int  # Dirty + Writeback
+    load1: float | None
+    cpu_some: float | None
+    mem_some: float | None
+    pswpin: int | None  # pages read back from swap since boot
+    dirty_bytes: int | None  # Dirty + Writeback
 
 
-def _psi_some(resource: str) -> float:
+def _psi_some(resource: str) -> float | None:
     try:
         for line in Path(f"/proc/pressure/{resource}").read_text().splitlines():
             kind, *fields = line.split()
@@ -54,41 +57,91 @@ def _psi_some(resource: str) -> float:
                 return float(dict(f.split("=") for f in fields)["avg10"])
     except (OSError, KeyError, ValueError):
         pass
-    return 0.0
+    return None
+
+
+def _read(probe: Callable[[], float | int]) -> float | int | None:
+    try:
+        return probe()
+    except (OSError, KeyError, ValueError, IndexError):
+        return None
+
+
+def _meminfo() -> dict[str, int]:
+    out = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, _, rest = line.partition(":")
+        out[key] = int(rest.split()[0]) * 1024
+    return out
+
+
+def _vmstat() -> dict[str, str]:
+    return dict(line.split() for line in Path("/proc/vmstat").read_text().splitlines())
 
 
 def read_machine() -> Reading:
-    mem = {}
-    for line in Path("/proc/meminfo").read_text().splitlines():
-        key, _, rest = line.partition(":")
-        mem[key] = int(rest.split()[0]) * 1024
-    vm = dict(line.split() for line in Path("/proc/vmstat").read_text().splitlines())
+    def dirty() -> int:
+        mem = _meminfo()
+        return mem["Dirty"] + mem["Writeback"]
+
     return Reading(
         t=time.monotonic(),
-        load1=float(Path("/proc/loadavg").read_text().split()[0]),
+        load1=_read(lambda: float(Path("/proc/loadavg").read_text().split()[0])),
         cpu_some=_psi_some("cpu"),
         mem_some=_psi_some("memory"),
-        pswpin=int(vm.get("pswpin", 0)),
-        dirty_bytes=mem.get("Dirty", 0) + mem.get("Writeback", 0),
+        pswpin=_read(lambda: int(_vmstat()["pswpin"])),
+        dirty_bytes=_read(dirty),
     )
+
+
+def check_probes(read: Callable[[], Reading] = read_machine) -> None:
+    """A SystemExit naming each source the wait needs and cannot read (pressure needs a kernel
+    with PSI, `psi=1` on some distributions' command line)."""
+    now = read()
+    missing = [
+        name
+        for name, value in (
+            ("/proc/loadavg", now.load1),
+            ("/proc/pressure/cpu", now.cpu_some),
+            ("/proc/pressure/memory", now.mem_some),
+            ("pswpin in /proc/vmstat", now.pswpin),
+            ("Dirty and Writeback in /proc/meminfo", now.dirty_bytes),
+        )
+        if value is None
+    ]
+    if missing:
+        raise SystemExit(
+            f"the wait for a quiet machine cannot read {', '.join(missing)}; run where it can, "
+            "or with --no-wait"
+        )
 
 
 def not_quiet(now: Reading, history: list[Reading], cpus: int) -> list[str]:
     """Why the machine is not quiet at `now` (empty: it is). `history` holds earlier readings,
-    oldest first."""
+    oldest first. A source that could not be read is a reason."""
     why = []
-    if now.load1 > max(2, cpus / 4):
+    if now.load1 is None:
+        why.append("load unreadable")
+    elif now.load1 > max(2, cpus / 4):
         why.append(f"load {now.load1:.2f}")
-    if now.cpu_some >= CPU_SOME_MAX:
+    if now.cpu_some is None:
+        why.append("cpu pressure unreadable")
+    elif now.cpu_some >= CPU_SOME_MAX:
         why.append(f"cpu pressure {now.cpu_some}%")
-    if now.mem_some >= MEM_SOME_MAX:
+    if now.mem_some is None:
+        why.append("memory pressure unreadable")
+    elif now.mem_some >= MEM_SOME_MAX:
         why.append(f"memory pressure {now.mem_some}%")
-    old = [r for r in history if r.t <= now.t - SWAPIN_WINDOW_S]
-    if not old:
+    old = [r for r in history if r.t <= now.t - SWAPIN_WINDOW_S and r.pswpin is not None]
+    if now.pswpin is None:
+        why.append("swap-in unreadable")
+    elif not old:
         why.append(f"swap-in not yet watched for {SWAPIN_WINDOW_S:g} s")
     elif now.pswpin - old[-1].pswpin > SWAPIN_PAGES_MAX:
         why.append(f"swap-in {now.pswpin - old[-1].pswpin} pages in {now.t - old[-1].t:.0f} s")
-    if now.dirty_bytes >= DIRTY_MAX_BYTES:
+    if now.dirty_bytes is None:
+        why.append("dirty pages unreadable")
+    elif now.dirty_bytes >= DIRTY_MAX_BYTES:
         why.append(f"dirty and writeback {now.dirty_bytes / MIB:.0f} MiB")
     return why
 
@@ -122,9 +175,10 @@ def wait_quiet(
                 "why": why,
             }
             seen.pop("t")
+            dirty = "?" if now.dirty_bytes is None else f"{now.dirty_bytes / MIB:.0f}"
             log(
-                f"  machine before: load {now.load1:.2f}, cpu some {now.cpu_some}%, mem some "
-                f"{now.mem_some}%, dirty {now.dirty_bytes / MIB:.0f} MiB"
+                f"  machine before: load {now.load1}, cpu some {now.cpu_some}%, mem some "
+                f"{now.mem_some}%, dirty {dirty} MiB"
                 + (f" (not quiet after {max_wait_s:g} s: {'; '.join(why)})" if why else "")
             )
             return seen

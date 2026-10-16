@@ -1,22 +1,26 @@
 # A/A qualification: the control against itself, to measure the bench's own noise before any
-# gate depends on it. Judge with:
-#   python bench/run.py compare DIR --gate bench/gates/aa.toml
+# gate depends on it. Run and judge with:
+#   python bench/run.py --conditions 'lh-enforced@w=4,arm=a,lh-enforced@w=4,arm=b' \
+#       --rounds 4 --seed-base 200 --workload full --dir DIR \
+#       --agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo
+#   python bench/run.py compare DIR --gate bench/gates/aa.toml --plan bench/gates/defaults.toml
 
 [gate]
 name = "aa"
 kind = "aa"
 intent = "Find out how much two runs of the same condition differ on this machine, round by round."
-objective = "The paired SD of ln(makespan ratio) between two arms of fixed weight 4, over 4 rounds."
-stop = "4 rounds, run in full; no early stop."
-decision = "Pass: the gate runs as planned, with its rounds and margin set from this SD. Fail: fix pinning, clock boost or the washout and run this again."
+objective = "The paired SD of ln(ratio) of each co-primary metric between two arms of fixed weight 4, over 4 rounds."
+stop = "4 rounds, run in full; no early stop. Fewer than 4 valid rounds is incomplete."
+decision = "Pass: the defaults gate takes its rounds and margins from these SDs by its [plan] rule (compare --plan). Fail: fix pinning, clock boost or the washout and run this again."
 
 [arms]
 control = "lh-enforced@w=4,arm=a"
 candidates = ["lh-enforced@w=4,arm=b"]
 
+# The same sizes as the defaults gate's `full` workload; compare refuses results run otherwise.
 [[workloads]]
 name = "full"
-args = "--agents 8 --duration 240 --git-repo /var/tmp/bigrepo"
+args = "--agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo"
 
 [rounds]
 planned = 4
@@ -30,7 +34,7 @@ metric = "makespan_s"
 ci = 0.95            # two-sided interval of the mean log ratio; it must contain 0 (a ratio of 1)
 max_paired_sd = 0.06
 
-# Reported for each metric; only `aa.metric` decides.
+# Every metric's paired SD is reported, for the plan rule; only `aa.metric` decides the A/A.
 [[metrics]]
 name = "makespan_s"
 margin = 1.05
@@ -50,4 +54,5 @@ margin = 1.5
 [hard]
 failed_jobs = 0
 oom_kills = 0
-psi_max = 10.0
+psi_max = 10.0           # memory PSI some, highest sample in the run, percent
+psi_over_control = 5.0   # breaks only when also this many points above the control's round

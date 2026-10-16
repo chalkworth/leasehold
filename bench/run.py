@@ -102,6 +102,9 @@ MIB = 1 << 20
 
 #: The built-in weight of a test run or build in leasehold 0.2.0.
 WEIGHT_V020 = 4
+#: How the abort reason of a run stopped by the harness's own failure starts: such a run is
+#: invalid, and breaks no hard rule.
+HARNESS_ERROR = "harness error"
 _CLASS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -614,17 +617,28 @@ class Run:
             procs = [p for p, _ in self.live.values()]
         for proc in procs:
             _kill_group(proc, signal.SIGTERM)
-        time.sleep(5)
+        if procs:
+            time.sleep(5)
         for proc in procs:
             _kill_group(proc, signal.SIGKILL)
         self.setup.kill_jobs()
 
+    def guarded(self, name: str, work, *args) -> None:
+        """`work(*args)`; an exception in it aborts the run (`HARNESS_ERROR`), so a thread
+        that dies never leaves a run that looks whole."""
+        try:
+            work(*args)
+        except BaseException as exc:  # noqa: BLE001  (any failure must end the run)
+            self.abort(f"{HARNESS_ERROR}: {name}: {exc!r}")
+
     def run(self, plan: list[list]) -> dict:
         start = time.time()
-        sampler = threading.Thread(target=self.sampler, daemon=True)
+        sampler = threading.Thread(target=self.guarded, args=("sampler", self.sampler), daemon=True)
         sampler.start()
         agents = [
-            threading.Thread(target=self.agent, args=(i, steps), daemon=True)
+            threading.Thread(
+                target=self.guarded, args=(f"agent {i}", self.agent, i, steps), daemon=True
+            )
             for i, steps in enumerate(plan)
         ]
         for t in agents:
@@ -856,9 +870,33 @@ def run_slot(
     row = washout.washed(wait or quiet, go, invalid)
     if row is None:
         write(False, "the machine was not quiet after two washouts")
-    else:
-        write(True)
+        return None
+    outer = workdir / "outer.json"
+    inner_rc = json.loads(outer.read_text()).get("inner_rc", 0) if outer.exists() else 0
+    why = run_problem(row, len(spec_jobs(spec, slot.seed)), inner_rc)
+    if why:
+        log(f"  invalid: {why}")
+        with (outdir / "invalid.jsonl").open("a") as f:
+            f.write(json.dumps({"label": slot.label, "attempt": len(attempts), "why": why}) + "\n")
+    write(not why, why)
     return row
+
+
+def spec_jobs(spec: dict, seed: int) -> list:
+    """Every job of the plan of `seed`, in the run `spec` describes."""
+    return [step for steps in spec_plan(spec, seed) for step in steps]
+
+
+def run_problem(row: dict, planned: int, inner_rc: int) -> str:
+    """Why a run that ran is not valid ("": it is): it stopped on an error, the harness failed,
+    or fewer or more jobs ran than its plan has."""
+    if inner_rc != 0:
+        return f"the run exited {inner_rc}"
+    if str(row.get("aborted") or "").startswith(HARNESS_ERROR):
+        return row["aborted"]
+    if row.get("jobs") != planned:
+        return f"{row.get('jobs')} jobs ran of the {planned} planned"
+    return ""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1072,50 +1110,12 @@ def parse_weights(text: str, init: str) -> dict[str, int]:
     return out
 
 
-#: What a resumed run must be given again exactly as it was first: the schedule and the plan.
-RESUME_KEYS = ("conditions", "seed_base", "agents", "preset_name", "workload")
+#: What a resumed run must be given again exactly as it was first: the schedule, the plan, the
+#: sizes (`args`) and the code (`git`, `leasehold_version`).
+RESUME_KEYS = ("conditions", "seed_base", "agents", "preset_name", "workload", "args")
 
 
-def resume(spec_path: Path, fresh: dict, rounds: int, parser) -> dict:
-    """The spec of a results directory to run more rounds into, checked against what this
-    invocation would have written (`fresh`): the schedule must be the same."""
-    spec = json.loads(spec_path.read_text())
-    for key in RESUME_KEYS:
-        if spec.get(key) != fresh[key]:
-            parser.error(
-                f"{spec_path.parent} was started with {key} {spec.get(key)!r}, not "
-                f"{fresh[key]!r}; pass the same schedule to run more of it"
-            )
-    if (spec.get("rounds", 1) == 1) != (rounds == 1):
-        parser.error(f"{spec_path.parent} was started with --rounds {spec.get('rounds', 1)}")
-    if bool(spec.get("git_repo")) != fresh["git_repo"]:
-        parser.error(f"{spec_path.parent}: pass --git-repo as the run was first started")
-    spec["rounds"] = max(spec.get("rounds", 1), rounds)
-    spec_path.write_text(json.dumps(spec, indent=1))
-    return spec
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["_condition"]:
-        inner = argparse.ArgumentParser()
-        inner.add_argument("--spec", type=Path, required=True)
-        inner.add_argument("--condition", required=True)
-        inner.add_argument("--dir", type=Path, required=True)
-        inner.add_argument("--seed", type=int, required=True)
-        inner.add_argument("--git-repo")
-        a = inner.parse_args(argv[1:])
-        return run_condition(a.spec, a.condition, a.dir, a.seed, a.git_repo)
-    if argv[:1] == ["summarize"]:
-        outdir = Path(argv[1])
-        spec = json.loads((outdir / "spec.json").read_text())
-        print(write_summary(outdir, spec, completed_rows(outdir, spec)))
-        return 0
-    if argv[:1] == ["compare"]:
-        import gate
-
-        return gate.main(argv[1:])
-
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--agents", type=int, default=4)
     parser.add_argument("--duration", type=float, help="seconds of planned work per agent")
@@ -1143,7 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
         "--dir",
         type=Path,
         help="the results directory itself; one that exists is run into again, with the "
-        "schedule it was started with",
+        "schedule, sizes and code it was started with",
     )
     parser.add_argument(
         "--workload",
@@ -1199,7 +1199,110 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="empty the page cache before each run's wait (needs root or passwordless sudo)",
     )
+    return parser
+
+
+def preset_name(args) -> str:
+    return "tiny" if args.tiny else "quick" if args.quick else "full"
+
+
+def run_args(args) -> dict:
+    """What decides a run's sizes, from its parsed command line, as `spec.json` records it and
+    a gate's `[[workloads]] args` must match: the preset and its duration, the agents, the
+    memory sizes, the weights, the memory budget, the slice weight, and whether `git status`
+    is timed."""
+    weights = args.weights if isinstance(args.weights, str) else ""
+    return {
+        "preset": preset_name(args),
+        "duration_s": args.duration or PRESETS[preset_name(args)].duration_s,
+        "agents": args.agents,
+        "mem_gib": args.mem_gib,
+        "cap_gib": args.cap_gib,
+        "swap_gib": args.swap_gib,
+        "weights": ",".join(sorted(filter(None, weights.split(",")))),
+        "memory_budget": args.memory_budget,
+        "slice_weight": args.slice_weight,
+        "git_repo": bool(args.git_repo),
+    }
+
+
+def workload_args(text: str) -> dict:
+    """`run_args` of the command-line arguments `text`, as a gate file writes them."""
+    import shlex
+
+    return run_args(build_parser().parse_args(shlex.split(text)))
+
+
+def code_version() -> dict:
+    """The code a run ran: the checkout's commit and the leasehold version."""
+    git = manifest.git_state()
+    return {"git_sha": git and git["sha"], "leasehold_version": manifest.leasehold_version()}
+
+
+def resume(spec_path: Path, fresh: dict, rounds: int, parser) -> dict:
+    """The spec of a results directory to run more rounds into, checked against what this
+    invocation would have written (`fresh`): the schedule, the sizes and the code must be the
+    same."""
+    spec = json.loads(spec_path.read_text())
+    for key in RESUME_KEYS:
+        if spec.get(key) != fresh[key]:
+            parser.error(
+                f"{spec_path.parent} was started with {key} {spec.get(key)!r}, not "
+                f"{fresh[key]!r}; pass the same schedule and sizes to run more of it"
+            )
+    for key, value in code_version().items():
+        if spec.get(key) != value:
+            parser.error(
+                f"{spec_path.parent} was started with {key} {spec.get(key)!r}; this is "
+                f"{value!r}. Run more of it on the code it started with"
+            )
+    if (spec.get("rounds", 1) == 1) != (rounds == 1):
+        parser.error(f"{spec_path.parent} was started with --rounds {spec.get('rounds', 1)}")
+    spec["rounds"] = max(spec.get("rounds", 1), rounds)
+    spec_path.write_text(json.dumps(spec, indent=1))
+    return spec
+
+
+#: The only files `--publish` copies: the summaries, which name no path of the machine.
+PUBLISHED = ("summary.md", "summary.csv")
+
+
+def publish(outdir: Path, dest: Path, stem: str) -> list[Path]:
+    """Copy the summaries of `outdir` into `dest` as `stem.md` and `stem.csv`; nothing else
+    (logs and job rows hold the runtime directory and cgroup paths)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in PUBLISHED:
+        target = dest / f"{stem}{Path(name).suffix}"
+        shutil.copy(outdir / name, target)
+        out.append(target)
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["_condition"]:
+        inner = argparse.ArgumentParser()
+        inner.add_argument("--spec", type=Path, required=True)
+        inner.add_argument("--condition", required=True)
+        inner.add_argument("--dir", type=Path, required=True)
+        inner.add_argument("--seed", type=int, required=True)
+        inner.add_argument("--git-repo")
+        a = inner.parse_args(argv[1:])
+        return run_condition(a.spec, a.condition, a.dir, a.seed, a.git_repo)
+    if argv[:1] == ["summarize"]:
+        outdir = Path(argv[1])
+        spec = json.loads((outdir / "spec.json").read_text())
+        print(write_summary(outdir, spec, completed_rows(outdir, spec)))
+        return 0
+    if argv[:1] == ["compare"]:
+        import gate
+
+        return gate.main(argv[1:])
+
+    parser = build_parser()
     args = parser.parse_args(argv)
+    sizes = run_args(args)
 
     try:
         conditions = conds.parse_list(args.conditions)
@@ -1220,6 +1323,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--round: one of 1 to --rounds ({args.rounds})")
     if args.round is not None and not args.dir and not args.dry_run:
         parser.error("--round needs --dir, the results directory every round goes into")
+    if args.tiny:
+        args.no_wait = True
+    if not args.dry_run and not args.no_wait:
+        washout.check_probes()
     if args.drop_caches:
         washout.check_drop_caches()
     init = init_config()
@@ -1227,7 +1334,7 @@ def main(argv: list[str] | None = None) -> int:
         args.weights = parse_weights(args.weights, init)
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(f"--weights: {exc}")
-    name = "tiny" if args.tiny else "quick" if args.quick else "full"
+    name = preset_name(args)
     base = PRESETS[name]
     preset = Preset(**(asdict(base) | ({"duration_s": args.duration} if args.duration else {})))
     seed_base = args.seed_base if args.seed_base is not None else args.seed - 1
@@ -1271,6 +1378,7 @@ def main(argv: list[str] | None = None) -> int:
                     "nominal_s": nominal,
                     "plan": make_plan(seed_base + (args.round or 1), args.agents, preset, nominal),
                     "schedule": [asdict(s) for s in slots(first, args.round)],
+                    "args": sizes,
                 }
             )
         )
@@ -1282,7 +1390,7 @@ def main(argv: list[str] | None = None) -> int:
         "agents": args.agents,
         "preset_name": name,
         "workload": args.workload or name,
-        "git_repo": bool(args.git_repo),
+        "args": sizes,
     }
     if args.dir and (args.dir / "spec.json").exists():
         outdir = args.dir
@@ -1304,26 +1412,31 @@ def main(argv: list[str] | None = None) -> int:
             args.out / f"{m['class']}-k{args.agents}-{name}-d{preset.duration_s:g}-{stamp}"
         )
         outdir.mkdir(parents=True, exist_ok=True)
-        spec = fresh | {
-            "machine": m,
-            "seed": seed_base + 1,
-            "preset": asdict(preset),
-            "rounds": args.rounds,
-            "nominal_s": nominal,
-            "rate_bytes_per_cpu_s": rate,
-            "touch_s_per_gib": touch,
-            "work": work,
-            "mem_bytes": mem_bytes,
-            "cap_bytes": cap,
-            "swap_bytes": swap,
-            "weights": args.weights,
-            "memory_budget": args.memory_budget,
-            "slice_weight": args.slice_weight,
-            "init_config": init,
-            "notes": args.note or [],
-            "abort_available_bytes": 512 * MIB,
-            "job_timeout_s": max(60.0, 40 * max(nominal.values())),
-        }
+        spec = (
+            fresh
+            | code_version()
+            | {
+                "git_repo": sizes["git_repo"],
+                "machine": m,
+                "seed": seed_base + 1,
+                "preset": asdict(preset),
+                "rounds": args.rounds,
+                "nominal_s": nominal,
+                "rate_bytes_per_cpu_s": rate,
+                "touch_s_per_gib": touch,
+                "work": work,
+                "mem_bytes": mem_bytes,
+                "cap_bytes": cap,
+                "swap_bytes": swap,
+                "weights": args.weights,
+                "memory_budget": args.memory_budget,
+                "slice_weight": args.slice_weight,
+                "init_config": init,
+                "notes": args.note or [],
+                "abort_available_bytes": 512 * MIB,
+                "job_timeout_s": max(60.0, 40 * max(nominal.values())),
+            }
+        )
         (outdir / "spec.json").write_text(json.dumps(spec, indent=1))
         print(f"results in {outdir}", flush=True)
 
@@ -1332,8 +1445,6 @@ def main(argv: list[str] | None = None) -> int:
         with (outdir / "log.txt").open("a") as f:
             f.write(f"{time.strftime('%H:%M:%S')} {message}\n")
 
-    if args.tiny:
-        args.no_wait = True
     # A stopped benchmark still takes down the condition it was running (run_one's finally).
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     run_all(args, spec, outdir, log, args.round)
@@ -1341,10 +1452,8 @@ def main(argv: list[str] | None = None) -> int:
     print(text)
     if args.publish:
         dest = HERE / "results" / spec["machine"]["class"]
-        dest.mkdir(parents=True, exist_ok=True)
         stem = f"k{spec['agents']}-{spec['preset_name']}-d{spec['preset']['duration_s']:g}"
-        shutil.copy(outdir / "summary.md", dest / f"{stem}.md")
-        shutil.copy(outdir / "summary.csv", dest / f"{stem}.csv")
+        publish(outdir, dest, stem)
         print(f"summary copied to {dest}")
     return 0
 

@@ -10,9 +10,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from argparse import Namespace
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -264,15 +266,22 @@ def test_the_wait_times_out_on_load_pressure_swap_in_or_dirty_pages(noise):
     assert seen["why"]
 
 
-def _slot_env(tmp_path: Path):
-    spec = {"machine": bench.machine("test"), "conditions": ["unmanaged"]}
+def _slot_env(tmp_path: Path, jobs: int | None = None, row: dict | None = None):
+    spec = {
+        "machine": bench.machine("test"),
+        "conditions": ["unmanaged"],
+        "agents": 2,
+        "preset": asdict(bench.PRESETS["tiny"]),
+        "nominal_s": {"cpu": 0.5, "mem": 0.5},
+    }
+    planned = len(bench.spec_jobs(spec, 11))
     args = Namespace(note=["n"], drop_caches=False, no_wait=False, max_wait=1, settle=0)
     slot = schedule.Slot(1, 1, "unmanaged", "unmanaged-r1", 11)
     ran: list[int] = []
 
     def fake_run(_args, _spec, _outdir, workdir, _slot, _seen):
         ran.append(1)
-        return {"condition": "unmanaged-r1", "makespan_s": 1.0}
+        return {"condition": "unmanaged-r1", "makespan_s": 1.0, "jobs": planned} | (row or {})
 
     return spec, args, slot, ran, fake_run
 
@@ -304,6 +313,85 @@ def test_a_washout_that_times_out_once_is_retried(tmp_path):
         args, spec, tmp_path, lambda _: None, slot, {}, lambda: {"quiet": True}, fake_run
     )
     assert len(list((tmp_path / "superseded").iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    ("row", "why"),
+    [
+        ({"jobs": 1}, "jobs ran of the"),
+        ({"aborted": "harness error: agent 0: RuntimeError('x')"}, "harness error"),
+    ],
+)
+def test_a_run_short_of_its_plan_or_with_a_harness_error_is_invalid(tmp_path, row, why):
+    spec, args, slot, _ran, fake_run = _slot_env(tmp_path, row=row)
+    quiet = lambda: {"quiet": True}  # noqa: E731
+    bench.run_slot(args, spec, tmp_path, lambda _: None, slot, {}, quiet, fake_run)
+    m = json.loads((tmp_path / "unmanaged-r1" / "manifest.json").read_text())
+    assert m["valid"] is False and why in m["why_invalid"]
+    (line,) = (tmp_path / "invalid.jsonl").read_text().splitlines()
+    assert why in json.loads(line)["why"]
+
+
+def test_a_run_whose_inner_process_failed_is_invalid():
+    assert bench.run_problem({"jobs": 3}, 3, 0) == ""
+    assert "exited 1" in bench.run_problem({"jobs": 3}, 3, 1)
+
+
+def test_an_exception_in_a_harness_thread_aborts_the_run():
+    run = bench.Run.__new__(bench.Run)
+    run.aborted, run.stop, run.lock, run.live = None, threading.Event(), threading.Lock(), {}
+    run.setup = Namespace(kill_jobs=lambda: None)
+
+    def boom():
+        raise RuntimeError("sampler fell over")
+
+    t = threading.Thread(target=run.guarded, args=("sampler", boom))
+    t.start()
+    t.join(5)
+    assert run.stop.is_set()
+    assert run.aborted.startswith(bench.HARNESS_ERROR) and "sampler fell over" in run.aborted
+
+
+def test_an_unreadable_probe_is_never_quiet():
+    unreadable = washout.Reading(100.0, None, None, None, None, None)
+    why = washout.not_quiet(unreadable, [washout.Reading(0.0, 0, 0, 0, 0, 0)], 8)
+    assert len(why) == 5 and all("unreadable" in w for w in why)
+    no_psi = washout.Reading(100.0, 0.1, None, None, 0, 0)
+    with pytest.raises(SystemExit, match="/proc/pressure/cpu, /proc/pressure/memory"):
+        washout.check_probes(lambda: no_psi)
+    washout.check_probes(lambda: washout.Reading(0.0, 0.1, 0.0, 0.0, 0, 0))
+
+
+def test_the_runs_sizes_are_recorded_the_same_from_a_command_line_or_a_gate():
+    text = "--agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo"
+    sizes = bench.workload_args(text)
+    assert sizes == {
+        "preset": "full",
+        "duration_s": 240.0,
+        "agents": 8,
+        "mem_gib": 2.5,
+        "cap_gib": 7.0,
+        "swap_gib": 2.0,
+        "weights": "",
+        "memory_budget": None,
+        "slice_weight": 20,
+        "git_repo": True,
+    }
+    assert bench.workload_args(text.replace("2.5", "3")) != sizes
+    assert bench.workload_args("--weights mem=4,cpu=2")["weights"] == "cpu=2,mem=4"
+
+
+def test_publish_copies_only_the_summaries(tmp_path):
+    out = tmp_path / "res"
+    out.mkdir()
+    for name in ("summary.md", "summary.csv", "jobs.csv", "daemon.log", "log.txt", "spec.json"):
+        (out / name).write_text("/run/user/1000/leasehold\n")
+    copied = bench.publish(out, tmp_path / "pub", "k8-full-d240")
+    assert sorted(p.name for p in copied) == ["k8-full-d240.csv", "k8-full-d240.md"]
+    assert sorted(p.name for p in (tmp_path / "pub").iterdir()) == [
+        "k8-full-d240.csv",
+        "k8-full-d240.md",
+    ]
 
 
 def test_dropping_the_cache_without_permission_fails_clearly(monkeypatch):
@@ -426,6 +514,7 @@ GOOD = {
 SCALED = ("makespan_s", "job_mean_s", "wake_same_p99_ms", "git_p95_ms")
 CONTROL = "lh-enforced@w=4"
 CAND = "lh-enforced@w=2-4"
+FULL = "--agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo"
 
 
 def _records(rounds: int, scale: dict | None = None, noise: float = 0.01, cand=CAND, **cand_row):
@@ -442,12 +531,28 @@ def _records(rounds: int, scale: dict | None = None, noise: float = 0.01, cand=C
                     "workload": "full",
                     "seed_base": 1000,
                     "round": r,
+                    "seed": 1000 + r,
                     "condition": cond,
                     "valid": True,
+                    "why_invalid": "",
                     "row": row,
+                    "git_sha": "a" * 40,
+                    "leasehold": "0.4.0",
+                    "machine_class": "kvm-8cpu-16g",
                 }
             )
     return out
+
+
+def _info(**kw) -> dict:
+    return {
+        "name": "d",
+        "workload": "full",
+        "seed_base": 1000,
+        "args": bench.workload_args(FULL),
+        "arms": 2,
+        "rounds_seen": 8,
+    } | kw
 
 
 def _gate(kind="confirmatory", candidates=(CAND,), **extra) -> dict:
@@ -461,13 +566,8 @@ def _gate(kind="confirmatory", candidates=(CAND,), **extra) -> dict:
             "decision": "d",
         },
         "arms": {"control": CONTROL, "candidates": list(candidates)},
-        "rounds": {
-            "planned": 8,
-            "look_after": 4,
-            "extend_if_sd_above": 0.06,
-            "extend_to": 12,
-            "seed_base": 1000,
-        },
+        "rounds": {"planned": 8, "look_after": 4, "extend_to": 12, "seed_base": 1000},
+        "plan": {"power": 0.8, "min_rounds": 8, "max_rounds": 12, "widen": {"makespan_s": 1.10}},
         "test": {"alpha": 0.05},
         "metrics": [
             {"name": "makespan_s", "margin": 1.05},
@@ -475,8 +575,8 @@ def _gate(kind="confirmatory", candidates=(CAND,), **extra) -> dict:
             {"name": "wake_same_p99_ms", "margin": 1.5},
             {"name": "git_p95_ms", "margin": 1.5},
         ],
-        "hard": {"failed_jobs": 0, "oom_kills": 0, "psi_max": 10.0},
-        "workloads": [{"name": "full"}],
+        "hard": {"failed_jobs": 0, "oom_kills": 0, "psi_max": 10.0, "psi_over_control": 5.0},
+        "workloads": [{"name": "full", "args": FULL, "sizes": bench.workload_args(FULL)}],
         "order": {"sequential": True},
     }
     return g | extra
@@ -513,6 +613,57 @@ def test_a_candidate_that_breaks_a_hard_rule_fails(row):
     assert r["workloads"][0]["hard"]
 
 
+def test_memory_pressure_breaks_only_above_the_limit_and_the_controls_plus_the_slack():
+    records = _records(8)
+    for x in records:
+        x["row"] = x["row"] | {"mem_some_max": 9.0 if x["condition"] == CONTROL else 12.0}
+    r = _verdict(records)
+    assert r["verdict"] == "pass", r["why"]
+    assert r["workloads"][0]["psi"][0] == {"round": 1, "control": 9.0, "candidate": 12.0}
+    records[1]["row"] = records[1]["row"] | {"mem_some_max": 14.5}
+    r = _verdict(records)
+    assert r["verdict"] == "fail" and "memory PSI max 14.5%" in r["workloads"][0]["hard"][0]
+
+
+def test_a_hard_rule_counts_in_a_round_that_does_not_count():
+    records = _records(9)
+    records[0]["valid"] = False  # the control of round 1
+    records[1]["row"] = records[1]["row"] | {"failed": 2}
+    r = _verdict(records)
+    assert r["workloads"][0]["rounds"] == list(range(2, 10))
+    assert r["verdict"] == "fail" and r["workloads"][0]["hard"] == ["round 1: 2 failed jobs"]
+
+
+def test_a_control_that_breaks_a_hard_rule_makes_its_round_invalid_and_says_so():
+    records = _records(9)
+    records[4]["row"] = records[4]["row"] | {"oom_kills": 1}  # the control of round 3
+    r = _verdict(records)
+    w = r["workloads"][0]
+    assert w["invalid"] == [{"round": 3, "why": "the control broke a hard rule: 1 OOM kills"}]
+    assert w["rounds"] == [1, 2, 4, 5, 6, 7, 8, 9] and r["verdict"] == "pass"
+
+
+def test_the_verdict_uses_exactly_the_first_planned_rounds():
+    records = _records(8) + [
+        x | {"round": r, "seed": 1000 + r}
+        for r in (9, 10)
+        for x in _records(1, {"makespan_s": 3.0})
+    ]
+    r = _verdict(records)
+    assert r["verdict"] == "pass", r["why"]
+    w = r["workloads"][0]
+    assert w["rounds"] == list(range(1, 9)) and w["extra"] == [9, 10]
+    assert all(m["n"] == 8 for m in w["metrics"])
+
+
+def test_a_metric_missing_in_a_used_round_makes_the_verdict_incomplete():
+    records = _records(8)
+    records[3]["row"] = records[3]["row"] | {"git_p95_ms": None}
+    r = _verdict(records)
+    assert r["verdict"] == "incomplete"
+    assert "git_p95_ms missing in rounds [2]" in " ".join(r["why"])
+
+
 def test_too_few_rounds_is_incomplete_and_noise_asks_for_more():
     assert _verdict(_records(6))["verdict"] == "incomplete"
     noisy = gate.evaluate(_gate(), _records(8, noise=0.08))
@@ -534,19 +685,58 @@ def test_the_second_candidate_is_tested_only_if_the_first_passes():
 def test_an_invalid_run_drops_its_round_from_the_pairs():
     records = _records(8)
     records[0]["valid"] = False
+    records[0]["why_invalid"] = "not quiet"
     r = _verdict(records)
     assert r["workloads"][0]["rounds"] == list(range(2, 9))
+    assert r["workloads"][0]["invalid"] == [
+        {"round": 1, "why": "the control run is invalid: not quiet"}
+    ]
     assert r["verdict"] == "incomplete"
 
 
-def test_the_blind_look_gives_the_pooled_sd_and_not_the_leader():
+def test_the_blind_look_gives_the_pooled_sds_and_not_the_leader():
     slower = gate.blind_sd(_gate(), _records(8, {"makespan_s": 1.3}, noise=0.02))
     faster = gate.blind_sd(_gate(), _records(8, {"makespan_s": 0.7}, noise=0.02))
     assert slower["pooled_sd"] == pytest.approx(faster["pooled_sd"], rel=1e-2)
-    assert slower["extend"] is False and slower["rounds_needed"] == 8
+    assert set(slower["pooled_sd"]) == set(SCALED)
+    assert slower["ready"] and slower["rounds_needed"] == 8
     assert not any("mean" in k or "ratio" in k for k in slower)
     noisy = gate.blind_sd(_gate(), _records(8, noise=0.1))
-    assert noisy["extend"] is True and noisy["rounds_needed"] == 12
+    assert noisy["rounds_needed"] == 12
+    # The latency metrics count too: noise on wake p99 alone asks for more rounds.
+    laggy = _records(8)
+    for x in laggy:
+        if x["condition"] == CAND:
+            x["row"] = x["row"] | {"wake_same_p99_ms": 4.0 * (1.6 if x["round"] % 2 else 0.6)}
+    assert gate.blind_sd(_gate(), laggy)["rounds_needed"] > 8
+
+
+def test_power_matches_a_simulation():
+    import random
+
+    for n, sd, margin in ((8, 0.06, 1.05), (12, 0.29, 1.5)):
+        rng, q, hits = random.Random(7), gate.t_quantile(0.95, n - 1), 0
+        for _ in range(4000):
+            d = [rng.gauss(0, sd) for _ in range(n)]
+            m, s = gate.mean_sd(d)
+            hits += m + q * s / math.sqrt(n) < math.log(margin)
+        assert gate.pass_power(n, sd, margin, 0.05) == pytest.approx(hits / 4000, abs=0.025)
+    assert gate.pass_power(8, 0.06, 1.05, 0.05) == pytest.approx(0.665, abs=0.005)
+
+
+def test_the_plan_rule_sets_rounds_and_widens_only_makespan():
+    g = _gate()
+    sds = {"makespan_s": 0.03, "job_mean_s": 0.03, "wake_same_p99_ms": 0.29, "git_p95_ms": 0.29}
+    assert gate.plan(sds, g["metrics"], g["plan"], 0.05)["rounds"] == 8
+    out = gate.plan(sds | {"makespan_s": 0.06}, g["metrics"], g["plan"], 0.05)
+    assert out["rounds"] == 11
+    out = gate.plan(sds | {"makespan_s": 0.08}, g["metrics"], g["plan"], 0.05)
+    mk = out["metrics"][0]
+    assert out["rounds"] == 8 and mk["margin"] == 1.10 and mk["widened"] and mk["enough"]
+    out = gate.plan(sds | {"git_p95_ms": 0.6}, g["metrics"], g["plan"], 0.05)
+    git = out["metrics"][3]
+    assert out["rounds"] == 12 and git["margin"] == 1.5 and not git["enough"]
+    assert "Not enough power at 12 rounds: git_p95_ms" in gate.plan_text(out, "#")
 
 
 def test_the_screen_drops_slow_or_laggy_arms_and_keeps_two_at_most():
@@ -571,6 +761,7 @@ def test_the_screen_drops_slow_or_laggy_arms_and_keeps_two_at_most():
     g = _gate(
         "screen",
         arms,
+        rounds={"planned": 3, "seed_base": 1000},
         screen={
             "wake_ratio_above": 2.0,
             "makespan_ratio_above": 1.15,
@@ -586,40 +777,103 @@ def test_the_screen_drops_slow_or_laggy_arms_and_keeps_two_at_most():
         arms[3]: "drop",
         arms[4]: "drop",
     }
+    short = [x for x in records if x["round"] < 3]
+    out = {r["candidate"]: r["verdict"] for r in gate.evaluate(g, short)["results"]}
+    assert out[arms[1]] == "incomplete"
 
 
-def test_the_aa_check_passes_on_noise_alone_and_fails_on_a_shift():
+def _aa_gate() -> dict:
     a, b = "lh-enforced@w=4,arm=a", "lh-enforced@w=4,arm=b"
-    g = _gate(
+    return _gate(
         "aa",
         [b],
         arms={"control": a, "candidates": [b]},
+        rounds={"planned": 4, "seed_base": 1000},
         aa={"metric": "makespan_s", "ci": 0.95, "max_paired_sd": 0.06},
     )
 
-    def recs(scale, noise):
-        out = _records(4, scale, noise, cand=b)
-        for x in out:
-            x["condition"] = a if x["condition"] == CONTROL else b
-        return out
 
-    assert gate.evaluate(g, recs(None, 0.01))["results"][0]["verdict"] == "pass"
-    assert gate.evaluate(g, recs({"makespan_s": 1.1}, 0.01))["results"][0]["verdict"] == "fail"
-    assert gate.evaluate(g, recs(None, 0.1))["results"][0]["verdict"] == "fail"
+def _aa_records(rounds, scale, noise):
+    a, b = "lh-enforced@w=4,arm=a", "lh-enforced@w=4,arm=b"
+    out = _records(rounds, scale, noise, cand=b)
+    for x in out:
+        x["condition"] = a if x["condition"] == CONTROL else b
+    return out
 
 
-def test_the_gate_files_load():
+def test_the_aa_check_passes_on_noise_alone_and_fails_on_a_shift():
+    g = _aa_gate()
+    ok = gate.evaluate(g, _aa_records(4, None, 0.01))
+    assert ok["results"][0]["verdict"] == "pass"
+    assert set(ok["sds"]) == set(SCALED) and all(v is not None for v in ok["sds"].values())
+    shift = gate.evaluate(g, _aa_records(4, {"makespan_s": 1.1}, 0.01))
+    assert shift["results"][0]["verdict"] == "fail"
+    assert gate.evaluate(g, _aa_records(4, None, 0.1))["results"][0]["verdict"] == "fail"
+    assert gate.evaluate(g, _aa_records(3, None, 0.01))["results"][0]["verdict"] == "incomplete"
+
+
+@pytest.mark.parametrize(
+    ("change", "why"),
+    [
+        ({"info": {"seed_base": 100}}, "seed base 100"),
+        ({"info": {"workload": "other"}}, "does not name"),
+        ({"info": {"args": bench.workload_args(FULL.replace("2.5", "3"))}}, "other args"),
+        ({"duplicate": True}, "is in both"),
+        ({"record": {"git_sha": "b" * 40}}, "2 commits"),
+        ({"record": {"leasehold": "0.3.0"}}, "2 leasehold versions"),
+        ({"record": {"machine_class": "other"}}, "2 machine classes"),
+    ],
+)
+def test_compare_refuses_results_it_cannot_pool(change, why):
+    records, infos = _records(8), [_info()]
+    infos[0] |= change.get("info", {})
+    records[0] |= change.get("record", {})
+    if change.get("duplicate"):
+        records.append(records[0] | {"dir": "d2"})
+    with pytest.raises(gate.Refused, match=why):
+        gate.check_provenance(_gate(), records, infos)
+    gate.check_provenance(_gate(), _records(8), [_info()])
+
+
+def test_a_pair_with_two_seeds_is_refused():
+    records = _records(8)
+    records[1]["seed"] = 5
+    with pytest.raises(gate.Refused, match="round 1: the control ran seed 1001, the candidate 5"):
+        _verdict(records)
+
+
+def test_compare_says_when_the_order_is_not_a_whole_williams_cycle():
+    assert gate.balance_notes([_info(arms=3, rounds_seen=12)]) == []
+    (note,) = gate.balance_notes([_info(arms=3, rounds_seen=8)])
+    assert "not a multiple of the Williams cycle of 6" in note
+
+
+def test_the_gate_files_load_and_pin_their_workloads():
+    pinned = {}
     for name in ("aa", "pilot"):
         g = gate.load_gate(BENCH / "gates" / f"{name}.toml")
         assert g["gate"]["kind"] in gate.KINDS
+        pinned |= {(name, w["name"]): w["sizes"] for w in g["workloads"]}
     with pytest.raises(SystemExit, match="candidates is empty"):
         gate.load_gate(BENCH / "gates" / "defaults.toml")
-    g = tomllib.loads((BENCH / "gates" / "defaults.toml").read_text())
-    assert [m["margin"] for m in g["metrics"]] == [1.05, 1.05, 1.5, 1.5]
+    raw = tomllib.loads((BENCH / "gates" / "defaults.toml").read_text())
+    assert [m["margin"] for m in raw["metrics"]] == [1.05, 1.05, 1.5, 1.5]
+    assert raw["plan"]["widen"] == {"makespan_s": 1.10}
+    loads = {w["name"]: w for w in raw["workloads"]}
+    assert "params" not in loads["memheavy"]
+    full = bench.workload_args(loads["full"]["args"])
+    assert pinned[("aa", "full")] == pinned[("pilot", "full")] == full
+    assert (full["agents"], full["duration_s"], full["mem_gib"], full["cap_gib"]) == (
+        8,
+        240.0,
+        2.5,
+        7.0,
+    )
+    heavy = bench.workload_args(loads["memheavy"]["args"])
+    assert heavy == full | {"mem_gib": 3.0}
     assert (
         gate.arm_in(
-            gate.load_gate(BENCH / "gates" / "pilot.toml")
-            | {"workloads": [{"name": "m", "params": "mem=declared"}]},
+            {"workloads": [{"name": "m", "params": "mem=declared"}]},
             "m",
             CONTROL,
         )
@@ -685,6 +939,8 @@ def test_rounds_run_one_at_a_time_into_one_directory_and_compare(tmp_path):
     gate_file.write_text(
         '[gate]\nname = "smoke"\nkind = "aa"\nintent = "i"\nobjective = "o"\nstop = "s"\n'
         'decision = "d"\n[arms]\ncontrol = "unmanaged"\ncandidates = ["lh-advisory@w=2-4,h=1"]\n'
+        '[[workloads]]\nname = "tiny"\nargs = "--tiny --agents 1"\n'
+        "[rounds]\nplanned = 2\nseed_base = 40\n"
         '[[metrics]]\nname = "makespan_s"\nmargin = 1.05\n'
     )
     done = _bench("compare", str(out), "--gate", str(gate_file))
@@ -693,4 +949,16 @@ def test_rounds_run_one_at_a_time_into_one_directory_and_compare(tmp_path):
     assert result["results"][0]["metrics"][0]["n"] == 2
     assert math.isfinite(result["results"][0]["metrics"][0]["sd_log"])
     blind = _bench("compare", str(out), "--gate", str(gate_file), "--blind-sd").stdout
-    assert "pooled paired SD" in blind and "lh-advisory" not in blind
+    assert "Pooled paired SDs" in blind and "lh-advisory" not in blind
+    planned = _bench(
+        "compare", str(out), "--gate", str(gate_file), "--plan", str(BENCH / "gates/defaults.toml")
+    ).stdout
+    assert "## Plan for `defaults.toml`" in planned and "No SD for: job_mean_s" in planned
+    # Results run with other sizes are refused.
+    other = gate_file.read_text().replace("--agents 1", "--agents 2")
+    gate_file.write_text(other)
+    refused = _bench("compare", str(out), "--gate", str(gate_file), check=False)
+    assert refused.returncode == 2 and "other args" in refused.stderr
+    # A resume on other sizes is refused.
+    bad = _bench(*common, "--mem-gib", "0.02", "--round", "2", check=False)
+    assert bad.returncode == 2 and "args" in bad.stderr

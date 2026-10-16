@@ -1,43 +1,72 @@
-"""`bench/run.py compare`: a finished run judged by a gate file written before it ran.
+"""`bench/run.py compare`: finished runs judged by a gate file written before they ran.
 
-    python bench/run.py compare RESULTS-DIR [RESULTS-DIR ...] --gate bench/gates/X.toml
-    python bench/run.py compare RESULTS-DIR --gate bench/gates/X.toml --blind-sd
+    python bench/run.py compare DIR [DIR ...] --gate bench/gates/X.toml
+    python bench/run.py compare DIR [DIR ...] --gate bench/gates/X.toml --blind-sd
+    python bench/run.py compare AA-DIR --gate bench/gates/aa.toml --plan bench/gates/defaults.toml
 
-The unit is the round. For each candidate arm, each workload and each co-primary metric, every
-round where the candidate and the control both ran validly gives one paired log ratio,
-d = ln(candidate / control). Over the n rounds: the mean, the SD, and the one-sided upper
-bound mean + t(1 - alpha, n - 1) * SD / sqrt(n). A metric passes when exp(upper bound) is under
-its margin; a candidate passes only when every metric passes on every workload and no hard rule
-breaks (an intersection-union test, so no correction for the number of metrics is needed). A
-sign-permutation test of the same hypothesis (d shifted by ln(margin); exact over all 2^n
-signs up to 12 rounds, else 20 000 seeded draws) is reported beside each t bound as a check;
-it does not change the verdict.
+Provenance first. `compare` refuses results it cannot pool, and says why:
+
+* a results directory whose seed base is not the gate's, whose workload the gate does not
+  name, or whose recorded sizes (`spec.json` `args`) differ from the workload's `args`;
+* two runs of one condition in one round of one workload (a directory passed twice, or a
+  pilot beside a gate);
+* runs from more than one commit, leasehold version or machine class;
+* a control and a candidate run of one round with different seeds.
+
+The unit is the round. A round counts for a candidate when its control run and its candidate
+run are both valid and the control broke no hard rule (no failed job, no OOM kill, no abort).
+A round that does not count is listed with the reason. The verdict uses exactly the first N
+rounds that count, N being what the gate asks for; later rounds are reported as extra and
+never enter it. In each of the N rounds, each co-primary metric gives one paired log ratio,
+d = ln(candidate / control). Over the N rounds come the mean, the SD and the one-sided upper
+bound mean + t(1 - alpha, N - 1) * SD / sqrt(N). A metric passes when exp(upper bound) is under
+its margin.
+
+A candidate passes only when every metric passes on every workload and it broke no hard rule.
+This is an intersection-union test, so the number of metrics needs no correction. The hard
+rules are checked on every candidate run up to the last of the N rounds, whether or not its
+round counts: no failed job, no OOM kill, no abort other than the harness's own failure, and
+memory pressure (PSI `some` max) not above `psi_max` and the control's plus `psi_over_control`
+at once. A broken hard rule fails a candidate at once. Otherwise, fewer than N rounds, or a
+metric missing in any of the N, makes the verdict `incomplete`.
+
+A sign-permutation test of the same hypothesis is reported beside each t bound as a check. It
+shifts d by ln(margin) and is exact over all 2^N sign flips up to 12 rounds (else 20 000 seeded
+draws). It does not change the verdict.
 
 A gate has one of three kinds:
 
-* `confirmatory`: the test above, candidates in their listed order; with `sequential = true`,
-  a candidate is tested only if the one before it passed. A broken hard rule fails a candidate
-  at once. Otherwise, with fewer valid rounds than the gate asks for, the verdict is
-  `incomplete`. The number asked for is `rounds.planned`, or `rounds.extend_to` when the blind
-  look says so (below).
-* `screen`: drops arms and never promotes one: an arm goes if the geometric mean of its wake
-  ratio, or of its makespan ratio, is above the gate's limit, or a hard rule breaks. At most
-  `max_survivors` stay, the best by `rank_by`.
-* `aa`: two arms of one condition. It passes when the two-sided interval of the metric's mean
-  log ratio contains 0 (a ratio of 1) and the paired SD is at most `max_paired_sd`.
+* `confirmatory`: candidates in their listed order; with `sequential = true`, a candidate is
+  tested only if the one before it passed. N is `rounds.planned`, or more after the blind look
+  (below), up to `rounds.extend_to`.
+* `screen`: drops arms and never promotes one. N is `rounds.planned`. An arm goes if the
+  geometric mean of its wake or makespan ratio is above the gate's limit, or it breaks a hard
+  rule; with fewer than N rounds it is `incomplete`. At most `max_survivors` stay, the best by
+  `rank_by`.
+* `aa`: two arms of one condition, over N = `rounds.planned` rounds. It reports the paired SD
+  of every metric, and passes when the two-sided interval of `aa.metric`'s mean log ratio
+  contains 0 (a ratio of 1) and its paired SD is at most `max_paired_sd`.
+
+The plan. Each gate file states its rule in `[plan]`: for each metric, the rounds needed for
+`power` (0.8) to pass when the true ratio is 1, given the paired SD and the metric's margin.
+The gate runs the larger of `min_rounds` and the most any metric needs, at most `max_rounds`.
+A metric in `widen` (makespan) that still lacks power at `max_rounds` takes its wider margin
+instead; any other metric that lacks power is reported as such and keeps its margin. `--plan
+GATE` applies GATE's rule to the SDs of an A/A run. The blind look applies the same rule, with
+no widening, to the pooled SDs of the first `rounds.look_after` rounds, so a gate runs
+`planned` rounds, or more if the look asks for it, up to `extend_to`. Power comes from the
+noncentral t distribution, integrated numerically.
+
+`--blind-sd` prints only those pooled SDs and the rounds the rule asks for. It says nothing
+about which arm is ahead. Otherwise the report is printed, and written as markdown and JSON
+to `DIR/compare-<gate name>.md` and `.json`.
 
 Results are matched to the gate by workload (a run's `--workload`) and by condition. A
 workload's `params` are added to every arm in it, so `lh-enforced@w=4` in a workload with
-`params = "mem=declared"` is `lh-enforced@w=4,mem=declared`. The report warns about results
-whose seed base is not the gate's, or whose workload the gate does not name.
+`params = "mem=declared"` is `lh-enforced@w=4,mem=declared`.
 
-`--blind-sd` prints only the pooled SD of the paired log ratios of `rounds.blind_metric` over
-the first `rounds.look_after` rounds, pooled over candidates and workloads, and what the
-extension rule makes of it. It says nothing about which arm is ahead. Otherwise the report is
-printed, and written as markdown and JSON to `DIR/compare-<gate name>.md` and `.json`.
-
-The t quantile is computed here, from the regularized incomplete beta function (a continued
-fraction), so that `compare` needs only the standard library.
+Everything is computed with the standard library. The t quantile comes from the regularized
+incomplete beta function (a continued fraction).
 """
 
 from __future__ import annotations
@@ -45,11 +74,13 @@ from __future__ import annotations
 import json
 import math
 import random
+import sys
 import tomllib
 from itertools import product
 from pathlib import Path
 
 import conditions as conds
+import schedule
 
 PERMUTATION_EXACT_UP_TO = 12
 PERMUTATION_DRAWS = 20_000
@@ -186,7 +217,128 @@ def upper_test(diffs: list[float], margin: float, alpha: float) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------
+# Power, and the plan rule
+
+
+def _phi(x: float) -> float:
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def pass_power(n: int, sd: float, margin: float, alpha: float, true_log: float = 0.0) -> float:
+    """The chance that the one-sided test of `n` rounds passes `margin` when the paired log
+    ratios are normal with SD `sd` around `true_log` (0: the candidate equals the control).
+    It is P(T > t) for a noncentral t with n - 1 degrees of freedom: the expectation, over the
+    chi-square distribution of the sample variance, of a normal probability, integrated with
+    Simpson's rule in u = sqrt(V)."""
+    if n < 2:
+        return 0.0
+    if sd <= 0:
+        return 1.0 if true_log < math.log(margin) else 0.0
+    nu = n - 1
+    t = t_quantile(1 - alpha, nu)
+    delta = (math.log(margin) - true_log) * math.sqrt(n) / sd
+    log_norm = (nu / 2) * math.log(2) + math.lgamma(nu / 2)
+    top = math.sqrt(nu + 12 * math.sqrt(2 * nu) + 40)
+    steps = 2000
+
+    def f(u: float) -> float:
+        if u <= 0:
+            return 2 / math.exp(log_norm) if nu == 1 else 0.0
+        dens = 2 * math.exp((nu - 1) * math.log(u) - u * u / 2 - log_norm)
+        return _phi(delta - t * u / math.sqrt(nu)) * dens
+
+    h = top / steps
+    total = f(0) + f(top)
+    for i in range(1, steps):
+        total += (4 if i % 2 else 2) * f(i * h)
+    return min(1.0, max(0.0, total * h / 3))
+
+
+def rounds_for(sd: float, margin: float, alpha: float, power: float, most: int = 200) -> int | None:
+    """The fewest rounds (at least 2) whose test passes `margin` with chance `power` when the
+    candidate equals the control; None if even `most` rounds do not."""
+    for n in range(2, most + 1):
+        if pass_power(n, sd, margin, alpha) >= power:
+            return n
+    return None
+
+
+def plan(sds: dict, metrics: list[dict], rule: dict, alpha: float, widen: bool = True) -> dict:
+    """The gate's rounds and margins for the paired SDs `sds` (metric: SD), by `rule` (a gate's
+    `[plan]`): see the module docstring."""
+    power = rule.get("power", 0.8)
+    least, most = rule.get("min_rounds", 8), rule.get("max_rounds", 12)
+    wider = rule.get("widen", {}) if widen else {}
+    out = []
+    for spec in metrics:
+        name, margin = spec["name"], spec["margin"]
+        sd = sds.get(name)
+        if sd is None:
+            out.append({"metric": name, "margin": margin, "sd": None, "rounds": None})
+            continue
+        need = rounds_for(sd, margin, alpha, power)
+        widened = False
+        if (need is None or need > most) and name in wider:
+            margin, widened = wider[name], True
+            need = rounds_for(sd, margin, alpha, power)
+        out.append({"metric": name, "margin": margin, "widened": widened, "sd": sd, "rounds": need})
+    needs = [
+        m["rounds"] if m["rounds"] is not None else math.inf for m in out if m["sd"] is not None
+    ]
+    rounds = int(min(most, max([least, *needs])))
+    for m in out:
+        if m["sd"] is not None:
+            m["power"] = pass_power(rounds, m["sd"], m["margin"], alpha)
+            m["enough"] = m["rounds"] is not None and m["rounds"] <= rounds
+    joint = math.prod(m["power"] for m in out if m["sd"] is not None)
+    return {
+        "rounds": rounds,
+        "metrics": out,
+        "power": power,
+        "joint_power": joint,
+        "missing": [m["metric"] for m in out if m["sd"] is None],
+    }
+
+
+def plan_text(result: dict, heading: str) -> str:
+    lines = [
+        heading,
+        "",
+        f"Rounds: {result['rounds']}. Per metric, for {result['power']:.0%} power to pass when "
+        "the candidate equals the control:",
+        "",
+        "| metric | paired SD | margin | rounds needed | power at the planned rounds |",
+        "|---|---|---|---|---|",
+    ]
+    for m in result["metrics"]:
+        if m["sd"] is None:
+            lines.append(f"| {m['metric']} | not measured | {m['margin']} | | |")
+            continue
+        need = "more than 200" if m["rounds"] is None else str(m["rounds"])
+        margin = f"{m['margin']} (widened)" if m.get("widened") else str(m["margin"])
+        lines.append(f"| {m['metric']} | {m['sd']:.3f} | {margin} | {need} | {m['power']:.2f} |")
+    lines.append("")
+    short = [m["metric"] for m in result["metrics"] if m["sd"] is not None and not m["enough"]]
+    if short:
+        lines.append(
+            f"Not enough power at {result['rounds']} rounds: {', '.join(short)}. Their margins "
+            "stay as written; a fail on them is weak evidence."
+        )
+    if result["missing"]:
+        lines.append(f"No SD for: {', '.join(result['missing'])}; the plan cannot cover them.")
+    lines.append(
+        f"Chance an equal candidate passes every metric, if the metrics were independent: "
+        f"{result['joint_power']:.2f} per workload."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------------------------
 # Results
+
+
+class Refused(Exception):
+    """Results `compare` will not judge against a gate, with the reasons."""
 
 
 def load_gate(path: Path) -> dict:
@@ -210,53 +362,122 @@ def load_gate(path: Path) -> dict:
     if not arms["candidates"]:
         raise SystemExit(f"{path}: [arms] candidates is empty; name the arms to compare")
     gate.setdefault("test", {}).setdefault("alpha", 0.05)
-    gate.setdefault("hard", {})
+    hard = gate.setdefault("hard", {})
+    hard.setdefault("failed_jobs", 0)
+    hard.setdefault("oom_kills", 0)
+    gate.setdefault("plan", {})
+    if not gate.get("rounds", {}).get("planned"):
+        raise SystemExit(f"{path}: [rounds] needs planned")
     gate.setdefault("workloads", [])
+    if not gate["workloads"]:
+        raise SystemExit(f"{path}: needs [[workloads]], each with its args")
+    import run as bench
+
     for w in gate["workloads"]:
-        if not w.get("name"):
-            raise SystemExit(f"{path}: every [[workloads]] needs a name")
+        if not w.get("name") or not w.get("args"):
+            raise SystemExit(f"{path}: every [[workloads]] needs a name and args")
         try:
             for arm in [arms["control"], *arms["candidates"]]:
                 arm_in(gate, w["name"], arm)
         except ValueError as exc:
             raise SystemExit(f"{path}: workload {w['name']}: {exc}") from exc
+        w["sizes"] = bench.workload_args(w["args"])
     if not gate.get("metrics") and kind != "screen":
         raise SystemExit(f"{path}: needs [[metrics]]")
     return gate
 
 
-def collect(dirs: list[Path]) -> list[dict]:
-    """Every run under `dirs` that has a manifest: workload, round, condition, valid, and, for a
-    run with results, its summary row."""
+def collect(dirs: list[Path]) -> tuple[list[dict], list[dict]]:
+    """(every run under `dirs` that has a manifest, each directory's facts). A run has its
+    workload, round, seed, condition, whether it is valid and why not, the code and machine
+    it ran on, and, if it has results, its summary row."""
     import run as bench
 
-    out = []
+    records, infos = [], []
     for d in dirs:
         spec = json.loads((d / "spec.json").read_text())
         workload = spec.get("workload") or spec.get("preset_name")
         seed_base = spec.get("seed_base", spec.get("seed", 1) - 1)
+        rounds_seen = 0
         for manifest_path in sorted(d.glob("*/manifest.json")):
             m = json.loads(manifest_path.read_text())
             workdir = manifest_path.parent
             has = (workdir / "outer.json").exists()
             row = bench.summarize_condition(workdir, m["label"]) if has else None
-            out.append(
+            rounds_seen = max(rounds_seen, m["round"])
+            records.append(
                 {
                     "dir": d.name,
                     "workload": workload,
                     "seed_base": seed_base,
                     "round": m["round"],
+                    "seed": m.get("seed"),
                     "condition": m["condition"]["text"],
                     "valid": bool(m.get("valid")) and has,
+                    "why_invalid": m.get("why_invalid") or ("no results" if not has else ""),
                     "row": row,
+                    "git_sha": (m.get("git") or {}).get("sha"),
+                    "leasehold": m.get("leasehold"),
+                    "machine_class": m.get("machine", {}).get("class"),
                 }
             )
-    return out
+        infos.append(
+            {
+                "name": d.name,
+                "workload": workload,
+                "seed_base": seed_base,
+                "args": spec.get("args"),
+                "arms": len(spec.get("conditions", [])),
+                "rounds_seen": rounds_seen,
+            }
+        )
+    return records, infos
 
 
-def workloads_of(gate: dict, records: list[dict]) -> list[str]:
-    named = [w["name"] for w in gate["workloads"]]
-    return named or sorted({r["workload"] for r in records})
+def check_provenance(gate: dict, records: list[dict], infos: list[dict]) -> None:
+    """Raise Refused with every reason these results cannot be judged together by `gate`."""
+    why = []
+    base = gate.get("rounds", {}).get("seed_base")
+    sizes = {w["name"]: w["sizes"] for w in gate["workloads"]}
+    for info in infos:
+        name = info["name"]
+        if info["workload"] not in sizes:
+            why.append(f"{name} is workload {info['workload']!r}, which the gate does not name")
+            continue
+        if base is not None and info["seed_base"] != base:
+            why.append(f"{name} ran with seed base {info['seed_base']}; the gate names {base}")
+        if info["args"] is None:
+            why.append(f"{name} has no recorded args (it predates them)")
+        elif info["args"] != sizes[info["workload"]]:
+            diff = sorted(
+                k
+                for k in sizes[info["workload"]]
+                if info["args"].get(k) != sizes[info["workload"]][k]
+            )
+            why.append(f"{name} ran with other args than workload {info['workload']!r}: {diff}")
+    seen: dict[tuple, str] = {}
+    for r in records:
+        key = (r["workload"], r["condition"], r["round"])
+        if key in seen:
+            why.append(
+                f"{r['condition']} round {r['round']} of {r['workload']!r} is in both "
+                f"{seen[key]} and {r['dir']}"
+            )
+        seen[key] = r["dir"]
+    for field, label in (
+        ("git_sha", "commits"),
+        ("leasehold", "leasehold versions"),
+        ("machine_class", "machine classes"),
+    ):
+        values = sorted({str(r[field]) for r in records})
+        if len(values) > 1:
+            why.append(f"the runs come from {len(values)} {label}: {', '.join(values)}")
+    if why:
+        raise Refused("; ".join(why))
+
+
+def workloads_of(gate: dict) -> list[str]:
+    return [w["name"] for w in gate["workloads"]]
 
 
 def arm_in(gate: dict, workload: str, arm: str) -> str:
@@ -268,35 +489,89 @@ def arm_in(gate: dict, workload: str, arm: str) -> str:
     return conds.parse(arm + ("," if "@" in arm else "@") + extra).text
 
 
-def warnings(gate: dict, records: list[dict]) -> list[str]:
-    """What in the results does not match the gate: a seed base other than the gate's (a
-    pilot's seeds are never pooled with a gate's), or a workload the gate does not name."""
+def _breaks(gate: dict, row: dict, harness_counts: bool) -> list[str]:
+    hard = gate["hard"]
     out = []
-    base = gate.get("rounds", {}).get("seed_base")
-    named = {w["name"] for w in gate["workloads"]}
-    for d, seed_base, workload in sorted(
-        {(r["dir"], r["seed_base"], r["workload"]) for r in records}
-    ):
-        if base is not None and seed_base != base:
-            out.append(f"{d} ran with seed base {seed_base}, the gate names {base}")
-        if named and workload not in named:
-            out.append(f"{d} is workload {workload!r}, which the gate does not name; left out")
+    if (row.get("failed") or 0) > hard["failed_jobs"]:
+        out.append(f"{row['failed']} failed jobs")
+    ooms = (row.get("oom_kills") or 0) + (row.get("oom_kills_machine") or 0)
+    if ooms > hard["oom_kills"]:
+        out.append(f"{ooms} OOM kills")
+    aborted = str(row.get("aborted") or "")
+    if aborted and (harness_counts or not aborted.startswith("harness error")):
+        out.append(f"aborted ({aborted})")
     return out
 
 
-def pairs(
-    records: list[dict], workload: str, control: str, candidate: str, gate: dict | None = None
-) -> list[tuple]:
-    """(round, control row, candidate row) for every round where both ran validly."""
-    if gate is not None:
-        control, candidate = arm_in(gate, workload, control), arm_in(gate, workload, candidate)
-    by: dict[tuple[str, int], dict] = {}
+def psi_break(gate: dict, cand: dict, ctrl: dict | None) -> str:
+    """The memory-pressure rule: a candidate round breaks it when its PSI max is above
+    `psi_max` and above the control's in that round plus `psi_over_control` (without a control
+    run, above `psi_max` alone)."""
+    hard = gate["hard"]
+    psi = cand.get("mem_some_max")
+    if "psi_max" not in hard or psi is None or psi <= hard["psi_max"]:
+        return ""
+    base = (ctrl or {}).get("mem_some_max")
+    over = hard.get("psi_over_control", 0.0)
+    if base is not None and psi <= base + over:
+        return ""
+    return f"memory PSI max {psi}% (control {base}%) above {hard['psi_max']}%" + (
+        f" and the control's plus {over}" if base is not None else ""
+    )
+
+
+def window(gate: dict, records: list[dict], workload: str, candidate: str, needed: int) -> dict:
+    """The rounds of `candidate` against the control in `workload`: the first `needed` that
+    count (`used`, as (round, control row, candidate row)), those that do not and why
+    (`invalid`), those after the `needed`th (`extra`), and the hard rules the candidate broke
+    in any round up to the last used one (or any round, while fewer than `needed` count)."""
+    control = arm_in(gate, workload, gate["arms"]["control"])
+    candidate = arm_in(gate, workload, candidate)
+    runs: dict[tuple[str, int], dict] = {}
     for r in records:
-        if r["workload"] == workload and r["valid"]:
-            by[(r["condition"], r["round"])] = r["row"]
-    mine = {rnd for c, rnd in by if c == candidate}
-    rounds = sorted({rnd for c, rnd in by if c == control} & mine)
-    return [(rnd, by[(control, rnd)], by[(candidate, rnd)]) for rnd in rounds]
+        if r["workload"] == workload and r["condition"] in (control, candidate):
+            runs[(r["condition"], r["round"])] = r
+    used, invalid, extra, hard, psi = [], [], [], [], []
+    for rnd in sorted({k[1] for k in runs}):
+        if len(used) >= needed:
+            extra.append(rnd)
+            continue
+        c, k = runs.get((control, rnd)), runs.get((candidate, rnd))
+        if c and k and c["seed"] != k["seed"]:
+            raise Refused(
+                f"{workload!r} round {rnd}: the control ran seed {c['seed']}, the "
+                f"candidate {k['seed']}"
+            )
+        if k and k["row"]:
+            ctrl_row = c["row"] if c else None
+            hard += [f"round {rnd}: {b}" for b in _breaks(gate, k["row"], False)]
+            if why := psi_break(gate, k["row"], ctrl_row):
+                hard.append(f"round {rnd}: {why}")
+            psi.append((rnd, (ctrl_row or {}).get("mem_some_max"), k["row"].get("mem_some_max")))
+        reason = ""
+        if c is None:
+            reason = "no control run"
+        elif k is None:
+            reason = "no candidate run"
+        elif c["row"] and (broke := _breaks(gate, c["row"], True)):
+            reason = "the control broke a hard rule: " + ", ".join(broke)
+        elif not c["valid"]:
+            reason = f"the control run is invalid: {c['why_invalid']}"
+        elif not k["valid"]:
+            reason = f"the candidate run is invalid: {k['why_invalid']}"
+        if reason:
+            invalid.append((rnd, reason))
+        else:
+            used.append((rnd, c["row"], k["row"]))
+    return {
+        "used": used,
+        "invalid": invalid,
+        "extra": extra,
+        "hard": hard,
+        "psi": psi,
+        "needed": needed,
+        "complete": len(used) >= needed,
+    }
 
 
 def log_ratios(paired: list[tuple], metric: str) -> tuple[list[float], list[int]]:
@@ -311,57 +586,50 @@ def log_ratios(paired: list[tuple], metric: str) -> tuple[list[float], list[int]
     return out, missing
 
 
-def hard_breaks(gate: dict, paired: list[tuple]) -> list[str]:
-    """The hard rules a candidate broke, round by round."""
-    hard = gate["hard"]
-    out = []
-    for rnd, _ctrl, cand in paired:
-        if "failed_jobs" in hard and (cand.get("failed") or 0) > hard["failed_jobs"]:
-            out.append(f"round {rnd}: {cand['failed']} failed jobs")
-        ooms = (cand.get("oom_kills") or 0) + (cand.get("oom_kills_machine") or 0)
-        if "oom_kills" in hard and ooms > hard["oom_kills"]:
-            out.append(f"round {rnd}: {ooms} OOM kills")
-        psi = cand.get("mem_some_max")
-        if "psi_max" in hard and psi is not None and psi > hard["psi_max"]:
-            out.append(f"round {rnd}: memory PSI max {psi}% above {hard['psi_max']}%")
-        if cand.get("aborted"):
-            out.append(f"round {rnd}: aborted ({cand['aborted']})")
-    return out
+def _window_out(w: dict) -> dict:
+    return {
+        "rounds": [u[0] for u in w["used"]],
+        "needed": w["needed"],
+        "complete": w["complete"],
+        "invalid": [{"round": r, "why": why} for r, why in w["invalid"]],
+        "extra": w["extra"],
+        "hard": w["hard"],
+        "psi": [{"round": r, "control": c, "candidate": k} for r, c, k in w["psi"]],
+    }
 
 
 def blind_sd(gate: dict, records: list[dict]) -> dict:
-    """The pooled SD of the paired log ratios of the blind metric over the first
-    `look_after` rounds, and what the extension rule makes of it."""
-    rounds = gate.get("rounds", {})
-    metric = rounds.get("blind_metric", "makespan_s")
-    look = rounds.get("look_after")
-    arms = gate["arms"]
-    num, dof, n_pairs = 0.0, 0, 0
-    for workload in workloads_of(gate, records):
-        for cand in arms["candidates"]:
-            paired = pairs(records, workload, arms["control"], cand, gate)
-            if look:
-                paired = [p for p in paired if p[0] <= look]
-            d, _ = log_ratios(paired, metric)
-            if len(d) >= 2:
-                _, sd = mean_sd(d)
-                num += (len(d) - 1) * sd**2
-                dof += len(d) - 1
-                n_pairs += len(d)
-    sd = math.sqrt(num / dof) if dof else None
-    limit = rounds.get("extend_if_sd_above")
-    out = {
-        "metric": metric,
-        "look_after": look,
-        "paired_rounds": n_pairs,
-        "pooled_sd": sd,
-        "extend_if_sd_above": limit,
+    """The pooled paired SD of each co-primary metric over the first `look_after` rounds that
+    count, pooled over candidates and workloads, and the rounds the plan rule asks for at those
+    SDs (between `planned` and `extend_to`). Nothing about which arm is ahead."""
+    rounds = gate["rounds"]
+    look = rounds.get("look_after") or rounds["planned"]
+    sums: dict[str, list[float]] = {m["name"]: [0.0, 0] for m in gate["metrics"]}
+    ready = True
+    for workload in workloads_of(gate):
+        for cand in gate["arms"]["candidates"]:
+            w = window(gate, records, workload, cand, look)
+            ready = ready and w["complete"]
+            for spec in gate["metrics"]:
+                d, _ = log_ratios(w["used"], spec["name"])
+                if len(d) >= 2:
+                    _, sd = mean_sd(d)
+                    sums[spec["name"]][0] += (len(d) - 1) * sd**2
+                    sums[spec["name"]][1] += len(d) - 1
+    sds = {k: (math.sqrt(a / b) if b else None) for k, (a, b) in sums.items()}
+    rule = gate["plan"] | {
+        "min_rounds": rounds["planned"],
+        "max_rounds": rounds.get("extend_to", rounds["planned"]),
     }
-    if sd is not None and limit is not None:
-        extend = sd > limit
-        out["rounds_needed"] = rounds.get("extend_to") if extend else rounds.get("planned")
-        out["extend"] = extend
-    return out
+    planned = plan(sds, gate["metrics"], rule, gate["test"]["alpha"], widen=False)
+    ready = ready and not planned["missing"]
+    return {
+        "look_after": look,
+        "ready": ready,
+        "pooled_sd": sds,
+        "rounds_needed": planned["rounds"] if ready else rounds["planned"],
+        "plan": planned,
+    }
 
 
 def evaluate(gate: dict, records: list[dict]) -> dict:
@@ -370,12 +638,11 @@ def evaluate(gate: dict, records: list[dict]) -> dict:
 
 
 def confirmatory(gate: dict, records: list[dict]) -> dict:
-    arms = gate["arms"]
     alpha = gate["test"]["alpha"]
     look = blind_sd(gate, records)
-    needed = look.get("rounds_needed") or gate.get("rounds", {}).get("planned") or 2
+    needed = look["rounds_needed"]
     results, stop = [], False
-    for cand in arms["candidates"]:
+    for cand in gate["arms"]["candidates"]:
         if stop:
             results.append(
                 {
@@ -385,90 +652,85 @@ def confirmatory(gate: dict, records: list[dict]) -> dict:
                 }
             )
             continue
-        per_workload, why, complete = [], [], True
-        for workload in workloads_of(gate, records):
-            paired = pairs(records, workload, arms["control"], cand, gate)
-            if len(paired) < needed:
-                complete = False
-                why.append(f"{workload}: {len(paired)} of {needed} rounds")
+        per_workload, why, incomplete = [], [], False
+        for workload in workloads_of(gate):
+            w = window(gate, records, workload, cand, needed)
+            if not w["complete"]:
+                incomplete = True
+                why.append(f"{workload}: {len(w['used'])} of {needed} rounds count")
             metrics = []
             for spec in gate["metrics"]:
-                d, missing = log_ratios(paired, spec["name"])
+                d, missing = log_ratios(w["used"], spec["name"])
                 res = {"metric": spec["name"], "missing_rounds": missing}
                 res |= upper_test(d, spec["margin"], alpha)
-                if not res["pass"]:
+                if missing:
+                    incomplete = True
+                    why.append(f"{workload}: {spec['name']} missing in rounds {missing}")
+                elif not res["pass"] and "upper_ratio" in res:
                     why.append(
-                        f"{workload}: {spec['name']} "
-                        + (
-                            res.get("why")
-                            or f"upper bound {res['upper_ratio']:.3f} not under {spec['margin']}"
-                        )
+                        f"{workload}: {spec['name']} upper bound {res['upper_ratio']:.3f} not "
+                        f"under {spec['margin']}"
                     )
                 metrics.append(res)
-            breaks = hard_breaks(gate, paired)
-            why += [f"{workload}: {b}" for b in breaks]
-            per_workload.append(
-                {
-                    "workload": workload,
-                    "rounds": [p[0] for p in paired],
-                    "metrics": metrics,
-                    "hard": breaks,
-                }
-            )
+            why += [f"{workload}: {b}" for b in w["hard"]]
+            per_workload.append({"workload": workload, "metrics": metrics} | _window_out(w))
         broken = any(w["hard"] for w in per_workload)
-        passed = all(m["pass"] for w in per_workload for m in w["metrics"]) and not broken
-        # A broken hard rule is final; a bound is judged only on the rounds the gate needs.
-        verdict = "fail" if broken else "pass" if passed and complete else "incomplete"
-        if complete and not passed:
+        passed = all(m["pass"] for w in per_workload for m in w["metrics"])
+        if broken:
             verdict = "fail"
-        if not per_workload:
-            verdict, why = "incomplete", ["no results for this candidate"]
+        elif incomplete:
+            verdict = "incomplete"
+        else:
+            verdict = "pass" if passed else "fail"
         results.append(
             {"candidate": cand, "verdict": verdict, "why": why, "workloads": per_workload}
         )
+        # Sequential order: the next candidate is tested only after this one passed.
         if gate.get("order", {}).get("sequential", True) and verdict != "pass":
             stop = True
-    return {
-        "kind": "confirmatory",
-        "rounds_needed": needed,
-        "blind": look,
-        "results": results,
-        "warnings": warnings(gate, records),
-    }
+    return {"kind": "confirmatory", "rounds_needed": needed, "blind": look, "results": results}
 
 
 def screen(gate: dict, records: list[dict]) -> dict:
-    arms = gate["arms"]
     rule = gate.get("screen", {})
+    needed = gate["rounds"]["planned"]
     results = []
-    for cand in arms["candidates"]:
-        why, figures = [], {}
-        for workload in workloads_of(gate, records):
-            paired = pairs(records, workload, arms["control"], cand, gate)
-            if not paired:
-                why.append(f"{workload}: no paired rounds")
-                continue
+    for cand in gate["arms"]["candidates"]:
+        why, figures, windows, incomplete = [], {}, [], False
+        for workload in workloads_of(gate):
+            w = window(gate, records, workload, cand, needed)
+            windows.append({"workload": workload} | _window_out(w))
+            if rule.get("hard_rules", True):
+                why += [f"{workload}: {b}" for b in w["hard"]]
+            if not w["complete"]:
+                incomplete = True
             for metric, limit_key in (
                 (rule.get("wake_metric", "wake_same_p99_ms"), "wake_ratio_above"),
                 ("makespan_s", "makespan_ratio_above"),
             ):
-                d, _ = log_ratios(paired, metric)
-                if not d:
-                    why.append(f"{workload}: no {metric}")
+                d, missing = log_ratios(w["used"], metric)
+                if missing or not d:
+                    incomplete = True
                     continue
                 gm = math.exp(sum(d) / len(d))
                 figures[f"{workload}:{metric}"] = {"ratio": gm, "rounds": len(d)}
                 limit = rule.get(limit_key)
                 if limit is not None and gm > limit:
                     why.append(f"{workload}: {metric} ratio {gm:.3f} above {limit}")
-            if rule.get("hard_rules", True):
-                why += [f"{workload}: {b}" for b in hard_breaks(gate, paired)]
+        if why:
+            verdict = "drop"
+        elif incomplete:
+            verdict = "incomplete"
+            why.append(f"fewer than {needed} rounds count, or a metric is missing")
+        else:
+            verdict = "survives"
         results.append(
             {
                 "candidate": cand,
-                "verdict": "drop" if why else "survives",
+                "verdict": verdict,
                 "why": why,
                 "figures": figures,
+                "workloads": windows,
             }
         )
     keep = rule.get("max_survivors")
@@ -483,27 +745,35 @@ def screen(gate: dict, records: list[dict]) -> dict:
         for r in sorted(alive, key=score)[keep:]:
             r["verdict"] = "drop"
             r["why"].append(f"not among the {keep} best by {rank}")
-    return {"kind": "screen", "results": results, "warnings": warnings(gate, records)}
+    return {"kind": "screen", "results": results}
 
 
 def aa(gate: dict, records: list[dict]) -> dict:
-    arms = gate["arms"]
     rule = gate.get("aa", {})
     level = rule.get("ci", 0.95)
     max_sd = rule.get("max_paired_sd", 0.06)
     primary = rule.get("metric", "makespan_s")
-    cand = arms["candidates"][0]
-    per = []
-    for workload in workloads_of(gate, records):
-        paired = pairs(records, workload, arms["control"], cand, gate)
+    needed = gate["rounds"]["planned"]
+    cand = gate["arms"]["candidates"][0]
+    per, why, windows, incomplete = [], [], [], False
+    for workload in workloads_of(gate):
+        w = window(gate, records, workload, cand, needed)
+        windows.append({"workload": workload} | _window_out(w))
+        why += [f"{workload}: {b}" for b in w["hard"]]
+        if not w["complete"]:
+            incomplete = True
+            why.append(f"{workload}: {len(w['used'])} of {needed} rounds count")
         for spec in gate["metrics"]:
-            d, missing = log_ratios(paired, spec["name"])
+            d, missing = log_ratios(w["used"], spec["name"])
             res: dict = {
                 "workload": workload,
                 "metric": spec["name"],
                 "n": len(d),
                 "missing_rounds": missing,
             }
+            if missing:
+                incomplete = True
+                why.append(f"{workload}: {spec['name']} missing in rounds {missing}")
             if len(d) >= 2:
                 m, sd = mean_sd(d)
                 half = t_quantile(1 - (1 - level) / 2, len(d) - 1) * sd / math.sqrt(len(d))
@@ -514,24 +784,55 @@ def aa(gate: dict, records: list[dict]) -> dict:
                     "contains_1": m - half <= 0 <= m + half,
                 }
             per.append(res)
-    why = []
-    main = [r for r in per if r["metric"] == primary]
-    if not main or any("sd_log" not in r for r in main):
-        why.append(f"fewer than 2 paired rounds of {primary}")
-    for r in main:
-        if "sd_log" not in r:
+    failed = bool([b for w in windows for b in w["hard"]])
+    for r in per:
+        if r["metric"] != primary or "sd_log" not in r:
             continue
         if not r["contains_1"]:
+            failed = True
             why.append(f"{r['workload']}: the {level:.0%} interval of {primary} leaves out 1")
         if r["sd_log"] > max_sd:
+            failed = True
             why.append(f"{r['workload']}: paired SD {r['sd_log']:.3f} above {max_sd}")
+    verdict = "fail" if failed else "incomplete" if incomplete else "pass"
+    sds = {r["metric"]: r.get("sd_log") for r in per}
     return {
         "kind": "aa",
-        "warnings": warnings(gate, records),
+        "sds": sds,
         "results": [
-            {"candidate": cand, "verdict": "fail" if why else "pass", "why": why, "metrics": per}
+            {
+                "candidate": cand,
+                "verdict": verdict,
+                "why": why,
+                "metrics": per,
+                "workloads": windows,
+            }
         ],
     }
+
+
+def balance_notes(infos: list[dict]) -> list[str]:
+    """Where the order is not balanced: a directory whose rounds are not a whole number of
+    Williams cycles."""
+    out = []
+    for info in infos:
+        if info["arms"] < 2 or not info["rounds_seen"]:
+            continue
+        cycle = len(schedule.williams(info["arms"]))
+        if info["rounds_seen"] % cycle:
+            out.append(
+                f"{info['name']}: {info['rounds_seen']} rounds of {info['arms']} arms is not a "
+                f"multiple of the Williams cycle of {cycle}, so the order is balanced only over "
+                "the whole cycles in it"
+            )
+    return out
+
+
+def judge(gate: dict, dirs: list[Path]) -> dict:
+    """The gate's verdict on the results in `dirs`; Refused if they cannot be judged."""
+    records, infos = collect(dirs)
+    check_provenance(gate, records, infos)
+    return evaluate(gate, records) | {"notes": balance_notes(infos)}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -540,6 +841,29 @@ def aa(gate: dict, records: list[dict]) -> dict:
 
 def _f(v, nd=3) -> str:
     return "" if v is None else f"{v:.{nd}f}" if isinstance(v, float) else str(v)
+
+
+def _window_lines(w: dict) -> list[str]:
+    lines = [
+        f"Workload `{w['workload']}`: rounds {', '.join(map(str, w['rounds'])) or 'none'} "
+        f"count ({len(w['rounds'])} of {w['needed']}).",
+        "",
+    ]
+    lines += [f"- round {i['round']} does not count: {i['why']}" for i in w["invalid"]]
+    if w["extra"]:
+        many = len(w["extra"]) > 1
+        lines.append(
+            f"- {'rounds' if many else 'round'} {', '.join(map(str, w['extra']))} came after the "
+            f"{w['needed']} the gate uses; {'they are' if many else 'it is'} not in the verdict"
+        )
+    lines += [f"- hard rule: {h}" for h in w["hard"]] or ["- hard rules: kept"]
+    if w["psi"]:
+        lines.append(
+            "- memory PSI max by round, control / candidate: "
+            + ", ".join(f"r{p['round']} {p['control']} / {p['candidate']}" for p in w["psi"])
+        )
+    lines.append("")
+    return lines
 
 
 def report(gate: dict, result: dict, dirs: list[Path]) -> str:
@@ -554,24 +878,28 @@ def report(gate: dict, result: dict, dirs: list[Path]) -> str:
         "",
         f"Results: {', '.join(d.name for d in dirs)}. Control `{gate['arms']['control']}`.",
         "",
-        *[f"- Warning: {w}" for w in result.get("warnings", [])],
-        *([""] if result.get("warnings") else []),
+        *[f"- Note: {n}" for n in result.get("notes", [])],
+        *([""] if result.get("notes") else []),
     ]
     if result["kind"] == "confirmatory":
         b = result["blind"]
         lines += [
-            f"Rounds needed: {result['rounds_needed']} (pooled paired SD of {b['metric']} over "
-            f"the first {b['look_after']} rounds: "
-            f"{_f(b['pooled_sd']) or 'too few rounds to measure'}).",
+            f"Rounds the verdict uses: {result['rounds_needed']}"
+            + (
+                f" (the plan rule at the pooled SDs of the first {b['look_after']} rounds)."
+                if b["ready"]
+                else f" (the blind look needs {b['look_after']} rounds of every candidate)."
+            ),
             "",
         ]
     for r in result["results"]:
         lines += [f"## `{r['candidate']}`: {r['verdict']}", ""]
         lines += [f"- {w}" for w in r["why"]] + ([""] if r["why"] else [])
         for w in r.get("workloads", []):
+            lines += _window_lines(w)
+            if "metrics" not in w:
+                continue
             lines += [
-                f"Workload `{w['workload']}`, rounds {', '.join(map(str, w['rounds'])) or 'none'}.",
-                "",
                 "| metric | n | ratio | upper bound | margin | t | permutation p | verdict |",
                 "|---|---|---|---|---|---|---|---|",
             ]
@@ -581,9 +909,8 @@ def report(gate: dict, result: dict, dirs: list[Path]) -> str:
                     f"{_f(m.get('upper_ratio'))} | {m['margin']} | {_f(m.get('t'))} | "
                     f"{_f(m.get('permutation_p'))} | {'pass' if m['pass'] else 'fail'} |"
                 )
-            lines += [""] + ([f"- hard rule: {h}" for h in w["hard"]] or ["- hard rules: kept"])
             lines.append("")
-        if "figures" in r:
+        if r.get("figures"):
             lines += ["| workload:metric | geometric-mean ratio | rounds |", "|---|---|---|"]
             for k, v in r["figures"].items():
                 lines.append(f"| {k} | {_f(v['ratio'])} | {v['rounds']} |")
@@ -601,6 +928,21 @@ def report(gate: dict, result: dict, dirs: list[Path]) -> str:
     return "\n".join(lines)
 
 
+def blind_text(b: dict) -> str:
+    lines = [f"Pooled paired SDs over the first {b['look_after']} rounds that count:"]
+    for m in b["plan"]["metrics"]:
+        sd = "not measured" if m["sd"] is None else f"{m['sd']:.4f}"
+        lines.append(f"  {m['metric']}: {sd}")
+    if b["ready"]:
+        lines.append(f"The plan rule asks for {b['rounds_needed']} rounds.")
+    else:
+        lines.append(
+            f"Not every candidate has {b['look_after']} rounds that count yet, or a metric has "
+            "no SD; the gate stays at its planned rounds."
+        )
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
     import argparse
 
@@ -608,30 +950,38 @@ def main(argv: list[str]) -> int:
     parser.add_argument("dirs", nargs="+", type=Path, help="results directories")
     parser.add_argument("--gate", type=Path, required=True, help="a bench/gates/*.toml file")
     parser.add_argument(
-        "--blind-sd", action="store_true", help="print only the pooled SD for the blind look"
+        "--blind-sd", action="store_true", help="print only the pooled SDs for the blind look"
+    )
+    parser.add_argument(
+        "--plan",
+        type=Path,
+        help="with an aa gate: print the rounds and margins this gate's [plan] rule gives",
     )
     parser.add_argument(
         "--out", type=Path, help="report path without suffix (default: DIR/compare-<gate name>)"
     )
     args = parser.parse_args(argv)
     gate = load_gate(args.gate)
-    records = collect(args.dirs)
-    if args.blind_sd:
-        b = blind_sd(gate, records)
-        sd = b["pooled_sd"]
-        sd = "none (fewer than 2 paired rounds)" if sd is None else f"{sd:.4f}"
-        print(
-            f"pooled paired SD of ln({b['metric']} ratio), first {b['look_after']} rounds, "
-            f"{b['paired_rounds']} paired rounds: {sd}"
-        )
-        if "extend" in b:
-            print(
-                f"rule: above {b['extend_if_sd_above']} runs {b['rounds_needed']} rounds; "
-                + ("extend" if b["extend"] else "do not extend")
-            )
-        return 0
-    result = evaluate(gate, records)
+    try:
+        if args.blind_sd:
+            records, infos = collect(args.dirs)
+            check_provenance(gate, records, infos)
+            print(blind_text(blind_sd(gate, records)))
+            return 0
+        result = judge(gate, args.dirs)
+    except Refused as exc:
+        print(f"compare: refused: {exc}", file=sys.stderr)
+        return 2
     text = report(gate, result, args.dirs)
+    if args.plan:
+        if result["kind"] != "aa":
+            parser.error("--plan reads the SDs of an aa gate's results")
+        target = load_gate(args.plan) if _has_candidates(args.plan) else _load_plan_only(args.plan)
+        planned = plan(result["sds"], target["metrics"], target["plan"], target["test"]["alpha"])
+        text += "\n" + plan_text(planned, f"## Plan for `{args.plan.name}`")
+        if result["results"][0]["verdict"] != "pass":
+            text += "\n\nThe A/A did not pass; fix the bench before planning on its SDs."
+        result["plan"] = planned
     stem = args.out or args.dirs[0] / f"compare-{gate['gate']['name']}"
     stem.with_suffix(".md").write_text(text + "\n")
     stem.with_suffix(".json").write_text(
@@ -639,3 +989,20 @@ def main(argv: list[str]) -> int:
     )
     print(text)
     return 0
+
+
+def _has_candidates(path: Path) -> bool:
+    return bool(tomllib.loads(path.read_text()).get("arms", {}).get("candidates"))
+
+
+def _load_plan_only(path: Path) -> dict:
+    """A gate file's metrics, `[plan]` and alpha, for a gate whose candidates are not yet
+    filled in."""
+    raw = tomllib.loads(path.read_text())
+    if not raw.get("metrics"):
+        raise SystemExit(f"{path}: needs [[metrics]]")
+    return {
+        "metrics": raw["metrics"],
+        "plan": raw.get("plan", {}),
+        "test": {"alpha": raw.get("test", {}).get("alpha", 0.05)},
+    }
