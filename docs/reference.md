@@ -142,12 +142,14 @@ Headroom helps the requests whose MIN fits in it. A fixed request larger than th
 (a fixed 4 beside a lone 1-8 that took 6) waits for the range to end.
 
 Memory is counted at the size granted. A request declares a total (`memory`), which does not
-grow with its size, or a size per slot (`memory_per_slot`: a rule key, `hold
---memory-per-slot`, an acquire field), counted as size × it and held to that when contained;
-not both. One that declares neither counts size × `assumed_per_slot`. A per-slot size times
-MIN over `[ceiling] memory` is refused, and MAX is cut to the slots whose memory fits it,
-whether or not the machine has a memory budget. A per-slot lease also records the total it
-was granted as its `memory`, which is what leasehold 0.3 reads.
+grow with its size, or a size per slot (`memory_per_slot`: a rule key, `hold --memory-per-slot`,
+an acquire field), counted as size × it and held to that when contained; not both. One that
+declares neither counts size × `assumed_per_slot`. A per-slot size times MIN over `[ceiling]
+memory` is refused, and MAX is cut to the slots whose memory fits it, whether or not the machine
+has a memory budget. On a machine with a budget, a range that declares no memory has its MAX cut
+the same way, at `assumed_per_slot` a slot. A fixed weight is never cut, so a fixed `--weight 6`
+can be granted 6 where a range of 2-6 is granted less. A per-slot lease also records the total
+it was granted as its `memory`, which is what leasehold 0.3 reads.
 
 ### Elastic leases
 
@@ -197,16 +199,17 @@ without `--jobserver` exits 2, because nothing would make the command's jobs fol
 It starts with the job count of the size granted, so the jobserver holds that many tokens less
 one, and it renews at least every `settle_s`. The lease is a plain range until a job takes a
 token, which shows the command's jobs follow the jobserver; `hold` then makes it elastic. A
-command that never takes one keeps the size it was granted, neither growing nor giving any
-back. When the target rises `hold` asks for it, and once granted it puts the new jobs' tokens
-in the jobserver and sets the scope's `CPUWeight` (and, with a memory per slot, `MemoryHigh`)
-for the new size with `systemctl --user set-property --runtime`. When the target falls, a
-thread blocked reading the jobserver takes each token a job gives back until the jobs left fit
-the target, so no running job is stopped, and `hold` then gives the slots back. A job killed
-while it held a token never gives it back, so after 120 s the tokens still out are taken as
-lost and the slots are given back anyway. A scope that cannot be resized is reported, and the
-lease moves anyway. The calls `hold` makes for this wait no longer than a renewal interval, so
-they never hold a renewal up.
+command that never takes one keeps the size it was granted, neither growing nor giving any back.
+When the target rises `hold` asks for it, and once granted it puts the new jobs' tokens in the
+jobserver and sets the scope's `CPUWeight` (and, with a memory per slot, `MemoryHigh`) for the
+new size with `systemctl --user set-property --runtime`. When the target falls, a thread blocked
+reading the jobserver takes each token a job gives back, so no running job is stopped. `hold`
+gives a slot back only once the tokens of its jobs have come back, however long the jobs take,
+so the jobs that can run never outnumber the slots the lease holds. A job killed while it holds
+a token keeps that slot held until the command ends. A request waiting first in line says what
+it waits for (`waiting for an elastic lease to give back 2 slots as its jobs finish`). A scope
+that cannot be resized is reported, and the lease moves anyway. The calls `hold` makes for this
+wait no longer than a renewal interval, so they never hold a renewal up.
 
 Only jobserver clients see the size change: make, ninja 1.13 and later, cargo and rustc, and
 GCC's LTO take a token before each extra job, so the number of jobs they run follows the
@@ -217,8 +220,9 @@ elastic lease. `CMAKE_BUILD_PARALLEL_LEVEL` is not set, since `cmake --build` pa
 as `-jN`, and `CARGO_BUILD_JOBS` is the job count of MAX, since cargo also takes a token for
 each job. A `make -jN` given its own count, on the command line or in a recipe, leaves the
 jobserver and runs its own: it runs N jobs whatever the lease holds, and the lease keeps its
-size. `hold` warns when the command line gives a `-j` with a number. The Claude Code hooks,
-the MCP server and the PATH shims never ask for elastic leases.
+size. A bare `make -j` sets no limit at all and also leaves it. `hold` warns when the command
+line gives a `-j`, with a number or without one. The Claude Code hooks, the MCP server and the
+PATH shims never ask for elastic leases.
 
 For example, a `work` pool of 4 slots with no headroom, where a test run holds 2:
 
@@ -549,23 +553,22 @@ above what the pool could ever hold beside the other pools' reservations and sta
 leasehold hold -- cargo test --workspace
 ```
 
-Without `--weight`, `hold` weighs the command as the [`[commands]` rules](#which-commands-take-a-lease-commands)
-weigh it (cargo test: `heavy_weight` slots, cut to what its pool may hold; a rule's range as
-a range), and anything they do not name as 1 slot. A training script or other single process
-that runs many threads weighs 1 slot unless a rule names it, so give it `--weight N` for the
-N slots it uses. `--weight 2-4` asks for a [range](#ranges-min-max-slots) and runs the
-command sized to the weight granted. With `--jobserver` the range is
-[elastic](#elastic-leases) unless `--no-elastic` is given: once the command's jobs take
-jobserver tokens, its jobserver's tokens and its scope follow the lease as it grows and
-shrinks. `--elastic` needs `--jobserver`, and exits 2 without it. `--memory 6g` declares the memory it will use (default:
-its rule's `memory`), counted against the [memory budget](#memory) and held to when
-contained; `--memory-per-slot 2g` declares it per slot granted instead (default: its rule's
-`memory_per_slot`).
-`--threads N` sets the parallelism inside each of its processes (default: its rule's
-`threads`, else the job count; see [sizing](#sizing-the-command-to-its-lease)). A PATH shim
-inside the command may still lower it. `hold` reads
-the rules when no `--weight` is given, or for the threads when the job variables are on; with
-`--weight` and `--no-job-env` it does not ask the daemon for them.
+Without `--weight`, `hold` weighs the command as the [`[commands]`
+rules](#which-commands-take-a-lease-commands) weigh it (cargo test: `heavy_weight` slots, cut to
+what its pool may hold; a rule's range as a range), and anything they do not name as 1 slot. A
+training script or other single process that runs many threads weighs 1 slot unless a rule names
+it, so give it `--weight N` for the N slots it uses. `--weight 2-4` asks for a
+[range](#ranges-min-max-slots) and runs the command sized to the weight granted. With
+`--jobserver` the range is [elastic](#elastic-leases) unless `--no-elastic` is given: once the
+command's jobs take jobserver tokens, its jobserver's tokens and its scope follow the lease as
+it grows and shrinks. `--elastic` needs `--jobserver`, and exits 2 without it. `--memory 6g`
+declares the memory it will use (default: its rule's `memory`), counted against the [memory
+budget](#memory) and held to when contained; `--memory-per-slot 2g` declares it per slot granted
+instead (default: its rule's `memory_per_slot`). `--threads N` sets the parallelism inside each
+of its processes (default: its rule's `threads`, else the job count; see
+[sizing](#sizing-the-command-to-its-lease)). A PATH shim inside the command may still lower it.
+`hold` reads the rules when no `--weight` is given, or for the threads when the job variables
+are on; with `--weight` and `--no-job-env` it does not ask the daemon for them.
 
 `hold` waits for a lease, runs the command in its own process group, renews while it runs
 (every TTL/3, or every `[elastic] settle_s` for an elastic lease when that is sooner, each
@@ -1162,12 +1165,12 @@ An acquire naming a pool that does not exist is `refused` with `reason` `there i
 An error is answered with an `error` and a `detail`: 400 `bad_request` (a malformed request,
 including a `Content-Length` that is not a non-negative integer), 403 `forbidden` (another
 user's lease, or an administrator's route), 404 `not_found`, 409 `conflict` (a request that
-cannot be done now but may be later: an elastic lease that cannot grow now, or a lease no
-longer held), 413 `too_large` (a body over 64 KiB, which is not read), 500 `internal` (the daemon failed on the request; its traceback goes
-to the daemon's stderr), and 503 `ledger_unavailable` (the ledger cannot be used now, at start
-or later, such as locked past the busy timeout, a full disk or a read-only file system;
-admission fails closed). A client that stops sending part way through a request is cut off
-after 30 seconds without an answer.
+cannot be done now but may be later: an elastic lease that cannot grow now, or a lease no longer
+held), 413 `too_large` (a body over 64 KiB, which is not read), 500 `internal` (the daemon
+failed on the request; its traceback goes to the daemon's stderr), and 503 `ledger_unavailable`
+(the ledger cannot be used now, at start or later, such as locked past the busy timeout, a full
+disk or a read-only file system; admission fails closed). A client that stops sending part way
+through a request is cut off after 30 seconds without an answer.
 
 Events are kept in memory, the last 500, each with a `type`: `granted` (and whether it
 `waited`), `queued` (with its `position`), `left` (the line, without a grant), `released`,

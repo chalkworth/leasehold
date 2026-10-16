@@ -14,10 +14,11 @@ and resizes the command's scope. A no (the slots went to someone else first) cha
 and it asks again after the next renewal.
 
 When the target is below the weight, the jobserver owes the tokens past the target's jobs
-(`Jobserver.set`): it takes each one a job gives back, so no running job is stopped. Once none
-is owed, the follower gives the slots back (`POST /v1/resize`) and resizes the scope. A job
-killed while it held a token never gives it back, so after `give_back_s` the tokens still owed
-are taken as lost and the slots are given back all the same.
+(`Jobserver.set`): it takes each one a job gives back, so no running job is stopped. A slot is
+given back (`POST /v1/resize`, and the scope resized) only once the tokens of its jobs have
+come back, so the jobs that can run never outnumber the lease's, however long they take. A job
+killed while it holds a token never returns it, and the lease keeps that slot until the
+command ends.
 
 Only the jobserver's tokens and the scope follow the target: `LEASEHOLD_JOBS`, the job and
 thread variables, `MAKEFLAGS`'s `-jN` and `LEASEHOLD_WEIGHT` keep the values the command
@@ -34,9 +35,9 @@ from leasehold import contain, jobs
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.units import memory_to_bytes
 
-#: How long, in seconds, a lease asked to give slots back waits for its jobs' tokens before it
-#: takes the ones still out as lost.
-GIVE_BACK_S = 120.0
+#: How long, in seconds, a follower whose lease is not elastic yet looks often for a job taking
+#: a token; after that it looks at each renewal.
+WATCH_S = 60.0
 
 #: How long `step` waits for the free tokens owed to be taken out of the fifo.
 _SETTLE_S = 0.05
@@ -60,7 +61,6 @@ class Follower:
         memory_per_slot: str | None = None,
         hard_cpu: bool = False,
         say: Callable[[str], None] = lambda _: None,
-        give_back_s: float = GIVE_BACK_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.client = client
@@ -71,11 +71,11 @@ class Follower:
         self.scope = scope
         self.memory_per_slot = memory_per_slot
         self.hard_cpu = hard_cpu
-        self.give_back_s = give_back_s
         self._say = say
         self._clock = clock
         self._fixed = False  # the daemon cannot make it elastic
-        self._giving_since: float | None = None
+        self._giving = False
+        self._since = clock()
 
     def _take(self, answer: dict) -> None:
         self.weight = int(answer["weight"])
@@ -90,9 +90,12 @@ class Follower:
         self._take(renewal)
 
     def busy(self) -> bool:
-        """Whether it should be stepped often: it waits for a job to take a token, or for jobs
-        to give tokens back."""
-        return (not self.elastic and not self._fixed) or self.target < self.weight
+        """Whether it should be stepped often: for `WATCH_S` after it starts it waits for a job
+        to take a token, and while asked to shrink it waits for jobs to give tokens back."""
+        watching = not self.elastic and not self._fixed
+        if watching and self._clock() - self._since < WATCH_S:
+            return True
+        return self.elastic and self.target < self.weight
 
     def step(self) -> None:
         """One move toward the target: become elastic, grow, put tokens in or owe them, give
@@ -105,26 +108,20 @@ class Follower:
             self._resize(self.target)
         self.server.set(self._wanted())
         if self.target >= self.weight:
-            self._giving_since = None
+            self._giving = False
             return
-        if self.server.settle(_SETTLE_S):
-            now = self._clock()
-            if self._giving_since is None:
-                self._giving_since = now
-                self._say(
-                    f"giving back {self.weight - self.target} of {self.weight} slots as jobs "
-                    "finish and return their tokens"
-                )
-                return
-            if now - self._giving_since < self.give_back_s:
-                return
-            lost = self.server.forget()
+        owed = self.server.settle(_SETTLE_S)
+        # Give back only the slots no job can still be running in: the command's own job and
+        # every token in play, the owed ones included, keep theirs.
+        keep = max(self.target, self._weight_for(self.server.tokens + owed + 1))
+        if keep < self.weight:
+            self._resize(keep)
+        if owed and not self._giving:
             self._say(
-                f"{lost} jobserver token(s) did not come back in {self.give_back_s:g} s and "
-                "are taken as lost (a job killed while it held one never returns it)"
+                f"giving back {self.weight - self.target} of {self.weight} slots as jobs finish "
+                "and return their tokens"
             )
-        self._giving_since = None
-        self._resize(self.target)
+        self._giving = bool(owed)
 
     def _become_elastic(self) -> None:
         if self._fixed or self.server.taken() == 0:
@@ -139,6 +136,10 @@ class Follower:
             return
         self.elastic = True
         self._take(answer)
+
+    def _weight_for(self, count: int) -> int:
+        """The least weight whose job count is at least `count`, at this lease's jobs per slot."""
+        return -(-count * self.weight // max(1, self.jobs))
 
     def _wanted(self) -> int:
         """The tokens the jobserver should have in play now."""

@@ -338,8 +338,9 @@ def hold(
     if jobserver and (count := jobs.own_job_count(argv)) is not None:
         _say(
             f"the command gives its own job count ({count}): a make given one runs its own "
-            "jobserver and leaves the lease's, so it runs that many jobs whatever the lease "
-            "holds, and the lease keeps its size; leave the count out to use the lease's"
+            "jobserver and leaves the lease's, so it runs that many jobs (with no number, as "
+            "many as it can) whatever the lease holds, and the lease keeps its size; leave "
+            "the count out to use the lease's"
         )
     request = None
     try:

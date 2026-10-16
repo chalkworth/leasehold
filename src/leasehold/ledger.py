@@ -719,7 +719,11 @@ class Ledger:
             if self._leased(conn, item.key):
                 return Admitted()
             state = self._state(conn)
-            return Queued(positions(state, policy)[item.key], blocker(state, policy, item.key))
+            place = positions(state, policy)[item.key]
+            why = blocker(state, policy, item.key)
+            if place == 1:
+                why = _with_giving_back(why, self._giving_back(conn, policy, item.pool))
+            return Queued(place, why)
 
     def impose(self, item: LedgerItem, policy: AdmissionPolicy, *, holder: Holder) -> bool:
         """Record a lease for work that is already running and was never asked for (a process
@@ -954,8 +958,31 @@ class Ledger:
         with self._tx() as conn:
             self._reclaim(conn)
             state = self._state(conn)
+            pools = {w.key: w.pool for w in state.waiting}
+            back = {pool: self._giving_back(conn, policy, pool) for pool in set(pools.values())}
         places = positions(state, policy)
-        return {key: (place, blocker(state, policy, key, places)) for key, place in places.items()}
+        out = {}
+        for key, place in places.items():
+            why = blocker(state, policy, key, places)
+            if place == 1:
+                why = _with_giving_back(why, back[pools[key]])
+            out[key] = (place, why)
+        return out
+
+    def _giving_back(
+        self, conn: sqlite3.Connection, policy: AdmissionPolicy, pool: str
+    ) -> tuple[int, int]:
+        """The slots elastic leases on `pool`'s host are asked to give back and have not yet,
+        and how many leases those are."""
+        p = policy.pools.get(pool)
+        if p is None:
+            return 0, 0
+        row = conn.execute(
+            "SELECT COALESCE(SUM(weight - target), 0) AS slots, COUNT(*) AS leases FROM leases "
+            "WHERE elastic = 1 AND target < weight AND host = ?",
+            (p.host,),
+        ).fetchone()
+        return row["slots"], row["leases"]
 
     def beat(self, holder: Holder | None = None) -> None:
         """Say `holder` (this process by default) is alive: what keeps its leases and places in
@@ -1080,6 +1107,19 @@ _BY_HOLDER = ("", " AND holder_pid = ? AND holder_birth IS ? AND holder_ns IS ?"
 
 def _holder_args(holder: Holder | None) -> tuple:
     return () if holder is None else (holder.pid, holder.birth, holder.ns)
+
+
+def _with_giving_back(why: str | None, back: tuple[int, int]) -> str | None:
+    """`why` an item first in line waits, with the slots elastic leases are giving back
+    (`Ledger._giving_back`) when there are any."""
+    slots, leases = back
+    if not slots:
+        return why
+    who = "an elastic lease" if leases == 1 else f"{leases} elastic leases"
+    their = "its" if leases == 1 else "their"
+    s = "" if slots == 1 else "s"
+    giving = f"waiting for {who} to give back {slots} slot{s} as {their} jobs finish"
+    return f"{why}; {giving}" if why else giving
 
 
 def _or(value, default):

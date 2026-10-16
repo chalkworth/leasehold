@@ -25,6 +25,7 @@ from leasehold import hold as hold_module
 from leasehold import ledger as ledger_module
 from leasehold.admission import AdmissionPolicy
 from leasehold.agent import AcquireRequest, MachineAgent
+from leasehold.cli import views
 from leasehold.client import ApiError, Client
 from leasehold.hold import lease_request
 from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
@@ -102,6 +103,20 @@ def test_a_growth_is_checked_again_when_its_stored_target_is_stale(tmp_path):
     done = ledger.resize(("s", "e"), 3, FOUR)
     assert (done.status, done.weight, done.target) == ("refused", 2, 2)
     assert sum(r["weight"] for r in ledger.leases()) == 4
+
+
+def test_the_first_in_line_hears_it_waits_for_slots_being_given_back(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite3", now=Clock(), settle_s=0)
+    ledger.try_admit(item("e", 1, 4, elastic=True), FOUR, ttl_s=100)
+    waits = ledger.try_admit(item("w", 2, user="bob"), FOUR, ttl_s=100)
+    giving = "waiting for an elastic lease to give back 2 slots as its jobs finish"
+    assert isinstance(waits, Queued) and waits.blocked.endswith(giving)
+    behind = ledger.try_admit(item("v", 1, user="cat"), FOUR, ttl_s=100)
+    assert isinstance(behind, Queued) and giving not in (behind.blocked or "")
+    lines = ledger.lines(FOUR)
+    assert lines[("s", "w")][1].endswith(giving) and giving not in (lines[("s", "v")][1] or "")
+    ledger.resize(("s", "e"), 2, FOUR)
+    assert ledger.leased(("s", "w"))
 
 
 def test_a_refused_growth_leaves_the_other_leases_targets_as_they_were(tmp_path):
@@ -372,6 +387,13 @@ def test_a_daemon_from_before_elastic_leases_grants_a_fixed_range(four, monkeypa
     assert (answer["lease"]["weight"], answer["lease"]["elastic"]) == (4, False)
 
 
+def test_leases_shows_an_elastic_leases_target_beside_its_weight():
+    lease = {"weight": 5, "min_weight": 2, "max_weight": 5, "target": 3}
+    assert views._weight(lease) == "5>3/2-5"
+    assert views._weight(lease | {"target": 5}) == "5/2-5"
+    assert views._weight({"weight": 2, "min_weight": 2, "max_weight": 5, "queued_at": 0}) == "2-5"
+
+
 def test_top_shows_an_elastic_leases_target_beside_its_weight():
     assert _weight_cell({"weight": 3, "min_weight": 2, "max_weight": 4, "target": 4}) == "3>4/2-4"
     assert _weight_cell({"weight": 3, "min_weight": 2, "max_weight": 4, "target": 3}) == "3/2-4"
@@ -406,13 +428,16 @@ class _FakeClient:
         self.refuse = refuse
         self.fixed = fixed
         self.weight = 2
+        self.target: int | None = None
 
     def resize(self, lease_id, weight):
         self.asked.append(weight)
         if self.refuse is not None:
             raise ApiError(self.refuse, {"error": "not_found"})
         self.weight = weight
-        return {"weight": weight, "jobs": weight, "target": weight, "target_jobs": weight}
+        # The target the daemon asks for, once a test sets it; else the size asked.
+        target = weight if self.target is None else self.target
+        return {"weight": weight, "jobs": weight, "target": target, "target_jobs": target}
 
     def make_elastic(self, lease_id):
         self.made_elastic += 1
@@ -459,17 +484,18 @@ def test_the_jobservers_tokens_follow_the_target_up_and_down():
         follower.step()
         assert client.asked == [4] and follower.weight == 4
         assert _in_fifo(server) == 3 and server.tokens == 3
-        # Asked back to 1 while a job holds one token: the free ones are taken out, and the
-        # lease is given back only once the job returns its token.
+        # Asked back to 1 while a job holds one token: the free ones are taken out and their
+        # slots given back, and the job's slot only once it returns its token.
         held = _take(server, 1)
+        client.target = 1
         follower.heard({"status": "ok", "weight": 4, "jobs": 4, "target": 1, "target_jobs": 1})
         follower.step()
-        assert follower.busy() and client.asked == [4] and server.owed == 1
+        assert follower.busy() and client.asked == [4, 2] and server.owed == 1
         assert _in_fifo(server) == 0
         _give(server, held)
         until(lambda: server.owed == 0)
         follower.step()
-        assert client.asked == [4, 1] and follower.weight == 1 and not follower.busy()
+        assert client.asked == [4, 2, 1] and follower.weight == 1 and not follower.busy()
         assert _in_fifo(server) == 0 and server.tokens == 0
 
 
@@ -509,25 +535,90 @@ def test_a_daemon_without_resize_leaves_the_lease_as_it_is():
         assert client.asked == [4] and follower.weight == 2 and server.tokens == 1
 
 
-def test_tokens_a_killed_job_never_gives_back_are_taken_as_lost_after_a_while():
-    client, clock, said = _FakeClient(), Clock(), []
+def test_a_slot_is_given_back_only_once_its_jobs_token_comes_back():
+    client, said, clock = _FakeClient(), [], Clock()
     with jobs.Jobserver(3) as server:
         follower = follow.Follower(
-            client, "e", ELASTIC | {"weight": 3, "jobs": 3}, server=server,
-            give_back_s=60, clock=clock, say=said.append,
+            client, "e", ELASTIC | {"weight": 3, "jobs": 3}, server=server, say=said.append,
+            clock=clock,
         )  # fmt: skip
-        _take(server, 2)  # held by a job that is then killed: never given back
+        held = _take(server, 2)  # two jobs running beside the command's own
+        client.target = 1
         follower.heard({"status": "ok", "weight": 3, "jobs": 3, "target": 1, "target_jobs": 1})
         follower.step()
         assert client.asked == [] and server.owed == 2
         assert said == ["giving back 2 of 3 slots as jobs finish and return their tokens"]
-        clock.now += 59
+        _give(server, held[:1])  # one job ends; the other was killed and never returns its own
+        until(lambda: server.owed == 1)
         follower.step()
-        assert client.asked == []
-        clock.now += 1
-        follower.step()
-        assert client.asked == [1] and follower.weight == 1 and server.owed == 0
-        assert "2 jobserver token(s) did not come back in 60 s" in said[1]
+        assert client.asked == [2] and follower.weight == 2
+        for _ in range(3):
+            clock.now += 3600
+            follower.step()  # however long it waits, the slot of the lost token stays held
+        assert client.asked == [2] and follower.weight == 2 and server.owed == 1
+
+
+def test_tokens_that_come_back_late_never_run_jobs_past_the_target():
+    with jobs.Jobserver(6) as server:
+        held = _take(server, 5)  # every job running
+        server.set(1)
+        assert server.owed == 4
+        for token in held:
+            time.sleep(0.3)
+            _give(server, bytes([token]))
+            time.sleep(0.05)
+            assert _in_fifo(server) <= 1
+        until(lambda: server.owed == 0 and _in_fifo(server) == 1)
+        assert server.tokens == 1
+
+
+def test_a_follower_not_yet_elastic_looks_often_only_for_a_while():
+    clock = Clock()
+    with jobs.Jobserver(2) as server:
+        follower = follow.Follower(
+            _FakeClient(), "e", {"weight": 2, "jobs": 2}, server=server, clock=clock
+        )
+        assert follower.busy()
+        clock.now += follow.WATCH_S
+        assert not follower.busy()  # it looks at each renewal from now on
+
+
+SLOW_JOBS = """\
+LONG := l1 l2 l3
+SHORT := $(foreach n,$(shell seq 1 12),s$(n))
+all: $(LONG) $(SHORT)
+$(LONG):
+\t@touch $(RUNNING)/$@; sleep 2; rm $(RUNNING)/$@
+$(SHORT):
+\t@touch $(RUNNING)/$@; sleep 0.2; rm $(RUNNING)/$@
+.PHONY: all $(LONG) $(SHORT)
+"""
+
+
+@pytest.mark.skipif(_make_version() < (4, 4), reason="needs GNU make 4.4 or later")
+def test_a_make_never_runs_more_jobs_than_the_lease_holds_while_it_gives_back(tmp_path):
+    running = tmp_path / "running"
+    running.mkdir()
+    (tmp_path / "Makefile").write_text(SLOW_JOBS)
+    client = _FakeClient()
+    client.weight = 4
+    seen: list[tuple[int, int]] = []
+    with jobs.Jobserver(4) as server:
+        follower = follow.Follower(client, "e", ELASTIC | {"weight": 4, "jobs": 4}, server=server)
+        env = CHILD_ENV | {"MAKEFLAGS": jobs.makeflags(None, 4, server.fifo)}
+        env["RUNNING"] = str(running)
+        make = subprocess.Popen(["make", "-s", "-C", str(tmp_path)], env=env)
+        until(lambda: len(list(running.iterdir())) == 4)
+        client.target = 1
+        follower.heard({"status": "ok", "weight": 4, "jobs": 4, "target": 1, "target_jobs": 1})
+        while make.poll() is None:
+            follower.step()
+            weight = follower.weight  # what the ledger holds, read before the jobs are counted
+            seen.append((len(list(running.iterdir())), weight))
+            time.sleep(0.02)
+    assert make.returncode == 0
+    assert all(jobs_now <= weight for jobs_now, weight in seen), seen
+    assert client.asked[-1] == 1 and seen[-1][1] == 1
 
 
 def test_a_token_owed_no_longer_goes_straight_back():
@@ -603,8 +694,13 @@ def test_an_elastic_command_leaves_the_job_count_to_the_jobserver():
         (["make", "-j", "8"], "-j 8"),
         (["ninja", "--jobs=3"], "--jobs=3"),
         (["sh", "-c", "make -j8 && make install"], "-j8"),
+        (["make", "-j"], "-j"),
+        (["make", "-j", "all"], "-j"),
+        (["make", "--jobs"], "--jobs"),
+        (["make", "--jobs="], "--jobs="),
+        (["sh", "-c", "make -sj"], "-sj"),
         (["make"], None),
-        (["make", "-j"], None),
+        (["cc", "-obj", "x.o"], None),
         (["cmake", "--build", "."], None),
     ],
 )
@@ -708,7 +804,7 @@ def test_hold_jobserver_tokens_grow_into_free_slots_and_shrink_for_a_waiting_req
         stop.touch()
         _, err = held.communicate(timeout=30)
     assert held.returncode == 0, err
-    assert "the lease is now 2 slots (was 4)" in err
+    assert "the lease is now 2 slots" in err
 
 
 #: Until `$STOP` exists, sleep: a command that never takes a jobserver token (a make given its

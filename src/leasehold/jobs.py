@@ -318,20 +318,23 @@ def makeflags(existing: str | None, jobs: int, fifo: Path) -> str:
     return " ".join([*kept, *flags])
 
 
-#: A job count given on a command line: `-j8`, `-sj8`, `--jobs=8`.
-_OWN_COUNT = re.compile(r"-[A-Za-z]*j[0-9]+|--jobs=[0-9]+")
+#: A job count given on a command line: `-j8`, `-sj8`, `--jobs=8`, and a bare `-j` (no limit).
+#: Letters before the `j` are make's short options that take no argument.
+_OWN_COUNT = re.compile(r"-[bBdeiknpqrRsStvw]*j[0-9]*|--jobs(=[0-9]*)?")
 
 
 def own_job_count(argv: Sequence[str]) -> str | None:
-    """The first job count `argv` gives itself (`-j8`, `-j 8`, `--jobs=8`, `--jobs 8`, also
-    inside a word such as `sh -c "make -j8"`), as written; None when it gives none. A make given
-    one runs its own jobserver and leaves the lease's."""
+    """The first job count `argv` gives itself (`-j8`, `-j 8`, `--jobs=8`, `--jobs 8`, or a
+    bare `-j` or `--jobs`, which sets no limit; also inside a word such as
+    `sh -c "make -j8"`), as written; None when it gives none. A make given one runs its own
+    jobserver and leaves the lease's."""
     words = [w for arg in argv for w in arg.split()]
     for i, word in enumerate(words):
-        if _OWN_COUNT.fullmatch(word):
-            return word
+        if not _OWN_COUNT.fullmatch(word):
+            continue
         if word in ("-j", "--jobs") and i + 1 < len(words) and words[i + 1].isdigit():
             return f"{word} {words[i + 1]}"
+        return word
     return None
 
 
@@ -344,8 +347,8 @@ class Jobserver:
     them back. `set` changes it. More are written to the fifo at once, so more jobs run. Fewer
     are owed (`owed`): a thread blocked reading the fifo takes each token a job gives back
     until none is owed, so no running job is stopped. A token it reads once none is owed (the
-    count rose again first) goes straight back. `forget` writes off what is still owed, for
-    tokens a killed job will never give back."""
+    count rose again first) goes straight back. A token is owed until it comes back, however
+    long that takes: one a killed job held never does, and stays owed."""
 
     def __init__(self, jobs: int) -> None:
         self.tokens = max(0, jobs - 1)
@@ -448,12 +451,6 @@ class Jobserver:
         """Put `count` more tokens in play."""
         if count > 0:
             self.set(self.tokens + count)
-
-    def forget(self) -> int:
-        """Stop waiting for the tokens owed, taking them as lost; how many."""
-        with self._lock:
-            lost, self._owed = self._owed, 0
-            return lost
 
     def _start_reader(self) -> None:
         # Its own descriptor, blocking: a read waits beside the jobs' own reads and gets its
