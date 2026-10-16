@@ -27,7 +27,7 @@ name one.
 - `release_lease(lease_id)`: give a lease back when the work is done.
 - `list_my_leases()`: what this session holds and has waiting.
 
-**No tool runs a command,** on purpose. A lease tells the agent how much of the machine it may
+No tool runs a command, on purpose. A lease tells the agent how much of the machine it may
 use; the agent runs the work with its own shell tool, under its own permissions. The server acts
 only on leases it made itself (ids `mcp.<hex>`, labelled `agent=mcp`) and refuses any other id.
 

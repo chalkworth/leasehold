@@ -15,29 +15,29 @@ than back into old ones.
 leasehold decides who may use a machine's capacity. It is not a sandbox: it never confines
 what a process does once it runs. Its trust model:
 
-- **The socket is the boundary.** The daemon answers on a unix socket. In user mode it is the
+- The socket is the boundary. The daemon answers on a unix socket. In user mode it is the
   user's own (`0600`, in a `0700` directory), so only that user can reach it. In system mode it
   is `0660` with group `socket_group`: every member may take leases.
-- **The kernel names the user.** Each request is charged to the uid the kernel reports for
+- The kernel names the user. Each request is charged to the uid the kernel reports for
   the connection (`SO_PEERCRED`), never to anything the request says. A user may renew,
   release or give up only their own leases and places in line.
-- **Administration is narrower.** Switching lending (`/v1/lend`) and overriding a pool's
+- Administration is narrower. Switching lending (`/v1/lend`) and overriding a pool's
   `max` (`/v1/pools/<name>`) need root, the daemon's own user, or a member of `admin_group`.
-- **Fencing is by process identity or by TTL.** A lease held by a process ends when that
+- Leases are fenced by process identity or by TTL. One held by a process ends when that
   process (pid and start time, so a reused pid does not count) is gone; others end when their
   holder stops renewing. A `/proc` mounted `hidepid` weakens the first to the pid alone:
   `leasehold doctor` says so.
-- **Observed programs** (`[[observe]]`) are found by reading `/proc`: the daemon reads every
+- Observed programs (`[[observe]]`) are found by reading `/proc`: the daemon reads every
   process's command line it can see. Rules match names, never run anything.
-- **`leasehold ui`** listens on `127.0.0.1` only, and every data route needs the random token
+- `leasehold ui` listens on `127.0.0.1` only, and every data route needs the random token
   in the link it prints. The token never appears in a process's arguments (the browser is
   handed a private file), the page moves it out of its address into the tab's
   `sessionStorage`, and requests for any other `Host` are refused (DNS rebinding). The page is
   read-only.
-- **`leasehold report`** sends the status object to a URL you configure: https unless it is
+- `leasehold report` sends the status object to a URL you configure: https unless it is
   loopback, the token read from a file that is not world-readable (`0640 root:leasehold` in
   the unit), redirects not followed.
-- **Agent integrations never run what a model asks.** The Claude Code hooks and PATH shims
+- Agent integrations never run what a model asks. The Claude Code hooks and PATH shims
   read a command to decide its lease and never change it; the MCP server has no tool that
   runs a command.
 
