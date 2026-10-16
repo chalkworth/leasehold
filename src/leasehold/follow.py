@@ -102,8 +102,6 @@ class Follower:
         self.jobs = int(answer.get("jobs") or self.weight)
         self.target = int(answer.get("target") or self.weight)
         self.target_jobs = int(answer.get("target_jobs") or self.jobs)
-        if self.server is not None and self.server.tokens < self._wanted():
-            self.server.add(self._wanted() - self.server.tokens)
         if self.weight != before:
             self._say(f"the lease is now {self.weight} slots (was {before})")
             self._resize_scope()

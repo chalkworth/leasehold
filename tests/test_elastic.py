@@ -156,6 +156,20 @@ def test_a_lease_whose_slots_would_not_help_is_not_lowered():
     assert aimed(pools(), [lease("a", 6, 1, 6)], wait=[waiting("w", 1, pool="ci")]) == {"a": 5}
 
 
+def test_a_lease_lowered_on_the_way_gets_back_what_the_item_did_not_need():
+    # Pool res reserves 4 of the 6 slots: its lease's slots down to 4 are owed to it anyway,
+    # so lowering it frees nothing for work. It is lowered first (the largest extra), then
+    # given its slots back once work's own lease has made the room.
+    shape = {
+        "res": Pool(reserved=4, max=6),
+        "work": Pool(reserved=0, max=2, headroom=0, priority=1),
+    }
+    policy = AdmissionPolicy.from_pools(PoolSet(slots=6, pools=shape))
+    res = lease("r", 4, 1, 4, pool="res")
+    work = lease("w", 2, 1, 2)
+    assert aimed(policy, [res, work], wait=[waiting("x", 1)]) == {"r": 4, "w": 1}
+
+
 def test_a_lease_is_asked_back_for_the_memory_a_waiting_item_needs():
     budget = pools(memory=6 * G)
     one = [lease("a", 4, 2, 4, memory_per_slot=G)]

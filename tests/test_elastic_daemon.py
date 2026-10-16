@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from support import CHILD_ENV, FACTS, Clock, FakeLoad, machine_config, until
 
 from leasehold import api, contain, events, follow, jobs
@@ -21,7 +21,7 @@ from leasehold.admission import AdmissionPolicy
 from leasehold.agent import AcquireRequest, MachineAgent
 from leasehold.client import ApiError, Client
 from leasehold.hold import lease_request
-from leasehold.ledger import Admitted, Ledger, LedgerItem, Queued
+from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
 from leasehold.model import Pool, PoolSet
 from leasehold.server import Daemon
 from leasehold.top.render import _weight_cell
@@ -77,6 +77,23 @@ def test_a_growth_is_refused_once_the_slot_it_was_offered_is_taken(tmp_path):
     done = ledger.resize(("s", "e"), 3, FOUR)
     assert (done.status, done.weight) == ("refused", 2)
     assert sizes(ledger, "e") == (2, 2)
+
+
+def test_a_growth_is_checked_again_when_its_stored_target_is_stale(tmp_path):
+    # Work recorded without a decision (an observed process, or a process from before elastic
+    # leases) leaves the stored target as it was: the resize itself checks the slot is free.
+    ledger = Ledger(tmp_path / "l.sqlite3", now=Clock(), settle_s=0)
+    ledger.try_admit(item("other", 2), FOUR, ttl_s=100)
+    ledger.try_admit(item("e", 1, 4, elastic=True), FOUR, ttl_s=100)
+    ledger.release(("s", "other"))
+    ledger.settle(FOUR)
+    assert sizes(ledger, "e") == (2, 3)
+    seen = LedgerItem("o", "seen", "observed", "bob", "work", 2)
+    assert ledger.impose(seen, FOUR, holder=Holder.current())
+    assert sizes(ledger, "e") == (2, 3)
+    done = ledger.resize(("s", "e"), 3, FOUR)
+    assert (done.status, done.weight, done.target) == ("refused", 2, 2)
+    assert sum(r["weight"] for r in ledger.leases()) == 4
 
 
 def test_a_waiting_request_lowers_the_target_and_a_shrink_admits_it(tmp_path):
@@ -222,6 +239,8 @@ def test_only_a_range_can_be_elastic(four, body):
     with pytest.raises(ApiError) as refused:
         Client(four.path).acquire(kind="work", lease_id="x", **body)
     assert refused.value.status == 400
+    with pytest.raises(ValidationError, match="only a range"):
+        AcquireRequest(kind="work", **body)
 
 
 class _BeforeElastic(BaseModel):
