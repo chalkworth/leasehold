@@ -9,8 +9,10 @@ budget, and while the memory guard is on, what memory is free), and starts what
 
 What the run adds around it: how long a job takes (`bench.sim.model`), the time `hold` takes to
 start a job and to end it, and the memory each job really uses, which the guard reads as the
-machine's available memory goes down. Memory pressure (PSI) is not modelled, so the guard acts on
-available memory alone.
+machine's available memory goes down. Swap is left out unless the run is given a `Pressure`: then
+the jobs slow down once their memory passes what the machine has for them, and the guard reads
+the share of time they lose as memory pressure (PSI). Without one, the guard acts on available
+memory alone.
 
 Elastic leases (a lease that grows and shrinks while it runs) are applied when the library has
 `leasehold.admission.targets`; a condition that asks for them without it is refused with
@@ -26,7 +28,7 @@ from dataclasses import dataclass, field
 
 import simpy
 
-from bench.sim.model import Job, Kind, Machine
+from bench.sim.model import Job, Kind, Machine, Pressure
 from leasehold import admission
 from leasehold.admission import AdmissionPolicy, Held, State, Waiting, grants
 from leasehold.guard import Guard, Reading
@@ -37,6 +39,7 @@ from leasehold.model import MACHINE
 POOL = "work"
 #: The most events one run may process: a run that passes it has a bug, not a long plan.
 MAX_EVENTS = 2_000_000
+GIB = 1 << 30
 
 
 class Unsupported(Exception):
@@ -101,6 +104,8 @@ class Sample:
     counted: int
     actual: int
     free: int
+    #: How many times longer jobs take for swap (1: not swapping).
+    slow: float = 1.0
 
 
 @dataclass
@@ -131,6 +136,8 @@ class _Cpu:
         self.running: dict[int, list] = {}
         self.jobs: dict[int, Job] = {}
         self.last = 0.0
+        #: How many times longer every job takes than the machine alone would make it (swap).
+        self.slow = 1.0
         self.changed = env.event()
         env.process(self._loop())
 
@@ -156,10 +163,17 @@ class _Cpu:
             entry[1], entry[2] = workers, cap
             self._poke()
 
+    def slow_down(self, factor: float) -> None:
+        if factor != self.slow:
+            self._advance()
+            self.slow = factor
+            self._poke()
+
     def _rates(self) -> dict[int, float]:
         ids = list(self.running)
         demands = [self.demand(self.jobs[i], self.running[i][1], self.running[i][2]) for i in ids]
-        return dict(zip(ids, self.machine.rates(demands), strict=True))
+        rates = self.machine.rates(demands)
+        return {i: rate / self.slow for i, rate in zip(ids, rates, strict=True)}
 
     def _advance(self) -> None:
         dt = self.env.now - self.last
@@ -199,6 +213,7 @@ class Simulation:
         *,
         overheads: Overheads | None = None,
         other_memory: int = 0,
+        pressure: Pressure | None = None,
         seed: int = 0,
         noise_cv: float = 0.0,
     ) -> None:
@@ -209,6 +224,7 @@ class Simulation:
         self.steps = steps
         self.overheads = overheads or Overheads()
         self.other_memory = other_memory
+        self.pressure = pressure
         self.cpu = _Cpu(self.env, machine, kinds)
         self.rng = random.Random(f"noise:{seed}")
         self.noise_cv = noise_cv
@@ -417,17 +433,28 @@ class Simulation:
         used = kind.memory + kind.memory_per_worker * job.workers
         self.actual += used
         self.actual_peak = max(self.actual_peak, self.actual)
+        self._swap()
         finished = self.cpu.start(job, job.workers, self._cap(weight) if managed else None)
         self._sample()
         yield finished
         job.ended = self.env.now
         self.actual -= used
+        self._swap()
         self._sample()
         yield self.env.timeout(o.end if managed else o.end_unmanaged)
         job.done = self.env.now
         if managed:
             self.leases.pop(key, None)
             self.admit()
+
+    def _swap(self) -> None:
+        """Slow every running job by the `Pressure` term for the memory used past the limit."""
+        p = self.pressure
+        if p is None:
+            return
+        limit = p.limit(self.machine.memory_bytes, self.other_memory)
+        over = max(0, self.actual - limit) / GIB
+        self.cpu.slow_down(1 + p.slowdown * over)
 
     def _ticks(self):
         assert self.config is not None
@@ -436,7 +463,8 @@ class Simulation:
             yield self.env.timeout(tick)
             if self.guarding:
                 free = self.available()
-                reading = Reading(now=self.env.now, memory_pressure=None, available=free)
+                psi = None if self.pressure is None else 100 * (1 - 1 / self.cpu.slow)
+                reading = Reading(now=self.env.now, memory_pressure=psi, available=free)
                 if self.guard.observe(reading):
                     self.guard_on_s += tick
             self.admit()
@@ -454,6 +482,7 @@ class Simulation:
                 counted=counted,
                 actual=self.actual,
                 free=max(0, self.slots - held),
+                slow=self.cpu.slow,
             )
         )
 

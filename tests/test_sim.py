@@ -7,6 +7,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,11 +15,11 @@ import pytest
 
 pytest.importorskip("simpy")
 
-from bench.sim import engine, metrics, study
+from bench.sim import calibrate, engine, metrics, search, study
 from bench.sim.__main__ import main
 from bench.sim.calibrate import discover, overheads, simulate
 from bench.sim.engine import Overheads, Simulation, Unsupported
-from bench.sim.model import Job, Kind, Machine, Speedup
+from bench.sim.model import Job, Kind, Machine, Pressure, Speedup
 from bench.sim.workload import (
     GIB,
     WORKLOADS,
@@ -224,7 +225,6 @@ def test_the_non_dominated_set_drops_beaten_and_over_budget_configurations():
 
 
 def test_the_screening_design_stays_in_its_ranges():
-    pytest.importorskip("scipy")
     configs = study.screen_configs(6, 16)
     assert len(configs) > 8
     for c in configs:
@@ -272,3 +272,93 @@ def test_time_with_at_most_one_cpu_idle_is_counted():
     result = Simulation(setup, machine, kinds, steps, overheads=Overheads(0, 0)).run()
     assert metrics.summarize(result, background=1.0)["saturated_share"] == pytest.approx(1)
     assert metrics.summarize(result, background=0.0)["saturated_share"] == pytest.approx(0)
+
+
+# --- swap, the searches, the hold-out and the study's comparisons ------------------------------
+
+
+def _lone_mem_job(pressure, memory):
+    machine = Machine(cpus=8, memory_bytes=16 * GIB)
+    kinds = {"cpu": Kind(Speedup(A=8)), "mem": Kind(Speedup(A=8), memory=memory)}
+    job = Job(agent=0, seq=0, kind="mem", work=40.0, weight=4, max_weight=4)
+    setup = setup_for("lh-enforced", cpus=8, memory_bytes=16 * GIB)
+    sim = Simulation(setup, machine, kinds, [[(0.0, job)]], overheads=Overheads(0, 0),
+                     other_memory=6 * GIB, pressure=pressure)  # fmt: skip
+    return job, sim.run()
+
+
+def test_jobs_past_the_swap_limit_slow_by_the_term_and_within_it_do_not():
+    # 16 GiB, 6 used by other work, 4 kept: jobs past 6 GiB swap.
+    term = Pressure(reserve=4 * GIB, slowdown=0.5)
+    job, result = _lone_mem_job(term, 8 * GIB - (8 << 20) * 4)
+    assert job.ended - job.started == pytest.approx(10 * (1 + 0.5 * 2), rel=1e-3)
+    assert metrics.summarize(result)["swap_share"] == pytest.approx(1)
+    job, result = _lone_mem_job(term, 5 * GIB)
+    assert job.ended - job.started == pytest.approx(10)
+    assert metrics.summarize(result)["swap_share"] == 0
+    job, _ = _lone_mem_job(None, 8 * GIB)
+    assert job.ended - job.started == pytest.approx(10)
+
+
+def test_a_cap_below_the_machine_limit_is_where_swap_starts():
+    assert Pressure(2 * GIB, 1.0, cap=7 * GIB).limit(16 * GIB, 6 * GIB) == 7 * GIB
+    assert Pressure(2 * GIB, 1.0).limit(16 * GIB, 6 * GIB) == 8 * GIB
+
+
+def test_the_guard_reads_the_time_jobs_lose_to_swap_as_memory_pressure():
+    _, result = _lone_mem_job(Pressure(reserve=4 * GIB, slowdown=1.0), 8 * GIB)
+    assert result.guard_on_s > 0
+    _, result = _lone_mem_job(Pressure(reserve=4 * GIB, slowdown=1.0), 5 * GIB)
+    assert result.guard_on_s == 0
+
+
+def test_nelder_mead_and_golden_section_find_known_minima():
+    found = search.nelder_mead(lambda x: (x[0] - 1) ** 2 + (x[1] + 2) ** 2, [0.0, 0.0])
+    assert found.converged
+    assert found.x == pytest.approx([1, -2], abs=1e-2)
+    assert found.evaluations <= 800
+    assert not search.nelder_mead(lambda x: x[0] ** 2, [5.0], max_evaluations=4).converged
+    assert search.golden(lambda x: (x - 0.3) ** 2, 0, 4).x[0] == pytest.approx(0.3, abs=1e-2)
+
+
+def test_a_latin_hypercube_has_one_point_in_each_stratum_of_each_coordinate():
+    points = search.latin_hypercube(3, 10, seed=1)
+    assert len(points) == 10
+    for d in range(3):
+        assert sorted(int(p[d] * 10) for p in points) == list(range(10))
+    assert points == search.latin_hypercube(3, 10, seed=1)
+
+
+def test_a_hold_out_takes_nothing_from_the_held_out_runs():
+    measured = discover(RESULTS)
+    for m in measured:
+        m.held_out = m.run not in ("k4-d240", "k8-d240")
+    seen = [m for m in measured if not m.held_out]
+    assert overheads(measured) == overheads(seen)
+    assert calibrate.noise_cv(measured) == calibrate.noise_cv(seen)
+    for m in measured:
+        m.held_out = False
+    assert overheads(measured) != overheads(seen)
+
+
+def test_paired_differences_use_the_same_seeds():
+    mean, half = metrics.paired([10.0, 12.0, 14.0], [9.0, 11.0, 13.0])
+    assert mean == pytest.approx(1) and half == pytest.approx(0)
+    mean, half = metrics.paired([1.0, 3.0], [2.0, 2.0])
+    assert mean == pytest.approx(0) and half > 0
+
+
+def test_the_study_reports_each_configuration_against_the_control_seed_by_seed(tmp_path):
+    small = replace(SHORT, agents=6)
+    configs = [study.Config("4"), study.Config("2-4")]
+    with ThreadPoolExecutor(2) as pool:
+        rows, runs = study.evaluate(configs, small, 8, 3, Params(), pool)
+    control, ranged = rows
+    assert control["makespan_s_diff"] == 0 and control["makespan_s_diff_ci"] == 0
+    by_seed = {(r["weights"], r["seed"]): r["makespan_s"] for r in runs}
+    diffs = [by_seed[("2-4", s)] - by_seed[("4", s)] for s in (1, 2, 3)]
+    assert ranged["makespan_s_diff"] == pytest.approx(sum(diffs) / 3)
+    study.write(tmp_path, rows, runs, Params(), 3, 0)
+    for name in ("study.csv", "runs.csv"):
+        assert b"\r" not in (tmp_path / name).read_bytes()
+    assert "vs control" in (tmp_path / "study.md").read_text()

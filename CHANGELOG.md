@@ -142,8 +142,8 @@ here.
 - A policy simulator for the benchmark, `python -m bench.sim` (`run`, `calibrate`, `study`).
   Simulated agents run the benchmark's plans, or replay a measured run, and leasehold's own
   `admission.grants` decides when each job starts and at what size. It is calibrated against
-  the runs under `bench/results/8cpu-16g/` and compares weight defaults (docs/sim.md). SimPy
-  and SciPy come in a new `bench` dependency group that `uv sync` installs by default; the
+  the runs under `bench/results/8cpu-16g/` and compares weight defaults (docs/sim.md). It needs
+  SimPy, from a new `bench` dependency group that only `uv sync --group bench` installs; the
   package's own dependencies are unchanged.
 
 ### Changed

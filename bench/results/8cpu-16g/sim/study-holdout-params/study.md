@@ -1,190 +1,218 @@
 # Policy study: 30 replications a configuration, 0 screening points
 
-Background 1 busy thread; memory 2 GiB a CPU; mean ± 95% interval.
+Background 1 busy thread; memory 2 GiB a CPU, 6 GiB of it used by other work; no swap term. Means over the replications. A difference from the control (weight 4, headroom auto, 2 kept) is the mean over seeds of the configuration less the control on the same seed, ± its 95% interval; where the interval holds 0, no difference was detected.
 
 ## 6 slots (8 CPUs), heavy workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 6 | 690 ± 27 | 47.7 ± 2.0 | 76.0 ± 2.6 | 28.4 ± 0.7 | 0.0 ± 0.0 | 42 | 4.00 | 0.931 | 3.8 | no |  |
-| 2-4 | auto | 2 | 6 | 516 ± 18 | 30.4 ± 1.1 | 29.3 ± 2.4 | 1.1 ± 0.2 | 6.7 ± 1.8 | 60 | 2.20 | 0.933 | 11.2 | no | yes |
-| 2-4 | 0 | 2 | 6 | 512 ± 18 | 29.6 ± 1.1 | 28.7 ± 2.3 | 0.0 ± 0.0 | 9.3 ± 2.1 | 61 | 2.28 | 0.932 | 11.2 | no | yes |
-| 2-4 | auto+1 | 2 | 6 | 518 ± 17 | 30.4 ± 1.0 | 28.9 ± 2.1 | 0.0 ± 0.0 | 6.4 ± 1.6 | 60 | 2.10 | 0.933 | 11.2 | no | yes |
-| 1-4 | auto | 2 | 6 | 575 ± 18 | 36.7 ± 0.9 | 12.2 ± 1.9 | 0.9 ± 0.5 | 19.3 ± 2.8 | 53 | 1.55 | 0.934 | 17.8 | 100% of runs |  |
-| 1-4 | 0 | 2 | 6 | 541 ± 18 | 33.6 ± 1.1 | 15.2 ± 1.2 | 0.6 ± 0.4 | 24.0 ± 2.2 | 57 | 1.95 | 0.932 | 16.1 | 87% of runs |  |
-| 1-4 | auto+1 | 2 | 6 | 592 ± 15 | 39.4 ± 0.8 | 10.6 ± 2.0 | 1.4 ± 0.6 | 18.9 ± 2.5 | 51 | 1.27 | 0.935 | 17.9 | 97% of runs |  |
-| 4-8 | auto | 2 | 6 | 680 ± 27 | 47.0 ± 2.1 | 75.8 ± 2.5 | 27.8 ± 0.7 | 0.0 ± 0.0 | 43 | 4.13 | 0.928 | 3.8 | no | yes |
+Jobs using more than 5 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 690 | control | 75.4 | control | 28.4 | control | 0.0 | control | 0 | 3.8 | no |  |  |
+| 2-4 | auto | 2 | 521 | -170 ± 16 | 34.0 | -41.4 ± 3.6 | 6.3 | -22.2 ± 1.5 | 0.0 | +0.0 ± 0.0 (none detected) | 53 | 11.2 | no | yes |  |
+| 2-4 | 0 | 2 | 510 | -180 ± 14 | 32.3 | -43.1 ± 2.9 | 4.6 | -23.8 ± 1.2 | 0.0 | +0.0 ± 0.0 (none detected) | 63 | 11.1 | no | yes | yes |
+| 2-4 | auto+1 | 2 | 516 | -174 ± 15 | 32.0 | -43.4 ± 3.3 | 5.2 | -23.2 ± 1.5 | 0.0 | +0.0 ± 0.0 (none detected) | 59 | 11.1 | no | yes | yes |
+| 1-4 | auto | 2 | 626 | -64 ± 17 | 27.8 | -47.6 ± 3.4 | 13.4 | -15.1 ± 1.7 | 13.4 | +13.4 ± 1.7 | 20 | 16.5 | 80% of runs | yes |  |
+| 1-4 | 0 | 2 | 585 | -105 ± 17 | 27.0 | -48.4 ± 3.9 | 12.6 | -15.8 ± 2.1 | 13.9 | +13.9 ± 2.0 | 37 | 16.4 | 83% of runs | yes |  |
+| 1-4 | auto+1 | 2 | 643 | -47 ± 16 | 28.2 | -47.1 ± 3.2 | 14.5 | -13.9 ± 1.7 | 12.4 | +12.4 ± 2.1 | 14 | 16.5 | 90% of runs | yes |  |
+| 3-3 | 1 | 2 | 490 | -200 ± 12 | 35.5 | -39.9 ± 2.1 | 0.0 | -28.4 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 79 | 7.6 | no | yes | yes |
+| 3-4 | 1 | 2 | 493 | -197 ± 11 | 36.0 | -39.3 ± 2.3 | 1.7 | -26.8 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 75 | 7.6 | no | yes |  |
+| 4-8 | auto | 2 | 677 | -13 ± 4 | 75.4 | -0.0 ± 0.5 (none detected) | 27.8 | -0.6 ± 0.2 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 3.8 | no |  |  |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2-4 | 0 | 2 | 6 | 512 ± 18 | 29.6 ± 1.1 | 28.7 ± 2.3 | 0.0 ± 0.0 | 9.3 ± 2.1 | 61 | 2.28 | 0.932 | 11.2 | no |
-| 2-4 | auto | 2 | 6 | 516 ± 18 | 30.4 ± 1.1 | 29.3 ± 2.4 | 1.1 ± 0.2 | 6.7 ± 1.8 | 60 | 2.20 | 0.933 | 11.2 | no |
-| 2-4 | auto+1 | 2 | 6 | 518 ± 17 | 30.4 ± 1.0 | 28.9 ± 2.1 | 0.0 ± 0.0 | 6.4 ± 1.6 | 60 | 2.10 | 0.933 | 11.2 | no |
-| 4-8 | auto | 2 | 6 | 680 ± 27 | 47.0 ± 2.1 | 75.8 ± 2.5 | 27.8 ± 0.7 | 0.0 ± 0.0 | 43 | 4.13 | 0.928 | 3.8 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 3-3 | 1 | 2 | 490 | -200 ± 12 | 35.5 | -39.9 ± 2.1 | 0.0 | -28.4 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 79 | 7.6 | no | yes |
+| 2-4 | 0 | 2 | 510 | -180 ± 14 | 32.3 | -43.1 ± 2.9 | 4.6 | -23.8 ± 1.2 | 0.0 | +0.0 ± 0.0 (none detected) | 63 | 11.1 | no | yes |
+| 2-4 | auto+1 | 2 | 516 | -174 ± 15 | 32.0 | -43.4 ± 3.3 | 5.2 | -23.2 ± 1.5 | 0.0 | +0.0 ± 0.0 (none detected) | 59 | 11.1 | no | yes |
 
 ## 6 slots (8 CPUs), heavy-declared workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 6 | 690 ± 27 | 47.7 ± 2.0 | 76.0 ± 2.6 | 28.4 ± 0.7 | 0.0 ± 0.0 | 42 | 4.00 | 0.931 | 3.8 | no |  |
-| 2-4 | auto | 2 | 6 | 629 ± 23 | 42.3 ± 1.6 | 55.4 ± 2.0 | 21.9 ± 0.9 | 0.4 ± 0.2 | 47 | 2.23 | 0.931 | 7.6 | no | yes |
-| 2-4 | 0 | 2 | 6 | 620 ± 26 | 41.3 ± 1.8 | 54.0 ± 1.9 | 20.9 ± 1.2 | 3.3 ± 0.9 | 48 | 2.37 | 0.930 | 7.6 | no | yes |
-| 2-4 | auto+1 | 2 | 6 | 638 ± 25 | 43.1 ± 1.6 | 54.9 ± 2.0 | 22.5 ± 0.9 | 0.3 ± 0.2 | 47 | 2.10 | 0.932 | 7.6 | no | yes |
-| 1-4 | auto | 2 | 6 | 771 ± 30 | 58.5 ± 1.7 | 62.5 ± 3.5 | 33.6 ± 1.7 | 1.0 ± 0.5 | 37 | 1.35 | 0.931 | 7.6 | no |  |
-| 1-4 | 0 | 2 | 6 | 709 ± 32 | 52.5 ± 2.5 | 61.0 ± 3.6 | 30.2 ± 2.6 | 6.8 ± 1.5 | 42 | 1.73 | 0.928 | 7.6 | no |  |
-| 1-4 | auto+1 | 2 | 6 | 790 ± 28 | 60.7 ± 1.6 | 61.5 ± 3.2 | 34.6 ± 1.6 | 0.3 ± 0.2 | 36 | 1.18 | 0.932 | 7.6 | no | yes |
-| 4-8 | auto | 2 | 6 | 680 ± 27 | 47.0 ± 2.1 | 75.8 ± 2.5 | 27.8 ± 0.7 | 0.0 ± 0.0 | 43 | 4.13 | 0.928 | 3.8 | no | yes |
+Jobs using more than 5 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 690 | control | 75.4 | control | 28.4 | control | 0.0 | control | 0 | 3.8 | no |  |  |
+| 2-4 | auto | 2 | 617 | -73 ± 9 | 53.3 | -22.1 ± 2.3 | 21.2 | -7.2 ± 0.9 | 0.0 | +0.0 ± 0.0 (none detected) | 10 | 7.6 | no | yes |  |
+| 2-4 | 0 | 2 | 605 | -85 ± 10 | 54.6 | -20.8 ± 2.4 | 20.5 | -7.9 ± 0.9 | 0.0 | +0.0 ± 0.0 (none detected) | 20 | 7.6 | no | yes |  |
+| 2-4 | auto+1 | 2 | 632 | -58 ± 7 | 54.7 | -20.6 ± 2.5 | 22.3 | -6.1 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 10 | 7.6 | no | yes |  |
+| 1-4 | auto | 2 | 779 | +89 ± 17 | 64.4 | -10.9 ± 5.1 | 33.7 | +5.3 ± 1.4 | 0.6 | +0.6 ± 0.4 | 2 | 7.6 | no | yes |  |
+| 1-4 | 0 | 2 | 716 | +26 ± 22 | 65.2 | -10.2 ± 4.8 | 30.9 | +2.4 ± 2.5 (none detected) | 0.3 | +0.3 ± 0.4 (none detected) | 13 | 7.6 | no | yes |  |
+| 1-4 | auto+1 | 2 | 810 | +120 ± 17 | 63.5 | -11.9 ± 4.6 | 34.3 | +5.9 ± 1.5 | 0.3 | +0.3 ± 0.3 | 1 | 7.6 | no | yes |  |
+| 3-3 | 1 | 2 | 490 | -200 ± 12 | 35.5 | -39.9 ± 2.1 | 0.0 | -28.4 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 79 | 7.6 | no | yes | yes |
+| 3-4 | 1 | 2 | 493 | -197 ± 11 | 36.0 | -39.3 ± 2.3 | 1.7 | -26.8 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 75 | 7.6 | no | yes |  |
+| 4-8 | auto | 2 | 677 | -13 ± 4 | 75.4 | -0.0 ± 0.5 (none detected) | 27.8 | -0.6 ± 0.2 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 3.8 | no |  |  |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2-4 | 0 | 2 | 6 | 620 ± 26 | 41.3 ± 1.8 | 54.0 ± 1.9 | 20.9 ± 1.2 | 3.3 ± 0.9 | 48 | 2.37 | 0.930 | 7.6 | no |
-| 2-4 | auto | 2 | 6 | 629 ± 23 | 42.3 ± 1.6 | 55.4 ± 2.0 | 21.9 ± 0.9 | 0.4 ± 0.2 | 47 | 2.23 | 0.931 | 7.6 | no |
-| 2-4 | auto+1 | 2 | 6 | 638 ± 25 | 43.1 ± 1.6 | 54.9 ± 2.0 | 22.5 ± 0.9 | 0.3 ± 0.2 | 47 | 2.10 | 0.932 | 7.6 | no |
-| 4-8 | auto | 2 | 6 | 680 ± 27 | 47.0 ± 2.1 | 75.8 ± 2.5 | 27.8 ± 0.7 | 0.0 ± 0.0 | 43 | 4.13 | 0.928 | 3.8 | no |
-| 1-4 | auto+1 | 2 | 6 | 790 ± 28 | 60.7 ± 1.6 | 61.5 ± 3.2 | 34.6 ± 1.6 | 0.3 ± 0.2 | 36 | 1.18 | 0.932 | 7.6 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 3-3 | 1 | 2 | 490 | -200 ± 12 | 35.5 | -39.9 ± 2.1 | 0.0 | -28.4 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 79 | 7.6 | no | yes |
 
 ## 6 slots (8 CPUs), light workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 6 | 776 ± 28 | 59.2 ± 2.2 | 89.1 ± 2.4 | 29.0 ± 0.7 | 0.0 ± 0.0 | 41 | 4.00 | 0.938 | 2.6 | no |  |
-| 2-4 | auto | 2 | 6 | 559 ± 19 | 36.9 ± 1.2 | 38.0 ± 2.1 | 0.9 ± 0.2 | 1.0 ± 0.6 | 62 | 2.15 | 0.939 | 6.5 | no | yes |
-| 2-4 | 0 | 2 | 6 | 555 ± 20 | 36.3 ± 1.3 | 36.9 ± 2.3 | 0.0 ± 0.0 | 1.3 ± 0.6 | 62 | 2.23 | 0.939 | 6.2 | no | yes |
-| 2-4 | auto+1 | 2 | 6 | 558 ± 19 | 36.9 ± 1.2 | 37.2 ± 2.5 | 0.0 ± 0.0 | 1.3 ± 0.7 | 62 | 2.10 | 0.939 | 6.4 | no |  |
-| 1-4 | auto | 2 | 6 | 607 ± 15 | 42.6 ± 1.0 | 13.5 ± 1.5 | 0.0 ± 0.0 | 23.2 ± 3.4 | 56 | 1.49 | 0.938 | 9.0 | 10% of runs |  |
-| 1-4 | 0 | 2 | 6 | 577 ± 16 | 39.8 ± 1.2 | 17.4 ± 1.4 | 0.0 ± 0.0 | 20.1 ± 2.7 | 59 | 1.84 | 0.938 | 8.7 | 7% of runs |  |
-| 1-4 | auto+1 | 2 | 6 | 625 ± 19 | 44.9 ± 0.8 | 10.2 ± 1.3 | 0.0 ± 0.0 | 24.7 ± 2.6 | 54 | 1.26 | 0.939 | 9.5 | 13% of runs |  |
-| 4-8 | auto | 2 | 6 | 766 ± 28 | 58.5 ± 2.3 | 89.1 ± 2.5 | 28.4 ± 0.7 | 0.0 ± 0.0 | 42 | 4.13 | 0.934 | 2.6 | no | yes |
+Jobs using more than 5 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 770 | control | 87.5 | control | 29.0 | control | 0.0 | control | 0 | 2.6 | no |  |  |
+| 2-4 | auto | 2 | 530 | -240 ± 12 | 34.3 | -53.2 ± 2.0 | 1.0 | -28.0 ± 0.8 | 0.0 | +0.0 ± 0.0 (none detected) | 69 | 6.5 | no | yes |  |
+| 2-4 | 0 | 2 | 524 | -246 ± 13 | 33.6 | -53.8 ± 2.3 | 0.0 | -29.0 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 79 | 6.4 | no | yes | yes |
+| 2-4 | auto+1 | 2 | 530 | -240 ± 14 | 33.3 | -54.2 ± 1.8 | 0.0 | -29.0 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 75 | 6.4 | no | yes | yes |
+| 1-4 | auto | 2 | 593 | -177 ± 16 | 13.2 | -74.3 ± 2.6 | 0.7 | -28.3 ± 0.8 | 27.5 | +27.5 ± 3.0 | 36 | 8.8 | 3% of runs | yes |  |
+| 1-4 | 0 | 2 | 558 | -212 ± 15 | 17.0 | -70.5 ± 2.5 | 0.5 | -28.5 ± 0.7 | 24.6 | +24.6 ± 2.9 | 61 | 8.4 | no | yes | yes |
+| 1-4 | auto+1 | 2 | 619 | -151 ± 15 | 11.0 | -76.5 ± 3.0 | 0.9 | -28.1 ± 0.9 | 25.6 | +25.6 ± 2.8 | 28 | 9.1 | 3% of runs | yes |  |
+| 3-3 | 1 | 2 | 537 | -233 ± 12 | 44.7 | -42.8 ± 1.5 | 0.0 | -29.0 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 82 | 5.2 | no | yes |  |
+| 3-4 | 1 | 2 | 540 | -230 ± 11 | 45.0 | -42.5 ± 2.1 | 1.5 | -27.4 ± 0.8 | 0.0 | +0.0 ± 0.0 (none detected) | 78 | 5.2 | no | yes |  |
+| 4-8 | auto | 2 | 758 | -12 ± 3 | 87.4 | -0.0 ± 0.3 (none detected) | 28.4 | -0.5 ± 0.2 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 2.6 | no |  |  |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2-4 | 0 | 2 | 6 | 555 ± 20 | 36.3 ± 1.3 | 36.9 ± 2.3 | 0.0 ± 0.0 | 1.3 ± 0.6 | 62 | 2.23 | 0.939 | 6.2 | no |
-| 2-4 | auto | 2 | 6 | 559 ± 19 | 36.9 ± 1.2 | 38.0 ± 2.1 | 0.9 ± 0.2 | 1.0 ± 0.6 | 62 | 2.15 | 0.939 | 6.5 | no |
-| 4-8 | auto | 2 | 6 | 766 ± 28 | 58.5 ± 2.3 | 89.1 ± 2.5 | 28.4 ± 0.7 | 0.0 ± 0.0 | 42 | 4.13 | 0.934 | 2.6 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2-4 | 0 | 2 | 524 | -246 ± 13 | 33.6 | -53.8 ± 2.3 | 0.0 | -29.0 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 79 | 6.4 | no | yes |
+| 2-4 | auto+1 | 2 | 530 | -240 ± 14 | 33.3 | -54.2 ± 1.8 | 0.0 | -29.0 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 75 | 6.4 | no | yes |
+| 1-4 | 0 | 2 | 558 | -212 ± 15 | 17.0 | -70.5 ± 2.5 | 0.5 | -28.5 ± 0.7 | 24.6 | +24.6 ± 2.9 | 61 | 8.4 | no | yes |
 
 ## 8 slots (10 CPUs), heavy workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 8 | 458 ± 17 | 23.6 ± 1.2 | 32.2 ± 2.3 | 0.0 ± 0.0 | 12.4 ± 2.0 | 61 | 4.00 | 0.929 | 9.5 | no | yes |
-| 2-4 | auto | 2 | 8 | 477 ± 13 | 26.5 ± 0.8 | 14.9 ± 1.6 | 0.0 ± 0.0 | 2.4 ± 1.0 | 58 | 2.24 | 0.930 | 16.5 | 50% of runs |  |
-| 2-4 | 0 | 2 | 8 | 473 ± 13 | 26.4 ± 0.9 | 17.3 ± 1.4 | 2.2 ± 0.3 | 1.4 ± 0.8 | 58 | 2.49 | 0.929 | 16.2 | 47% of runs |  |
-| 2-4 | auto+1 | 2 | 8 | 478 ± 13 | 26.9 ± 0.8 | 15.6 ± 1.6 | 0.5 ± 0.1 | 1.5 ± 0.7 | 58 | 2.17 | 0.931 | 16.7 | 53% of runs |  |
-| 1-4 | auto | 2 | 8 | 564 ± 16 | 35.7 ± 1.1 | 4.6 ± 1.6 | 1.3 ± 0.6 | 2.1 ± 0.5 | 47 | 1.77 | 0.928 | 22.4 | 100% of runs |  |
-| 1-4 | 0 | 2 | 8 | 536 ± 16 | 32.1 ± 1.0 | 6.7 ± 1.6 | 0.9 ± 0.6 | 4.6 ± 0.9 | 51 | 2.14 | 0.931 | 20.9 | 97% of runs |  |
-| 1-4 | auto+1 | 2 | 8 | 594 ± 17 | 39.2 ± 1.0 | 4.0 ± 2.1 | 1.5 ± 0.6 | 1.2 ± 0.6 | 44 | 1.46 | 0.931 | 22.5 | 97% of runs |  |
-| 4-8 | auto | 2 | 8 | 465 ± 17 | 24.1 ± 1.1 | 33.5 ± 2.0 | 1.3 ± 0.3 | 11.5 ± 1.9 | 60 | 4.20 | 0.926 | 9.5 | no | yes |
+Jobs using more than 9 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 408 | control | 24.2 | control | 0.0 | control | 0.0 | control | 73 | 9.5 | no | yes | yes |
+| 2-4 | auto | 2 | 468 | +60 ± 10 | 21.5 | -2.7 ± 2.6 | 7.9 | +7.9 ± 1.3 | 0.0 | +0.0 ± 0.0 (none detected) | 32 | 15.6 | 30% of runs | yes |  |
+| 2-4 | 0 | 2 | 467 | +59 ± 9 | 21.2 | -2.9 ± 2.3 | 8.5 | +8.5 ± 1.3 | 0.0 | +0.0 ± 0.0 (none detected) | 22 | 15.3 | 33% of runs | yes |  |
+| 2-4 | auto+1 | 2 | 473 | +65 ± 11 | 21.3 | -2.8 ± 2.2 | 8.2 | +8.2 ± 1.4 | 0.0 | +0.0 ± 0.0 (none detected) | 28 | 15.4 | 30% of runs | yes |  |
+| 1-4 | auto | 2 | 598 | +190 ± 17 | 23.6 | -0.6 ± 2.9 (none detected) | 14.6 | +14.6 ± 2.0 | 0.5 | +0.5 ± 0.5 (none detected) | 2 | 20.2 | 80% of runs | yes |  |
+| 1-4 | 0 | 2 | 572 | +164 ± 16 | 21.5 | -2.7 ± 3.4 (none detected) | 13.6 | +13.6 ± 2.2 | 0.8 | +0.8 ± 0.5 | 8 | 19.2 | 80% of runs | yes |  |
+| 1-4 | auto+1 | 2 | 617 | +209 ± 15 | 24.0 | -0.2 ± 2.6 (none detected) | 14.6 | +14.6 ± 2.0 | 0.5 | +0.5 ± 0.4 | 1 | 19.2 | 70% of runs | yes |  |
+| 3-3 | 1 | 2 | 504 | +96 ± 11 | 37.8 | +13.6 ± 1.5 | 16.2 | +16.2 ± 0.8 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 9.4 | no | yes |  |
+| 3-4 | 1 | 2 | 480 | +72 ± 10 | 36.6 | +12.4 ± 1.8 | 13.7 | +13.7 ± 1.0 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 9.5 | no | yes |  |
+| 4-8 | auto | 2 | 414 | +6 ± 7 (none detected) | 24.8 | +0.7 ± 1.1 (none detected) | 1.6 | +1.6 ± 0.3 | 0.0 | +0.0 ± 0.0 (none detected) | 67 | 9.5 | no | yes |  |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 8 | 458 ± 17 | 23.6 ± 1.2 | 32.2 ± 2.3 | 0.0 ± 0.0 | 12.4 ± 2.0 | 61 | 4.00 | 0.929 | 9.5 | no |
-| 4-8 | auto | 2 | 8 | 465 ± 17 | 24.1 ± 1.1 | 33.5 ± 2.0 | 1.3 ± 0.3 | 11.5 ± 1.9 | 60 | 4.20 | 0.926 | 9.5 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 408 | control | 24.2 | control | 0.0 | control | 0.0 | control | 73 | 9.5 | no | yes |
 
 ## 8 slots (10 CPUs), heavy-declared workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 8 | 458 ± 17 | 23.6 ± 1.2 | 32.2 ± 2.3 | 0.0 ± 0.0 | 12.4 ± 2.0 | 61 | 4.00 | 0.929 | 9.5 | no | yes |
-| 2-4 | auto | 2 | 8 | 541 ± 20 | 32.6 ± 1.2 | 33.4 ± 2.5 | 14.4 ± 1.1 | 0.0 ± 0.0 | 50 | 2.27 | 0.929 | 9.5 | no | yes |
-| 2-4 | 0 | 2 | 8 | 528 ± 18 | 31.7 ± 1.3 | 33.8 ± 2.6 | 13.9 ± 1.1 | 0.0 ± 0.0 | 51 | 2.43 | 0.929 | 9.5 | no | yes |
-| 2-4 | auto+1 | 2 | 8 | 545 ± 19 | 33.3 ± 1.1 | 33.6 ± 2.2 | 14.7 ± 1.0 | 0.0 ± 0.0 | 49 | 2.14 | 0.930 | 9.5 | no |  |
-| 1-4 | auto | 2 | 8 | 718 ± 27 | 53.6 ± 1.6 | 52.5 ± 4.9 | 31.6 ± 2.7 | 0.0 ± 0.1 | 36 | 1.46 | 0.929 | 9.5 | no |  |
-| 1-4 | 0 | 2 | 8 | 667 ± 30 | 48.0 ± 2.2 | 50.8 ± 4.7 | 27.9 ± 3.1 | 0.6 ± 0.3 | 39 | 1.86 | 0.927 | 9.5 | no |  |
-| 1-4 | auto+1 | 2 | 8 | 758 ± 29 | 56.6 ± 1.6 | 53.3 ± 4.8 | 31.4 ± 2.7 | 0.0 ± 0.0 | 34 | 1.23 | 0.929 | 9.5 | no |  |
-| 4-8 | auto | 2 | 8 | 465 ± 17 | 24.1 ± 1.1 | 33.5 ± 2.0 | 1.3 ± 0.3 | 11.5 ± 1.9 | 60 | 4.20 | 0.926 | 9.5 | no | yes |
+Jobs using more than 9 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 408 | control | 24.2 | control | 0.0 | control | 0.0 | control | 73 | 9.5 | no | yes | yes |
+| 2-4 | auto | 2 | 497 | +88 ± 10 | 28.3 | +4.1 ± 2.0 | 13.6 | +13.6 ± 1.1 | 0.0 | +0.0 ± 0.0 (none detected) | 5 | 9.5 | no | yes |  |
+| 2-4 | 0 | 2 | 489 | +81 ± 8 | 27.3 | +3.1 ± 1.7 | 12.4 | +12.4 ± 1.2 | 0.0 | +0.0 ± 0.0 (none detected) | 3 | 9.5 | no | yes |  |
+| 2-4 | auto+1 | 2 | 508 | +100 ± 10 | 29.0 | +4.8 ± 1.7 | 13.8 | +13.8 ± 1.0 | 0.0 | +0.0 ± 0.0 (none detected) | 4 | 9.5 | no | yes |  |
+| 1-4 | auto | 2 | 704 | +296 ± 24 | 51.1 | +26.9 ± 4.8 | 31.8 | +31.8 ± 2.5 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 9.5 | no | yes |  |
+| 1-4 | 0 | 2 | 637 | +229 ± 25 | 48.6 | +24.4 ± 6.0 | 26.6 | +26.6 ± 3.3 | 0.1 | +0.1 ± 0.2 (none detected) | 2 | 9.5 | no | yes |  |
+| 1-4 | auto+1 | 2 | 733 | +325 ± 24 | 51.5 | +27.3 ± 4.7 | 31.6 | +31.6 ± 2.5 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 9.5 | no | yes |  |
+| 3-3 | 1 | 2 | 504 | +96 ± 11 | 37.8 | +13.6 ± 1.5 | 16.2 | +16.2 ± 0.8 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 9.4 | no | yes |  |
+| 3-4 | 1 | 2 | 480 | +72 ± 10 | 36.6 | +12.4 ± 1.8 | 13.7 | +13.7 ± 1.0 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 9.5 | no | yes |  |
+| 4-8 | auto | 2 | 414 | +6 ± 7 (none detected) | 24.8 | +0.7 ± 1.1 (none detected) | 1.6 | +1.6 ± 0.3 | 0.0 | +0.0 ± 0.0 (none detected) | 67 | 9.5 | no | yes |  |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 8 | 458 ± 17 | 23.6 ± 1.2 | 32.2 ± 2.3 | 0.0 ± 0.0 | 12.4 ± 2.0 | 61 | 4.00 | 0.929 | 9.5 | no |
-| 4-8 | auto | 2 | 8 | 465 ± 17 | 24.1 ± 1.1 | 33.5 ± 2.0 | 1.3 ± 0.3 | 11.5 ± 1.9 | 60 | 4.20 | 0.926 | 9.5 | no |
-| 2-4 | 0 | 2 | 8 | 528 ± 18 | 31.7 ± 1.3 | 33.8 ± 2.6 | 13.9 ± 1.1 | 0.0 ± 0.0 | 51 | 2.43 | 0.929 | 9.5 | no |
-| 2-4 | auto | 2 | 8 | 541 ± 20 | 32.6 ± 1.2 | 33.4 ± 2.5 | 14.4 ± 1.1 | 0.0 ± 0.0 | 50 | 2.27 | 0.929 | 9.5 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 408 | control | 24.2 | control | 0.0 | control | 0.0 | control | 73 | 9.5 | no | yes |
 
 ## 8 slots (10 CPUs), light workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 8 | 518 ± 19 | 31.3 ± 1.3 | 43.2 ± 2.6 | 0.0 ± 0.0 | 3.7 ± 0.8 | 61 | 4.00 | 0.937 | 6.4 | no | yes |
-| 2-4 | auto | 2 | 8 | 518 ± 15 | 32.7 ± 0.9 | 20.9 ± 2.1 | 0.0 ± 0.0 | 0.2 ± 0.2 | 60 | 2.18 | 0.937 | 8.8 | no | yes |
-| 2-4 | 0 | 2 | 8 | 521 ± 15 | 33.0 ± 1.0 | 24.0 ± 1.5 | 2.0 ± 0.3 | 0.3 ± 0.3 | 60 | 2.35 | 0.938 | 9.6 | no |  |
-| 2-4 | auto+1 | 2 | 8 | 522 ± 15 | 33.1 ± 0.9 | 21.6 ± 2.2 | 0.4 ± 0.1 | 0.3 ± 0.3 | 60 | 2.14 | 0.939 | 8.9 | no |  |
-| 1-4 | auto | 2 | 8 | 604 ± 18 | 42.4 ± 1.0 | 2.3 ± 1.0 | 0.1 ± 0.2 | 1.9 ± 0.5 | 50 | 1.68 | 0.937 | 12.3 | 17% of runs |  |
-| 1-4 | 0 | 2 | 8 | 576 ± 15 | 38.4 ± 0.9 | 7.6 ± 0.9 | 0.0 ± 0.0 | 2.3 ± 0.6 | 54 | 2.04 | 0.938 | 10.9 | 7% of runs |  |
-| 1-4 | auto+1 | 2 | 8 | 644 ± 19 | 45.9 ± 0.9 | 0.7 ± 0.4 | 0.0 ± 0.0 | 1.8 ± 0.7 | 47 | 1.43 | 0.938 | 11.6 | 10% of runs |  |
-| 4-8 | auto | 2 | 8 | 518 ± 19 | 31.4 ± 1.3 | 43.0 ± 2.6 | 1.0 ± 0.2 | 3.3 ± 0.8 | 60 | 4.17 | 0.935 | 6.3 | no | yes |
+Jobs using more than 9 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 450 | control | 31.9 | control | 0.0 | control | 0.0 | control | 78 | 6.4 | no | yes | yes |
+| 2-4 | auto | 2 | 470 | +20 ± 7 | 15.7 | -16.2 ± 1.4 | 0.0 | +0.0 ± 0.0 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 50 | 9.1 | no | yes | yes |
+| 2-4 | 0 | 2 | 469 | +19 ± 7 | 17.9 | -14.0 ± 1.7 | 2.2 | +2.2 ± 0.3 | 0.0 | +0.0 ± 0.0 (none detected) | 33 | 9.6 | no | yes | yes |
+| 2-4 | auto+1 | 2 | 476 | +26 ± 7 | 16.3 | -15.6 ± 1.7 | 0.4 | +0.4 ± 0.1 | 0.0 | +0.0 ± 0.0 (none detected) | 45 | 9.3 | no | yes |  |
+| 1-4 | auto | 2 | 568 | +118 ± 9 | 4.0 | -27.9 ± 2.4 | 0.8 | +0.8 ± 0.4 | 2.0 | +2.0 ± 0.7 | 7 | 11.6 | 3% of runs | yes |  |
+| 1-4 | 0 | 2 | 532 | +82 ± 10 | 7.4 | -24.5 ± 2.2 | 0.7 | +0.7 ± 0.5 | 2.1 | +2.1 ± 0.8 | 19 | 11.0 | 7% of runs | yes |  |
+| 1-4 | auto+1 | 2 | 597 | +147 ± 9 | 1.6 | -30.3 ± 2.5 | 0.6 | +0.6 ± 0.5 | 1.6 | +1.6 ± 0.7 | 3 | 11.7 | 7% of runs | yes |  |
+| 3-3 | 1 | 2 | 561 | +111 ± 9 | 47.9 | +16.1 ± 1.6 | 17.8 | +17.8 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 6.4 | no |  |  |
+| 3-4 | 1 | 2 | 539 | +89 ± 11 | 46.6 | +14.7 ± 1.7 | 16.0 | +16.0 ± 0.8 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 6.4 | no |  |  |
+| 4-8 | auto | 2 | 454 | +4 ± 5 (none detected) | 32.9 | +1.1 ± 1.3 (none detected) | 1.1 | +1.1 ± 0.2 | 0.0 | +0.0 ± 0.0 (none detected) | 73 | 6.5 | no | yes |  |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4-8 | auto | 2 | 8 | 518 ± 19 | 31.4 ± 1.3 | 43.0 ± 2.6 | 1.0 ± 0.2 | 3.3 ± 0.8 | 60 | 4.17 | 0.935 | 6.3 | no |
-| 4 | auto | 2 | 8 | 518 ± 19 | 31.3 ± 1.3 | 43.2 ± 2.6 | 0.0 ± 0.0 | 3.7 ± 0.8 | 61 | 4.00 | 0.937 | 6.4 | no |
-| 2-4 | auto | 2 | 8 | 518 ± 15 | 32.7 ± 0.9 | 20.9 ± 2.1 | 0.0 ± 0.0 | 0.2 ± 0.2 | 60 | 2.18 | 0.937 | 8.8 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 450 | control | 31.9 | control | 0.0 | control | 0.0 | control | 78 | 6.4 | no | yes |
+| 2-4 | 0 | 2 | 469 | +19 ± 7 | 17.9 | -14.0 ± 1.7 | 2.2 | +2.2 ± 0.3 | 0.0 | +0.0 ± 0.0 (none detected) | 33 | 9.6 | no | yes |
+| 2-4 | auto | 2 | 470 | +20 ± 7 | 15.7 | -16.2 ± 1.4 | 0.0 | +0.0 ± 0.0 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 50 | 9.1 | no | yes |
 
 ## 16 slots (18 CPUs), heavy workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 16 | 401 ± 9 | 18.1 ± 0.6 | 7.3 ± 1.1 | 0.0 ± 0.0 | 0.5 ± 0.3 | 48 | 4.00 | 0.916 | 27.4 | 40% of runs |  |
-| 2-4 | auto | 2 | 16 | 443 ± 12 | 22.5 ± 0.8 | 0.9 ± 0.5 | 0.2 ± 0.2 | 0.0 ± 0.1 | 43 | 3.17 | 0.913 | 33.6 | 73% of runs |  |
-| 2-4 | 0 | 2 | 16 | 432 ± 12 | 21.3 ± 0.8 | 1.1 ± 0.5 | 0.1 ± 0.1 | 0.0 ± 0.1 | 44 | 3.39 | 0.915 | 33.6 | 83% of runs |  |
-| 2-4 | auto+1 | 2 | 16 | 452 ± 12 | 23.5 ± 0.8 | 0.5 ± 0.2 | 0.2 ± 0.1 | 0.0 ± 0.0 | 42 | 2.96 | 0.915 | 34.7 | 77% of runs |  |
-| 1-4 | auto | 2 | 16 | 508 ± 17 | 27.5 ± 1.2 | 0.7 ± 0.4 | 0.5 ± 0.4 | 0.0 ± 0.0 | 37 | 3.08 | 0.914 | 35.3 | 80% of runs |  |
-| 1-4 | 0 | 2 | 16 | 481 ± 16 | 24.7 ± 1.1 | 0.8 ± 0.6 | 0.5 ± 0.4 | 0.0 ± 0.0 | 39 | 3.30 | 0.916 | 36.7 | 90% of runs |  |
-| 1-4 | auto+1 | 2 | 16 | 517 ± 18 | 29.6 ± 1.2 | 1.7 ± 1.4 | 0.8 ± 0.6 | 0.0 ± 0.0 | 36 | 2.88 | 0.914 | 37.8 | 93% of runs |  |
-| 4-8 | auto | 2 | 16 | 391 ± 9 | 17.2 ± 0.7 | 8.2 ± 1.1 | 0.0 ± 0.0 | 0.3 ± 0.2 | 50 | 4.82 | 0.914 | 27.7 | 33% of runs |  |
+Jobs using more than 25 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 345 | control | 3.3 | control | 0.7 | control | 0.0 | control | 14 | 29.9 | 57% of runs | yes |  |
+| 2-4 | auto | 2 | 379 | +34 ± 5 | 2.5 | -0.8 ± 1.2 (none detected) | 2.0 | +1.2 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 1 | 33.6 | 87% of runs | yes |  |
+| 2-4 | 0 | 2 | 371 | +26 ± 4 | 1.9 | -1.4 ± 1.0 | 1.5 | +0.7 ± 0.6 | 0.0 | +0.0 ± 0.0 (none detected) | 3 | 33.6 | 83% of runs | yes |  |
+| 2-4 | auto+1 | 2 | 388 | +43 ± 7 | 3.2 | -0.1 ± 1.0 (none detected) | 2.4 | +1.6 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 33.6 | 87% of runs | yes |  |
+| 1-4 | auto | 2 | 425 | +80 ± 12 | 3.9 | +0.6 ± 1.6 (none detected) | 3.5 | +2.7 ± 1.4 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 34.2 | 80% of runs | yes |  |
+| 1-4 | 0 | 2 | 403 | +58 ± 13 | 3.6 | +0.3 ± 1.6 (none detected) | 2.8 | +2.0 ± 1.3 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 35.0 | 87% of runs | yes |  |
+| 1-4 | auto+1 | 2 | 444 | +99 ± 15 | 6.3 | +3.0 ± 2.2 | 4.6 | +3.8 ± 1.5 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 36.1 | 87% of runs | yes |  |
+| 3-3 | 1 | 2 | 375 | +30 ± 3 | 3.6 | +0.2 ± 1.0 (none detected) | 1.6 | +0.8 ± 0.5 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 31.6 | 70% of runs | yes |  |
+| 3-4 | 1 | 2 | 356 | +11 ± 2 | 4.1 | +0.7 ± 0.8 (none detected) | 1.6 | +0.9 ± 0.6 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 30.2 | 60% of runs | yes |  |
+| 4-8 | auto | 2 | 339 | -6 ± 2 | 3.8 | +0.5 ± 0.7 (none detected) | 0.5 | -0.2 ± 0.4 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 20 | 29.1 | 47% of runs | yes |  |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 
 ## 16 slots (18 CPUs), heavy-declared workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 16 | 419 ± 10 | 20.1 ± 0.8 | 16.0 ± 1.8 | 6.8 ± 0.9 | 0.0 ± 0.0 | 45 | 4.00 | 0.915 | 23.7 | no | yes |
-| 2-4 | auto | 2 | 16 | 505 ± 17 | 29.2 ± 0.9 | 18.8 ± 2.0 | 13.6 ± 1.7 | 0.0 ± 0.0 | 36 | 2.59 | 0.915 | 24.8 | no |  |
-| 2-4 | 0 | 2 | 16 | 475 ± 14 | 26.6 ± 0.9 | 17.9 ± 2.5 | 12.6 ± 1.8 | 0.0 ± 0.0 | 39 | 2.97 | 0.915 | 23.1 | no |  |
-| 2-4 | auto+1 | 2 | 16 | 514 ± 16 | 30.4 ± 0.9 | 19.7 ± 2.0 | 15.0 ± 1.8 | 0.0 ± 0.0 | 36 | 2.42 | 0.915 | 24.2 | no |  |
-| 1-4 | auto | 2 | 16 | 708 ± 26 | 51.0 ± 2.1 | 40.2 ± 6.2 | 26.6 ± 3.5 | 0.0 ± 0.0 | 26 | 1.92 | 0.915 | 24.2 | no |  |
-| 1-4 | 0 | 2 | 16 | 620 ± 26 | 40.8 ± 1.9 | 35.9 ± 5.3 | 22.6 ± 3.0 | 0.0 ± 0.0 | 30 | 2.58 | 0.915 | 24.5 | no |  |
-| 1-4 | auto+1 | 2 | 16 | 745 ± 26 | 55.7 ± 1.6 | 41.4 ± 4.9 | 28.2 ± 3.2 | 0.0 ± 0.0 | 24 | 1.59 | 0.915 | 23.7 | no |  |
-| 4-8 | auto | 2 | 16 | 408 ± 11 | 19.3 ± 0.8 | 16.9 ± 1.5 | 7.4 ± 0.8 | 0.0 ± 0.0 | 47 | 4.82 | 0.913 | 24.8 | no | yes |
+Jobs using more than 25 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 353 | control | 7.3 | control | 3.8 | control | 0.0 | control | 1 | 24.8 | no |  | yes |
+| 2-4 | auto | 2 | 421 | +68 ± 9 | 12.6 | +5.3 ± 2.1 | 11.6 | +7.8 ± 1.8 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 24.8 | no |  |  |
+| 2-4 | 0 | 2 | 398 | +45 ± 8 | 10.2 | +2.9 ± 1.5 | 9.2 | +5.3 ± 1.5 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 24.8 | no |  |  |
+| 2-4 | auto+1 | 2 | 427 | +74 ± 9 | 13.5 | +6.2 ± 2.1 | 11.6 | +7.8 ± 1.6 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 24.5 | no |  |  |
+| 1-4 | auto | 2 | 591 | +238 ± 21 | 34.8 | +27.5 ± 4.3 | 27.7 | +23.8 ± 3.0 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 25.1 | no | yes |  |
+| 1-4 | 0 | 2 | 512 | +159 ± 20 | 31.1 | +23.8 ± 4.7 | 22.6 | +18.7 ± 3.3 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 25.1 | no | yes |  |
+| 1-4 | auto+1 | 2 | 631 | +278 ± 23 | 38.0 | +30.7 ± 3.9 | 30.2 | +26.4 ± 2.5 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 24.8 | no |  |  |
+| 3-3 | 1 | 2 | 389 | +36 ± 4 | 10.3 | +3.1 ± 0.9 | 8.6 | +4.7 ± 0.9 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 24.8 | no |  |  |
+| 3-4 | 1 | 2 | 368 | +15 ± 4 | 8.7 | +1.4 ± 0.9 | 6.3 | +2.5 ± 0.6 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 25.1 | no | yes |  |
+| 4-8 | auto | 2 | 349 | -4 ± 3 | 8.2 | +0.9 ± 0.7 | 4.0 | +0.2 ± 0.4 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 6 | 25.1 | no | yes | yes |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4-8 | auto | 2 | 16 | 408 ± 11 | 19.3 ± 0.8 | 16.9 ± 1.5 | 7.4 ± 0.8 | 0.0 ± 0.0 | 47 | 4.82 | 0.913 | 24.8 | no |
-| 4 | auto | 2 | 16 | 419 ± 10 | 20.1 ± 0.8 | 16.0 ± 1.8 | 6.8 ± 0.9 | 0.0 ± 0.0 | 45 | 4.00 | 0.915 | 23.7 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4-8 | auto | 2 | 349 | -4 ± 3 | 8.2 | +0.9 ± 0.7 | 4.0 | +0.2 ± 0.4 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 6 | 25.1 | no | yes |
+| 4 | auto | 2 | 353 | control | 7.3 | control | 3.8 | control | 0.0 | control | 1 | 24.8 | no |  |
 
 ## 16 slots (18 CPUs), light workload
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget | non-dominated |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | auto | 2 | 16 | 443 ± 11 | 23.7 ± 0.7 | 12.3 ± 1.9 | 0.0 ± 0.0 | 0.0 ± 0.0 | 53 | 4.00 | 0.933 | 15.0 | no | yes |
-| 2-4 | auto | 2 | 16 | 495 ± 13 | 29.7 ± 0.9 | 0.9 ± 0.4 | 0.0 ± 0.0 | 0.0 ± 0.0 | 47 | 3.00 | 0.932 | 17.2 | 3% of runs |  |
-| 2-4 | 0 | 2 | 16 | 488 ± 15 | 28.1 ± 0.8 | 3.0 ± 1.3 | 0.0 ± 0.0 | 0.0 ± 0.0 | 48 | 3.23 | 0.933 | 18.1 | 7% of runs |  |
-| 2-4 | auto+1 | 2 | 16 | 507 ± 14 | 30.9 ± 0.8 | 0.7 ± 0.4 | 0.1 ± 0.0 | 0.0 ± 0.0 | 45 | 2.80 | 0.931 | 18.2 | 3% of runs |  |
-| 1-4 | auto | 2 | 16 | 563 ± 16 | 35.5 ± 1.1 | 0.5 ± 0.2 | 0.0 ± 0.1 | 0.0 ± 0.0 | 40 | 2.98 | 0.930 | 18.5 | 3% of runs |  |
-| 1-4 | 0 | 2 | 16 | 527 ± 19 | 31.7 ± 0.9 | 0.4 ± 0.0 | 0.0 ± 0.0 | 0.0 ± 0.0 | 44 | 3.24 | 0.930 | 18.0 | 3% of runs |  |
-| 1-4 | auto+1 | 2 | 16 | 590 ± 18 | 38.4 ± 1.2 | 0.5 ± 0.2 | 0.0 ± 0.1 | 0.0 ± 0.0 | 38 | 2.78 | 0.928 | 19.3 | 10% of runs |  |
-| 4-8 | auto | 2 | 16 | 429 ± 10 | 22.9 ± 0.8 | 13.0 ± 1.6 | 0.0 ± 0.0 | 0.0 ± 0.0 | 55 | 4.57 | 0.928 | 15.0 | no | yes |
+Jobs using more than 25 GiB at once leave less than 5 GiB available, where the measured machine went into swap.
+
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted | non-dominated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | auto | 2 | 359 | control | 3.6 | control | 0.0 | control | 0.0 | control | 18 | 15.2 | no | yes | yes |
+| 2-4 | auto | 2 | 394 | +35 ± 6 | 0.7 | -2.9 ± 1.0 | 0.0 | +0.0 ± 0.1 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 2 | 17.6 | 3% of runs |  |  |
+| 2-4 | 0 | 2 | 381 | +22 ± 3 | 0.4 | -3.1 ± 0.8 | 0.0 | +0.0 ± 0.0 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 4 | 17.4 | 3% of runs |  |  |
+| 2-4 | auto+1 | 2 | 400 | +41 ± 6 | 0.6 | -3.0 ± 0.9 | 0.1 | +0.1 ± 0.1 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 18.3 | 7% of runs |  |  |
+| 1-4 | auto | 2 | 435 | +76 ± 11 | 0.4 | -3.2 ± 0.8 | 0.1 | +0.1 ± 0.2 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 18.9 | 3% of runs |  |  |
+| 1-4 | 0 | 2 | 408 | +49 ± 9 | 0.4 | -3.2 ± 0.8 | 0.0 | +0.0 ± 0.0 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 1 | 19.1 | 7% of runs |  |  |
+| 1-4 | auto+1 | 2 | 447 | +88 ± 10 | 0.5 | -3.1 ± 0.8 | 0.0 | +0.0 ± 0.1 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 19.7 | 3% of runs |  |  |
+| 3-3 | 1 | 2 | 389 | +30 ± 2 | 1.7 | -1.8 ± 0.6 | 0.2 | +0.2 ± 0.1 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 16.4 | no |  | yes |
+| 3-4 | 1 | 2 | 370 | +11 ± 3 | 3.7 | +0.1 ± 0.5 (none detected) | 0.5 | +0.5 ± 0.1 | 0.0 | +0.0 ± 0.0 (none detected) | 1 | 16.4 | no |  |  |
+| 4-8 | auto | 2 | 352 | -7 ± 2 | 4.5 | +1.0 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 25 | 15.0 | no | yes | yes |
 
 Non-dominated (named and screened):
 
-| weights | headroom | kept | slots | makespan s | job mean s | wait p95 s | idle while waiting % | at most 1 CPU idle % | CPU busy % | granted | Jain | memory used peak GiB | over budget |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4-8 | auto | 2 | 16 | 429 ± 10 | 22.9 ± 0.8 | 13.0 ± 1.6 | 0.0 ± 0.0 | 0.0 ± 0.0 | 55 | 4.57 | 0.928 | 15.0 | no |
-| 4 | auto | 2 | 16 | 443 ± 11 | 23.7 ± 0.7 | 12.3 ± 1.9 | 0.0 ± 0.0 | 0.0 ± 0.0 | 53 | 4.00 | 0.933 | 15.0 | no |
+| weights | headroom | kept | makespan s | vs control | wait p95 s | vs control | idle while waiting % | vs control | at most 1 CPU idle % | vs control | all slots held % | memory used peak GiB | over budget | untrusted |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4-8 | auto | 2 | 352 | -7 ± 2 | 4.5 | +1.0 ± 0.7 | 0.0 | +0.0 ± 0.0 (none detected) | 0.0 | +0.0 ± 0.0 (none detected) | 25 | 15.0 | no | yes |
+| 4 | auto | 2 | 359 | control | 3.6 | control | 0.0 | control | 0.0 | control | 18 | 15.2 | no | yes |
+| 3-3 | 1 | 2 | 389 | +30 ± 2 | 1.7 | -1.8 ± 0.6 | 0.2 | +0.2 ± 0.1 | 0.0 | +0.0 ± 0.0 (none detected) | 0 | 16.4 | no |  |

@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.0  # it publishes no moving major tag
-      - run: uv sync --python ${{ matrix.python }}
+      - run: uv sync --python ${{ matrix.python }} --group bench
       - run: uv run --no-sync pytest -q
 
   build:

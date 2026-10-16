@@ -107,3 +107,20 @@ class Job:
     granted: int | None = None
     workers: int | None = None
     labels: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Pressure:
+    """An optional stand-in for swap, which the model otherwise leaves out. Once the memory the
+    jobs use passes `limit` (the machine's memory less what other work uses and `reserve`, or
+    `cap`, the jobs' own memory limit, when that is lower), every running job takes
+    `1 + slowdown` times as long for each GiB past it, and the memory guard reads the share of
+    time the jobs lose as memory pressure."""
+
+    reserve: int
+    slowdown: float = 0.0
+    cap: int | None = None
+
+    def limit(self, memory_bytes: int, other_memory: int) -> int:
+        machine = memory_bytes - other_memory - self.reserve
+        return machine if self.cap is None else min(machine, self.cap)

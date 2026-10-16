@@ -51,7 +51,7 @@ def summarize(result: Result, background: float = 0.0) -> dict:
         k: statistics.median([j.ended - j.started for j in done if j.kind == k] or [0.0])
         for k in ("cpu", "mem")
     }
-    slot_s, cpu_s, idle_waiting, saturated = 0.0, 0.0, 0.0, 0.0
+    slot_s, cpu_s, idle_waiting, saturated, swapping, full = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     samples = result.samples
     for a, b in zip(samples, [*samples[1:], None], strict=True):
         end = makespan if b is None else min(b.t, makespan)
@@ -64,6 +64,10 @@ def summarize(result: Result, background: float = 0.0) -> dict:
             idle_waiting += a.free * dt
         if a.busy + background >= result.cpus - 1 - SATURATED_SLACK:
             saturated += dt
+        if a.slow > 1:
+            swapping += dt
+        if a.free == 0:
+            full += dt
     sessions: dict[str, list] = {}
     for j in done:
         sessions.setdefault(j.session, []).append(j)
@@ -87,6 +91,8 @@ def summarize(result: Result, background: float = 0.0) -> dict:
         "cpu_util": cpu_s / (result.cpus * span),
         "idle_while_waiting": idle_waiting / (result.slots * span),
         "saturated_share": saturated / span,
+        "swap_share": swapping / span,
+        "full_share": full / span,
         "jain_slot_s": jain(shares),
         "wait_ratio": max(waits) / max(min(waits), 1e-3) if waits else None,
         "counted_peak_gib": result.counted_peak / GIB,
@@ -134,6 +140,16 @@ def aggregate(rows: list[dict]) -> dict:
         out[key], out[f"{key}_ci"] = mean, half
     out["jobs"] = statistics.fmean(r["jobs"] for r in rows)
     return out
+
+
+def paired(candidate: list[float], control: list[float]) -> tuple[float, float | None]:
+    """The mean of `candidate - control` over paired replications (the same seed, so the same
+    plan and job-to-job spread), and the half-width of its 95% interval."""
+    diffs = [a - b for a, b in zip(candidate, control, strict=True)]
+    mean = statistics.fmean(diffs)
+    if len(diffs) < 2:
+        return mean, None
+    return mean, t975(len(diffs) - 1) * statistics.stdev(diffs) / math.sqrt(len(diffs))
 
 
 def timeline(result: Result) -> list[dict]:

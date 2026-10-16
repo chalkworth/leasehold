@@ -19,7 +19,7 @@ from pathlib import Path
 
 from bench.run import Preset, make_plan
 from bench.sim.engine import Setup
-from bench.sim.model import Job, Kind, Machine, Speedup
+from bench.sim.model import Job, Kind, Machine, Pressure, Speedup
 from leasehold.machine import MachineConfig
 from leasehold.template import render, render_user_0_2
 
@@ -30,20 +30,26 @@ MIB = 1 << 20
 @dataclass(frozen=True)
 class Params:
     """The machine and job parameters a calibration fits (`bench.sim.calibrate`). The
-    defaults are the fit to the 8-CPU results under `bench/results/8cpu-16g/`."""
+    defaults are the fit to the 8-CPU results under `bench/results/8cpu-16g/`, with the swap
+    term off (its fitted slowdown is in `sim/calibration.json`)."""
 
     #: Full cores as a share of the CPUs, and what each CPU past them adds.
     core_share: float = 0.5
-    smt_yield: float = 0.443
+    smt_yield: float = 0.427
     #: Bytes a `cpu` job hashes per CPU-second, and a `mem` job.
-    rate_cpu: float = 1.419e9
-    rate_mem: float = 1.310e9
+    rate_cpu: float = 1.492e9
+    rate_mem: float = 1.289e9
     #: Seconds a `mem` job takes to touch one GiB (one thread).
-    touch_s_per_gib: float = 1.290
-    cpu: Speedup = field(default_factory=lambda: Speedup(A=7.70, sigma=0.008))
-    mem: Speedup = field(default_factory=lambda: Speedup(A=5.67, sigma=0.429))
+    touch_s_per_gib: float = 1.326
+    cpu: Speedup = field(default_factory=lambda: Speedup(A=8.27, sigma=0.521))
+    mem: Speedup = field(default_factory=lambda: Speedup(A=5.47, sigma=0.273))
     #: The spread of a job's work, as a coefficient of variation.
     noise_cv: float = 0.057
+    #: How much longer jobs take for each GiB their memory passes what the machine has for
+    #: them (`Pressure`), and the memory in GiB the machine keeps beside them and other work
+    #: before it swaps; a slowdown of 0 leaves swap out.
+    swap_slowdown: float = 0.0
+    swap_reserve_gib: float = 1.48
 
     def machine(self, cpus: int, memory_bytes: int, background: float) -> Machine:
         return Machine(
@@ -53,6 +59,12 @@ class Params:
             background=background,
             memory_bytes=memory_bytes,
         )
+
+    def pressure(self, cap: int | None = None) -> Pressure | None:
+        """The swap term, for jobs held to `cap` bytes if they are; None when it is off."""
+        if self.swap_slowdown <= 0:
+            return None
+        return Pressure(int(self.swap_reserve_gib * GIB), self.swap_slowdown, cap)
 
     def kinds(self, mem_bytes: int) -> dict[str, Kind]:
         return {

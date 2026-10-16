@@ -1,11 +1,13 @@
-"""The policy simulator's command line, run from the repository's root (`uv sync` installs SimPy
-and SciPy with the `bench` dependency group).
+"""The policy simulator's command line, run from the repository's root after
+`uv sync --group bench`, which installs SimPy.
 
     uv run python -m bench.sim run --condition lh-enforced --weights 2-4 --reps 30
     uv run python -m bench.sim run --from-run bench/results/8cpu-16g/raw-k8-d240 \\
         --condition lh-enforced --reps 10
     uv run python -m bench.sim calibrate [--fit]     # against bench/results/8cpu-16g
     uv run python -m bench.sim study --reps 30        # the policy study (a few minutes)
+
+`--params` takes the parameters from a calibration's JSON; `--no-swap` leaves the swap term out.
 
 `run` writes `runs.csv` (one row per replication), `summary.json` (means and 95% intervals) and
 `timeline.csv` (the first replication's slots, line and memory over time) to `--out`, and prints
@@ -42,11 +44,12 @@ HERE = Path(__file__).resolve().parent
 RESULTS = HERE.parent / "results" / "8cpu-16g"
 
 
-def _params(path: Path | None) -> Params:
-    if path is None:
-        return Params()
-    raw = json.loads(path.read_text())
-    return Params.from_dict(raw.get("params", raw))
+def _params(path: Path | None, no_swap: bool = False) -> Params:
+    params = Params()
+    if path is not None:
+        raw = json.loads(path.read_text())
+        params = Params.from_dict(raw.get("params", raw))
+    return replace(params, swap_slowdown=0.0) if no_swap else params
 
 
 def _one(args) -> tuple[dict, list[dict]]:
@@ -82,13 +85,14 @@ def _one(args) -> tuple[dict, list[dict]]:
         guard=not a.no_guard,
     )
     sim = Simulation(setup, machine, params.kinds(mem_bytes), steps, seed=seed,
-                     noise_cv=params.noise_cv, other_memory=int(a.other_gib * GIB))  # fmt: skip
+                     noise_cv=params.noise_cv, other_memory=int(a.other_gib * GIB),
+                     pressure=params.pressure())  # fmt: skip
     result = sim.run()
     return summarize(result, a.background), timeline(result) if seed == a.seed else []
 
 
 def cmd_run(a) -> int:
-    params = _params(a.params)
+    params = _params(a.params, a.no_swap)
     seeds = range(a.seed, a.seed + a.reps)
     try:
         with ProcessPoolExecutor() as pool:
@@ -123,20 +127,25 @@ def cmd_calibrate(a) -> int:
     if not measured:
         print(f"no measured runs under {a.results}", file=sys.stderr)
         return 1
-    hold = calibrate.overheads(measured)
     if a.fit_on:
         runs = set(a.fit_on.split(","))
         for m in measured:
             m.held_out = m.run not in runs
-    params = _params(a.params)
-    fit_loss = None
+    hold = calibrate.overheads(measured)
+    params = _params(a.params, a.no_swap)
+    found = None
     if a.fit:
-        params, fit_loss = calibrate.fit(measured, hold, params, a.iterations)
-        print(json.dumps(params.to_dict(), indent=1))
-    rows = calibrate.compare(measured, params, hold, a.reps)
-    calibrate.write(a.out, rows, params, hold, fit_loss)
+        found = calibrate.fit(measured, hold, params, a.iterations)
+        params = found.params
+        print(json.dumps(found.to_dict(), indent=1))
+    rows = calibrate.compare(measured, replace(params, swap_slowdown=0.0), hold, a.reps)
+    if params.swap_slowdown > 0:
+        rows += calibrate.compare(measured, params, hold, a.reps)
+    calibrate.write(a.out, rows, params, hold, found)
     print(calibrate.table(rows))
-    lh = [r for r in rows if r["leasehold"]]
+    print()
+    print(calibrate.reversal(rows))
+    lh = [r for r in rows if r["leasehold"] and not r["swap_term"]]
     bad = [r for r in lh if abs(r["makespan_s_error"]) > calibrate.TOLERANCE]
     print(f"\n{len(bad)} of {len(lh)} leasehold conditions are more than "
           f"{100 * calibrate.TOLERANCE:.0f}% off on makespan; results in {a.out}")  # fmt: skip
@@ -144,17 +153,17 @@ def cmd_calibrate(a) -> int:
 
 
 def cmd_study(a) -> int:
-    params = _params(a.params)
+    params = _params(a.params, a.no_swap)
     slots = [int(s) for s in a.slots.split(",")]
-    rows = study.study(a.reps, a.points, params, slots)
-    print(study.write(a.out, rows, params, a.reps, a.points))
+    rows, runs = study.study(a.reps, a.points, params, slots)
+    print(study.write(a.out, rows, runs, params, a.reps, a.points))
     return 0
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
     with path.open("w", newline="") as f:
         if rows:
-            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w = csv.DictWriter(f, fieldnames=list(rows[0]), lineterminator="\n")
             w.writeheader()
             w.writerows(rows)
 
@@ -162,6 +171,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m bench.sim", description=__doc__.split("\n")[0])
     parser.add_argument("--params", type=Path, help="parameters from a calibration's JSON")
+    parser.add_argument("--no-swap", action="store_true", help="leave the swap term out")
     sub = parser.add_subparsers(required=True)
 
     run = sub.add_parser("run", help="simulate one condition, several replications")
@@ -176,7 +186,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--headroom", default="auto", help="auto, a count, or auto+N")
     run.add_argument("--memory-budget", help="the [memory] budget, a size such as 7g")
     run.add_argument("--background", type=float, default=1.0, help="busy threads of other work")
-    run.add_argument("--other-gib", type=float, default=2.0, help="memory other work uses")
+    run.add_argument("--other-gib", type=float, default=study.OTHER_GIB,
+                     help="memory other work uses")  # fmt: skip
     run.add_argument("--no-guard", action="store_true", help="leave the memory guard out")
     run.add_argument("--from-run", type=Path, help="a measured run's directory: its plan")
     run.add_argument("--replay", type=Path, help="a measured condition's jobs.csv to replay")

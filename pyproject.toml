@@ -56,11 +56,9 @@ packages = ["src/leasehold"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "import-linter>=2.1", "mcp>=2.3"]
-# The policy simulator (`python -m bench.sim`); never a dependency of the package itself.
-bench = ["simpy>=4.1", "scipy>=1.13"]
-
-[tool.uv]
-default-groups = ["dev", "bench"]
+# The policy simulator (`python -m bench.sim`), installed only on request (`uv sync --group
+# bench`); never a dependency of the package itself.
+bench = ["simpy>=4.1"]
 
 [tool.ruff]
 line-length = 100
