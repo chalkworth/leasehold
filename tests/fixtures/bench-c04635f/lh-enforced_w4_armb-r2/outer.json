@@ -1,0 +1,11 @@
+{
+ "before": {
+  "quiet": true,
+  "skipped": true
+ },
+ "inner_rc": 0,
+ "wall_s": 4.372289170511067,
+ "pswpin": 0,
+ "pswpout": 0,
+ "oom_kill_machine": 0
+}

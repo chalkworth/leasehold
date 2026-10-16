@@ -1,0 +1,5 @@
+condition,jobs,failed,makespan_s,job_mean_s,job_p95_s,wait_mean_s,wait_p95_s,run_mean_s,wake_same_p50_ms,wake_same_p99_ms,wake_same_max_ms,wake_out_p50_ms,wake_out_p99_ms,git_p50_ms,git_p95_ms,oom_kills,oom_kills_machine,swapin_mib,mem_some_max,mem_some_mean,mem_full_max,bench_mem_peak_gib,cpu_busy_mean,cpu_steal_mean,jobs_in_lease_scope,load_before,aborted
+lh-enforced_w4_arma-r1,8,0,5.0,0.5,0.6,0.3,0.4,0.1,0.1,1.86,5.0,0.1,2.81,,,0,0,0.0,0.0,0.0,0.0,12.29,23.0,0.1,8,,
+lh-enforced_w4_armb-r1,8,0,4.0,0.5,0.6,0.3,0.4,0.1,0.1,1.64,3.0,0.1,1.53,,,0,0,0.0,0.0,0.0,0.0,12.29,23.0,0.1,8,,
+lh-enforced_w4_armb-r2,5,0,3.0,0.5,0.5,0.3,0.4,0.1,0.1,1.94,3.0,0.1,1.51,,,0,0,0.0,0.0,0.0,0.0,12.29,15.0,0.0,5,,
+lh-enforced_w4_arma-r2,5,0,3.0,0.5,0.5,0.3,0.3,0.1,0.1,0.35,5.0,0.1,0.36,,,0,0,0.0,0.0,0.0,0.0,12.29,15.0,0.0,5,,

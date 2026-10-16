@@ -1,0 +1,6 @@
+agent,seq,kind,issued,started,ended,done,rc,workers,cgroup
+0,0,cpu,1792186395.2473333,1792186395.544,1792186395.616,1792186395.671449,0,4,/user.slice/user-1000.slice/user@1000.service/leasehold.slice/leasehold-bench_1ec68c.slice/lease-9c6dee106bcc4e0fa5cf434b7aa321d9.scope
+0,1,cpu,1792186395.9517598,1792186396.27,1792186396.347,1792186396.3954108,0,4,/user.slice/user-1000.slice/user@1000.service/leasehold.slice/leasehold-bench_1ec68c.slice/lease-a0f99124144b449f82b6b06c5c3c6180.scope
+0,2,mem,1792186396.4356365,1792186396.764,1792186396.852,1792186396.9459312,0,4,/user.slice/user-1000.slice/user@1000.service/leasehold.slice/leasehold-bench_1ec68c.slice/lease-cfe74aa60b1943e2ae75af25c399cb0e.scope
+0,3,mem,1792186397.0062068,1792186397.341,1792186397.421,1792186397.5293145,0,4,/user.slice/user-1000.slice/user@1000.service/leasehold.slice/leasehold-bench_1ec68c.slice/lease-ba593fcaf228422db921bf0c6e4a0c4e.scope
+0,4,mem,1792186397.8895838,1792186398.192,1792186398.277,1792186398.3701012,0,4,/user.slice/user-1000.slice/user@1000.service/leasehold.slice/leasehold-bench_1ec68c.slice/lease-2045efb04772409dbdd5ec2dfdbd1979.scope
