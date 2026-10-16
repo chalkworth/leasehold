@@ -160,24 +160,55 @@ def scope_argv(
         "--collect",
         f"--unit={unit}",
         f"--slice={slice_}",
-        "-p",
-        f"CPUWeight={min(10_000, max(1, weight) * WEIGHT_PER_SLOT)}",
     ]
-    if hard_cpu:
-        argv += ["-p", f"CPUQuota={max(1, weight) * 100}%"]
-    if memory:
-        argv += ["-p", f"MemoryHigh={memory_to_bytes(memory)}"]
+    for prop in scope_properties(weight=weight, memory=memory, hard_cpu=hard_cpu):
+        argv += ["-p", prop]
     return [*argv, "--"]
 
 
+def scope_properties(
+    *, weight: int, memory: str | None = None, hard_cpu: bool = False
+) -> list[str]:
+    """The unit properties that size a scope to a lease of `weight` slots (and `memory`, a size
+    such as `4g`, when given)."""
+    props = [f"CPUWeight={min(10_000, max(1, weight) * WEIGHT_PER_SLOT)}"]
+    if hard_cpu:
+        props.append(f"CPUQuota={max(1, weight) * 100}%")
+    if memory:
+        props.append(f"MemoryHigh={memory_to_bytes(memory)}")
+    return props
+
+
+def lease_unit(lease_id: str) -> str:
+    """The scope a lease's command runs in: `lease-<id>.scope`."""
+    return f"lease-{unit_part(lease_id)}.scope"
+
+
 def lease_argv(lease_id: str, env: Mapping[str, str] | None = None, **sizes) -> list[str]:
-    """`scope_argv` for a lease's command: `lease-<id>.scope`, in the slice `leasehold run`
-    named in `LEASEHOLD_SLICE`, else in `leasehold.slice`."""
+    """`scope_argv` for a lease's command: `lease_unit`, in the slice `leasehold run` named in
+    `LEASEHOLD_SLICE`, else in `leasehold.slice`."""
     env = os.environ if env is None else env
     slice_ = env.get(ENV_SLICE) or ""
     if not is_session_slice(slice_):
         slice_ = ROOT_SLICE
-    return scope_argv(f"lease-{unit_part(lease_id)}.scope", slice_, **sizes)
+    return scope_argv(lease_unit(lease_id), slice_, **sizes)
+
+
+def update_scope(
+    unit: str, *, weight: int, memory: str | None = None, hard_cpu: bool = False
+) -> str | None:
+    """Size the running scope `unit` to a lease of `weight` slots (and `memory`, when given),
+    as `scope_argv` sized it at the start, until it ends (`systemctl --user set-property
+    --runtime`). Best effort: why it could not be done, or None."""
+    props = scope_properties(weight=weight, memory=memory, hard_cpu=hard_cpu)
+    argv = ["systemctl", "--user", "set-property", "--runtime", unit, *props]
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"cannot resize {unit}: {exc}"
+    if done.returncode != 0:
+        return f"cannot resize {unit}: {done.stderr.strip() or f'exit {done.returncode}'}"
+    return None
 
 
 class CleanupError(RuntimeError):

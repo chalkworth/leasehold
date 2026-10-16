@@ -16,6 +16,7 @@ DOCS = [
     ROOT / "README.md",
     ROOT / "docs" / "reference.md",
     ROOT / "docs" / "bench.md",
+    ROOT / "docs" / "sim.md",
     ROOT / "SECURITY.md",
     ROOT / "CONTRIBUTING.md",
     *sorted((ROOT / "examples").glob("*/README.md")),

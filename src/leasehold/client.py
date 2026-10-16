@@ -72,9 +72,10 @@ class Client:
     def acquire(self, **body) -> dict:
         """Ask for a lease (`POST /v1/acquire`); fields that are None are left out. A daemon
         that does not take a newer field (`OPTIONAL`) is asked again without it: one older than
-        0.3 takes no `memory`, and one from before ranges no `max_weight` (it grants the
-        `weight`) and no `memory_per_slot` (declared instead as `memory`, the `weight`'s worth,
-        which is what such a daemon grants)."""
+        0.3 takes no `memory`, one from before ranges no `max_weight` (it grants the `weight`) and
+        no `memory_per_slot` (declared instead as `memory`, the `weight`'s worth, which is what
+        such a daemon grants), and one from before elastic leases no `elastic` (its lease then
+        keeps the size it is granted)."""
         body = {k: v for k, v in body.items() if v is not None}
         while True:
             try:
@@ -94,6 +95,19 @@ class Client:
     def release(self, lease_id: str) -> dict:
         return self.request("POST", "/v1/release", {"lease_id": lease_id})
 
+    def resize(self, lease_id: str, weight: int) -> dict:
+        """Move an elastic lease to `weight` (`POST /v1/resize`): give slots back, or take the
+        ones its target offers. An `ApiError` with a status under 500 means not now: the
+        growth no longer fits, the lease is gone, or the daemon (one from before elastic
+        leases) has no such route."""
+        return self.request("POST", "/v1/resize", {"lease_id": lease_id, "weight": weight})
+
+    def make_elastic(self, lease_id: str) -> dict:
+        """Make a held range elastic from now on (`POST /v1/elastic`): its weight and target.
+        An `ApiError` with a status under 500 means it cannot be: the lease has no range or is
+        gone, or the daemon (one from before elastic leases) has no such route."""
+        return self.request("POST", "/v1/elastic", {"lease_id": lease_id})
+
     def lend(self, open: bool) -> dict:
         return self.request("POST", "/v1/lend", {"open": open})
 
@@ -103,7 +117,7 @@ class Client:
 
 
 #: The acquire fields a daemon older than this client may not take, and so may be left out.
-OPTIONAL = frozenset({"memory", "max_weight", "memory_per_slot"})
+OPTIONAL = frozenset({"memory", "max_weight", "memory_per_slot", "elastic"})
 
 
 def _without(body: dict, unknown: set[str]) -> dict:

@@ -33,6 +33,7 @@ def test_event_types_are_the_names_clients_see():
         "lend_closed",
         "pool_max",
         "lend_switch",
+        "resized",
     ]
     assert json.dumps({"type": EventType.LEND_SWITCH}) == '{"type": "lend_switch"}'
 

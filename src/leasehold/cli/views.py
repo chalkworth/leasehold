@@ -167,14 +167,18 @@ def _row(x: dict, now: float, state: str) -> tuple[str, ...]:
 
 
 def _weight(x: dict) -> str:
-    """A lease's weight (`3`, or `3/2-4`: granted 3 of the range 2-4), or a waiting item's
-    (`2`, or `2-4`)."""
+    """A lease's weight (`3`, or `3/2-4`: granted 3 of the range 2-4, or `3>4/2-4`: an
+    elastic lease asked to move from 3 to 4), or a waiting item's (`2`, or `2-4`)."""
     least = x.get("min_weight") or x["weight"]
     most = x.get("max_weight") or least
     if most == least:
         return str(x["weight"])
     asked = weights.text(least, most)
-    return asked if "queued_at" in x else f"{x['weight']}/{asked}"
+    if "queued_at" in x:
+        return asked
+    target = x.get("target")
+    now = str(x["weight"]) if target in (None, x["weight"]) else f"{x['weight']}>{target}"
+    return f"{now}/{asked}"
 
 
 def _print_standing(st: dict) -> None:

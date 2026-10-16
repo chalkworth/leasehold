@@ -504,7 +504,7 @@ footer .brand { color: var(--band-ink); margin-right: auto; }
         <div><h3>Claude Code plugin</h3><p>Takes a lease around an agent's heavy commands and labels it with the agent session, so one person's sessions take turns with each other as well as with everyone else.</p></div>
         <div><h3>PATH shims</h3><p>Stand-ins for build and test commands that run the real command under a lease. Agents and scripts get turn-taking without changing how they call their tools.</p></div>
         <div><h3>MCP server</h3><p>Lets an agent ask how busy the machine is, why its work is waiting, and hold a lease, through MCP tools instead of parsing terminal output.</p></div>
-        <div><h3>Jobserver sizing</h3><p>A lease can size a GNU make jobserver, so <code>make -j</code> and other jobserver-aware tools run as many jobs as the lease holds slots, not as many as the machine has cores.</p></div>
+        <div><h3>Jobserver sizing</h3><p>A lease can size a GNU make jobserver, so <code>make</code> and other jobserver-aware tools run as many jobs as the lease holds slots, not as many as the machine has cores.</p></div>
       </div>
     </section>
 
@@ -513,7 +513,7 @@ footer .brand { color: var(--band-ink); margin-right: auto; }
       <p class="lede">Each one is a short, runnable setup in the repository.</p>
       <ul class="ex">
         <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/github-runner">GitHub runner</a><span>Self-hosted runners on one box, each job step holding an <code>external</code> lease weighted by how heavy it is.</span></li>
-        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/test-suite">Test suite and <code>make -j</code></a><span>A test run and a parallel build sized to the slots they hold.</span></li>
+        <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/test-suite">Test suite and a parallel <code>make</code></a><span>A test run and a parallel build sized to the slots they hold.</span></li>
         <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/agents">Several agents, fairly</a><span>Two users and four agent sessions on one machine, taking turns per user and then per session.</span></li>
         <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/lend">Lending and revocation</a><span>An idle machine lends slots; other work arrives and the lent lease is revoked.</span></li>
         <li><a href="https://github.com/chalkworth/leasehold/tree/main/examples/library">Library-only use</a><span>The admission policy as a Python library, with no daemon.</span></li>

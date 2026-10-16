@@ -12,7 +12,8 @@ writing the same ledger, is reported the same way. Each event is a flat dict:
   line), `left` (gave up its place in line), `released`, `ended` (`reason`: `expired`,
   `holder gone`, or `no longer matched` for an observed process that runs on as something its
   rule does not name), `revoked` (`reason`), `lend_opened` and `lend_closed` (`reason`),
-  `pool_max` (`pool`, `max`, `overridden`) and `lend_switch` (`open`).
+  `pool_max` (`pool`, `max`, `overridden`), `lend_switch` (`open`) and `resized` (an elastic
+  lease's `weight` changed, from `previous_weight`).
 
 Events live in memory only: a restarted daemon starts a new sequence, and a reader that asks
 for a `since` from before the ring's oldest event is told some were `dropped`; one that asks for
@@ -41,6 +42,7 @@ class EventType(StrEnum):
     LEND_CLOSED = "lend_closed"
     POOL_MAX = "pool_max"
     LEND_SWITCH = "lend_switch"
+    RESIZED = "resized"
 
 
 #: How many events the ring keeps.
@@ -101,10 +103,10 @@ def changes(
     unmatched: frozenset[Key] = frozenset(),
 ) -> list[dict]:
     """The events that take `before` to `after`: lending, revocations, what ended, what left
-    the line, then what was granted and what joined the line, so a grant follows the release
-    that made room for it. `released` names the leases given back by request since `before`:
-    those end as `released`, others as `ended`; `unmatched` the observed leases given back
-    because their process stopped matching."""
+    the line, what was resized, then what was granted and what joined the line, so a grant
+    follows the release or the shrink that made room for it. `released` names the leases
+    given back by request since `before`: those end as `released`, others as `ended`;
+    `unmatched` the observed leases given back because their process stopped matching."""
     out: list[dict] = []
     if before.lend_open != after.lend_open:
         kind = EventType.LEND_OPENED if after.lend_open else EventType.LEND_CLOSED
@@ -129,6 +131,12 @@ def changes(
     for k, row in before.queue.items():
         if k not in after.queue and k not in after.leases:
             out.append({"type": EventType.LEFT, **_about(row)})
+    for k, row in after.leases.items():
+        old = before.leases.get(k)
+        if old is not None and old.get("weight") != row.get("weight"):
+            out.append(
+                {"type": EventType.RESIZED, **_about(row), "previous_weight": old.get("weight")}
+            )
     for k, row in after.leases.items():
         if k not in before.leases:
             out.append({"type": EventType.GRANTED, **_about(row), "waited": k in before.queue})

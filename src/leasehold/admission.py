@@ -287,15 +287,20 @@ class AdmissionPolicy:
         """The most weight an item asking `weight` to `max_weight` (None: `weight`) may be
         granted in `pool` now: `max_weight` cut to what one item could ever be admitted with
         there (`heaviest`) and, with a per-slot size, to the slots whose memory fits
-        `lease_memory`; never below `weight`, which is judged on its own."""
+        `lease_memory`; never below `weight`, which is judged on its own. An item declaring no
+        memory on a host with a budget counts the assumed size per slot, and is cut the same
+        way."""
         most = weight if max_weight is None else max_weight
         if most <= weight:
             return weight
         most = min(most, self.heaviest(pool, memory, memory_per_slot))
         p = self.pools.get(pool)
         limit = None if p is None else self.lease_memory.get(p.host)
-        if limit is not None and memory_per_slot:
-            most = min(most, limit // memory_per_slot)
+        per_slot = memory_per_slot
+        if per_slot is None and memory is None and p is not None and p.host in self.memory:
+            per_slot = self.assumed_memory.get(p.host)
+        if limit is not None and per_slot:
+            most = min(most, limit // per_slot)
         return max(weight, most)
 
     def heaviest(
@@ -806,21 +811,30 @@ class _Kept:
 
 
 def _extra_fits(
-    tally: _Tally, policy: AdmissionPolicy, pool: str, kept: _Kept, memory: int
+    tally: _Tally,
+    policy: AdmissionPolicy,
+    pool: str,
+    kept: _Kept,
+    memory: int,
+    *,
+    headroom: str = "keep",
 ) -> bool:
     """Whether one extra slot, counting `memory`, fits `pool` with room left for what `kept`
-    names and the pool's `headroom` (the limits in the module docstring)."""
+    names and the pool's and its host's `headroom` (the limits in the module docstring), as
+    `headroom` says: "keep" all of it, "leave-one" one slot of each (none where it is 0), "use"
+    none, so the slot may take it (an elastic lease gives it back, `leasehold.elastic`)."""
     p = policy.pools[pool]
-    # A later change may relax headroom for leases that can give slots back.
+    pool_headroom = _headroom_left(p.headroom, headroom)
+    host_headroom = _headroom_left(_host_headroom(policy, p.host), headroom)
     mine = 1 + kept.slots.get(pool, 0)
-    if tally.used.get(pool, 0) + mine + p.headroom > top(policy, pool):
+    if tally.used.get(pool, 0) + mine + pool_headroom > top(policy, pool):
         return False
     others = sum(
         max(0, q.reserved - tally.used.get(name, 0), _reachable(tally, policy, name, kept))
         for name, q in policy.pools.items()
         if name != pool and q.host == p.host
     )
-    spare = mine + _host_headroom(policy, p.host)
+    spare = mine + host_headroom
     if policy.slots.get(p.host, 0) - tally.host_used.get(p.host, 0) - spare < others:
         return False
     budget = policy.memory.get(p.host)
@@ -828,8 +842,17 @@ def _extra_fits(
         return True
     # The memory the host's headroom would count, at the assumed size or this slot's if larger,
     # so a request like this one that the headroom keeps room for can start.
-    room = _host_headroom(policy, p.host) * max(policy.assumed_memory.get(p.host, 0), memory)
+    room = host_headroom * max(policy.assumed_memory.get(p.host, 0), memory)
     return tally.memory.get(p.host, 0) + memory + kept.memory.get(p.host, 0) + room <= budget
+
+
+def _headroom_left(headroom: int, mode: str) -> int:
+    """The part of `headroom` an extra slot leaves free under `mode` (`_extra_fits`)."""
+    if mode == "use":
+        return 0
+    if mode == "leave-one":
+        return min(1, headroom)
+    return headroom
 
 
 def _reachable(tally: _Tally, policy: AdmissionPolicy, pool: str, kept: _Kept) -> int:
