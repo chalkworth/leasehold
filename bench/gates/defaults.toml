@@ -27,8 +27,8 @@ decision = "The first candidate that passes every metric on both workloads, with
 
 [arms]
 control = "lh-enforced@w=4"
-# Filled in after the pilot, best first; at most two.
-candidates = []
+# The pilot's two survivors (bench/gates/pilot.toml), in the order they are tested.
+candidates = ["lh-enforced@w=2-4", "lh-enforced@w=3-3,h=1"]
 
 [order]
 sequential = true    # the second candidate is tested only if the first passes
