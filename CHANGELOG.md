@@ -146,6 +146,9 @@ here.
   - Two new conditions: `lh-jobserver`, whose jobs are make jobserver clients
     (`job.py --jobserver`), and `lh-elastic`, which stops with an error unless the installed
     leasehold has elastic leases.
+  - `lh-elastic` takes `grow=keep|leave-one|use`, the daemon's `[elastic] headroom`.
+    `lh-jobserver` asks `hold --no-elastic` when the installed leasehold has elastic leases,
+    so a range there stays at the size it was granted.
   - Each round runs on its own seed, `--seed-base` plus the round, in a Williams order.
     `--round N` with `--dir DIR` runs one round of a schedule into a results directory.
   - Before each run, the harness waits for swap-in, memory pressure and dirty pages to settle

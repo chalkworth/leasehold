@@ -333,7 +333,7 @@ workers than CPUs, which real builds do not; that favours the conditions that ov
 | `lh-hardcpu-greedy` | as `lh-enforced-greedy`, with `[contain] hard_cpu = true` (`CPUQuota` = weight CPUs) |
 | `lh-enforced-declared` | as `lh-enforced`, each `mem` job declaring its size plus 512 MiB (`hold --memory`) |
 | `lh-enforced-v020` | as `lh-enforced`, on the config leasehold 0.2.0's `init --user` wrote, weight 4 |
-| `lh-jobserver` | as `lh-enforced`, through `hold --jobserver`; each job is a client of its lease's jobserver (`job.py --jobserver`) |
+| `lh-jobserver` | as `lh-enforced`, through `hold --jobserver`; each job is a client of its lease's jobserver (`job.py --jobserver`); a range stays the size it was granted (`hold --no-elastic`, where the installed leasehold has elastic leases) |
 | `lh-elastic` | as `lh-jobserver`, with elastic leases (`hold --elastic`); stops before anything runs if the installed leasehold has none |
 
 The leasehold conditions (all `lh-` ones but `lh-enforced-v020`) take parameters after an `@`,
@@ -343,13 +343,16 @@ so one condition can be run at several settings, for example `lh-enforced@w=2-4,
 |---|---|
 | `w=N` or `w=MIN-MAX` | what every job asks `hold --weight` for; `w=N` also sets the config's `[commands] heavy_weight` |
 | `h=N` | `[pools.work] headroom` |
+| `grow=MODE` | `[elastic] headroom`, `lh-elastic` only: how much of the pools' headroom a growing lease leaves free, `keep` (all of it, the default), `leave-one` (one slot) or `use` (none) |
 | `kept=N` | CPUs kept back: the config is rendered for `CPUs - N` slots, which sets the ceiling, both pools' `max` and the work pool's reservation as `init` would |
 | `mem=declared` | each `mem` job declares its size plus 512 MiB, as in `lh-enforced-declared` |
 | `budget=SIZE` | `[memory] budget` (otherwise `--memory-budget`, else `auto`) |
 | `arm=TAG` | nothing; it tells two arms of one condition apart, as in an A/A run |
 
 In `--conditions`, a part with `=` and no `@` belongs to the condition before it:
-`unmanaged,lh-enforced@w=3-3,h=1,kept=3` is two conditions. Each condition has one spelling,
+`unmanaged,lh-enforced@w=3-3,h=1,kept=3` is two conditions. A range with and without elastic
+leases, and an elastic lease at each `grow`, are `lh-jobserver@w=2-8`, `lh-elastic@w=2-8`,
+`lh-elastic@w=2-8,grow=leave-one` and `lh-elastic@w=2-8,grow=use`. Each condition has one spelling,
 with its parameters in the order above and `w=3-3` written `w=3`, and a directory name such as
 `lh-enforced_w3_h1_kept3-r2`. The jobserver client cuts its work into 4 tasks per CPU. It
 always runs one task on the token it holds by being started, and runs each further task only

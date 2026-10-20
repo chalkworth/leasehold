@@ -6,10 +6,15 @@ A condition is a name from `CONDITIONS`, optionally followed by `@` and paramete
     lh-enforced@w=3-3,h=1,kept=3
     lh-enforced@w=2-4,mem=declared
     lh-enforced@w=4,arm=b
+    lh-elastic@w=2-8,grow=leave-one
 
 * `w`: what every job asks `hold --weight` for, `N` or `MIN-MAX`; with `N`, also the config's
   `[commands] heavy_weight`. Without it, jobs ask for `--weights`.
 * `h`: `[pools.work] headroom`, a count of slots.
+* `grow`: `[elastic] headroom`, how much of the pools' headroom an elastic lease's growth
+  leaves free: `keep` (all of it), `leave-one` or `use` (none). Only `lh-elastic` takes it.
+  `lh-jobserver` asks `hold --no-elastic` where `hold` has it, so its ranges keep the size
+  they were granted.
 * `kept`: CPUs kept back from the slots. The config is rendered for `cpus - kept` slots, which
   sets the ceiling, the pools' `max` and the work pool's reservation as `init` would.
 * `mem=declared`: each `mem` job declares its size plus 512 MiB (`hold --memory`).
@@ -51,9 +56,11 @@ CONDITIONS = {
 #: The conditions that run by default: all but those that need a jobserver.
 DEFAULT_CONDITIONS = [c for c in CONDITIONS if c not in ("lh-jobserver", "lh-elastic")]
 #: The parameters, in their canonical order.
-KEYS = ("w", "h", "kept", "mem", "budget", "arm")
+KEYS = ("w", "h", "grow", "kept", "mem", "budget", "arm")
 _WEIGHT = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
 _SIZE = re.compile(r"^[0-9]+(\.[0-9]+)?[kmgt]?b?$", re.IGNORECASE)
+#: The choices of `grow`, the same as `leasehold.elastic.HEADROOM_MODES`.
+GROW_MODES = ("keep", "leave-one", "use")
 _TAG = re.compile(r"^[A-Za-z0-9]+$")
 #: What `mem=declared` declares for a mem job beyond the block it touches.
 DECLARED_EXTRA = 512 * (1 << 20)
@@ -83,6 +90,7 @@ class Condition:
     base: str
     weight: tuple[int, int] | None = None
     headroom: int | None = None
+    grow: str | None = None
     kept: int | None = None
     declared: bool = False
     budget: str | None = None
@@ -103,6 +111,7 @@ class Condition:
         values = {
             "w": weight_text(self.weight) if self.weight else None,
             "h": None if self.headroom is None else str(self.headroom),
+            "grow": self.grow,
             "kept": None if self.kept is None else str(self.kept),
             "mem": "declared" if self.declared and self.base != "lh-enforced-declared" else None,
             "budget": self.budget,
@@ -164,6 +173,11 @@ def parse(text: str) -> Condition:
     weight = parse_weight(params["w"]) if "w" in params else None
     headroom = _count(text, "h", params.get("h"))
     kept = _count(text, "kept", params.get("kept"))
+    grow = params.get("grow")
+    if grow is not None and base != "lh-elastic":
+        raise ValueError(f"{text!r}: only lh-elastic takes grow")
+    if grow is not None and grow not in GROW_MODES:
+        raise ValueError(f"{text!r}: grow is one of {', '.join(GROW_MODES)}")
     mem = params.get("mem")
     if mem not in (None, "declared", "assumed"):
         raise ValueError(f"{text!r}: mem is 'declared' or 'assumed'")
@@ -177,6 +191,7 @@ def parse(text: str) -> Condition:
         base,
         weight=weight,
         headroom=headroom,
+        grow=grow,
         kept=kept,
         declared=mem == "declared" or base == "lh-enforced-declared",
         budget=budget,
@@ -289,6 +304,13 @@ def config(
         text = text.replace(line, f'budget = "{budget}"', 1)
     if condition.headroom is not None:
         text = _insert_after(text, "[pools.work]", f"headroom = {condition.headroom}")
+    if condition.grow is not None:
+        table = text.find("\n[elastic]\n")
+        line = 'headroom = "keep"'
+        at = text.find(line, table) if table >= 0 else -1
+        if at < 0:
+            raise ValueError('the generated config has no [elastic] headroom = "keep" to replace')
+        text = text[:at] + f'headroom = "{condition.grow}"' + text[at + len(line) :]
     if condition.weight is not None:
         least, most = condition.weight
         line = (
@@ -320,4 +342,5 @@ def summary(text: str) -> dict:
         "memory_budget": raw.get("memory", {}).get("budget"),
         "heavy_weight": raw.get("commands", {}).get("heavy_weight", 4),
         "hard_cpu": raw.get("contain", {}).get("hard_cpu", False),
+        "elastic_headroom": raw.get("elastic", {}).get("headroom", "keep"),
     }

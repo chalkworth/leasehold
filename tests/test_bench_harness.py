@@ -29,6 +29,7 @@ import run as bench  # noqa: E402
 import schedule  # noqa: E402
 import washout  # noqa: E402
 
+from leasehold.elastic import DEFAULT_HEADROOM, HEADROOM_MODES  # noqa: E402
 from leasehold.machine import load  # noqa: E402
 
 RUN = BENCH / "run.py"
@@ -81,6 +82,9 @@ def test_a_list_keeps_each_conditions_parameters_together():
         "lh-enforced@mem=some",
         "lh-enforced@w=2,w=3",
         "lh-enforced@budget=lots",
+        "lh-enforced@grow=use",
+        "lh-jobserver@grow=use",
+        "lh-elastic@grow=all",
     ],
 )
 def test_a_bad_condition_is_refused(text):
@@ -132,6 +136,40 @@ def test_a_ranged_condition_leaves_the_rules_and_kept_defaults_alone(init_text, 
     assert tomllib.loads(hard)["contain"]["hard_cpu"] is True
     old, _ = _config(init_text, "lh-enforced-v020", tmp_path, memory_budget="7g")
     assert "memory" not in tomllib.loads(old)
+
+
+def test_an_elastic_condition_sets_how_growth_leaves_the_headroom(init_text, tmp_path):
+    assert conds.GROW_MODES == HEADROOM_MODES
+    c = conds.parse("lh-elastic@grow=leave-one,w=2-8")
+    assert c.grow == "leave-one" and c.elastic
+    assert c.text == "lh-elastic@w=2-8,grow=leave-one"
+    assert c.slug == "lh-elastic_w2-8_growleave-one"
+    assert conds.parse(c.text) == c
+    for mode in conds.GROW_MODES:
+        text, cfg = _config(init_text, f"lh-elastic@w=2-8,grow={mode}", tmp_path)
+        assert cfg.elastic.headroom == mode
+        assert conds.summary(text)["elastic_headroom"] == mode
+    plain, cfg = _config(init_text, "lh-elastic@w=2-8", tmp_path)
+    assert cfg.elastic.headroom == DEFAULT_HEADROOM
+    assert conds.summary(plain)["elastic_headroom"] == DEFAULT_HEADROOM
+
+
+@pytest.mark.parametrize(
+    ("condition", "flag"),
+    [("lh-jobserver@w=2-8", "--no-elastic"), ("lh-elastic@w=2-8,grow=use", "--elastic")],
+)
+def test_a_jobserver_condition_says_whether_its_lease_is_elastic(
+    condition, flag, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(bench, "elastic_supported", lambda: True)
+    spec = {"work": {"cpu": 1000}, "mem_bytes": 1 << 20}
+    setup = bench.Setup(condition, spec, tmp_path)
+    setup.sockdir = tmp_path
+    argv = setup.argv(0, "cpu")
+    hold = argv[: argv.index("--")]
+    assert flag in hold and "--jobserver" in hold
+    assert hold[hold.index("--weight") + 1] == "2-8"
+    assert {"--elastic", "--no-elastic"} & set(hold) == {flag}
 
 
 def test_a_kept_count_that_leaves_no_slot_is_refused(init_text, tmp_path):
