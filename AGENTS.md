@@ -6,8 +6,8 @@ here.
 ## Checks
 
 ```sh
-uv sync --group bench     # the bench group adds SimPy; without it tests/test_sim.py is skipped
-uv run pytest -q          # about a minute; daemon tests use real unix sockets under /tmp
+uv sync --group bench     # the bench group adds SimPy, which the simulator needs
+uv run pytest -q          # daemon tests use real unix sockets under /tmp; an empty run passes
 uv run ruff check && uv run ruff format --check
 uv run lint-imports       # the layer contracts in .importlinter
 ```
@@ -44,8 +44,13 @@ uv run lint-imports       # the layer contracts in .importlinter
 ## Conventions
 
 - Comments and docstrings state what is guaranteed, once, in plain words. No task history.
-- New behaviour comes with a test that would fail without it. Daemon behaviour is tested
-  against a real daemon on a temporary socket (`tests/support.py`).
+- Tests are for observable contracts: an exit code, a refusal, a status field, an error code,
+  a config error, what a lease is granted. A change to one comes with a test that would fail
+  without it; add a case to an existing test or table before writing a new test. Daemon
+  behaviour is tested against a real daemon on a temporary socket (`tests/support.py`).
+- No tests of code leasehold does not own (libraries, the standard library, pydantic's own
+  checks) and no tests that restate the implementation. Where state matters, check it in the
+  code: raise an exception or `assert` the invariant there rather than pin it in a test.
 - Every change to a public name, config key, CLI flag, exit code, status field or error code is
   listed in `CHANGELOG.md` under the next release.
 - `.agents/skills/` and `.claude/skills/` hold skills vendored from
