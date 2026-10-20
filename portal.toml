@@ -1,0 +1,65 @@
+# leasehold's portal pipeline: what a branch goes through before its pull request.
+# Every key is described in portal's docs/configuration.md.
+schema = 1
+
+[pipeline]
+steps = ["base", "tests", "review", "cleanup", "pr"]
+recheck = ["tests"]
+
+[steps.base]
+kind = "base_check"
+on_failure = "continue"
+
+# The checks in AGENTS.md. The bench group brings SimPy, which tests/test_sim.py needs.
+[steps.tests]
+kind = "command"
+commands = [
+    "uv sync --frozen --group bench",
+    "uv run pytest -q",
+    "uv run ruff check",
+    "uv run ruff format --check",
+    "uv run lint-imports",
+]
+max_attempts = 2
+
+[steps.review]
+kind = "review"
+# The default lenses, plus leasehold's own in .portal/lenses/.
+lenses = ["standards", "adversarial", "advocate:user", "maintainability", "daemon", "public-text"]
+context_files = ["AGENTS.md"]
+nit_checks = ["uv run pytest -q -x"]
+
+# The mechanical lenses run once, in round 1, on a cheaper pool.
+[steps.review.lens.standards]
+pool = "mechanical"
+rounds = "first"
+
+[steps.review.lens.maintainability]
+pool = "mechanical"
+rounds = "first"
+
+[steps.review.lens.public-text]
+pool = "mechanical"
+
+# Locking, the ledger and admission are where a plausible change does the most harm, so the
+# strongest models read them.
+[steps.review.lens.daemon]
+pool = "lead"
+
+# A machine's config.toml may give this pool other agents; tier and selection stay as here.
+[pools.mechanical]
+tier = 3
+selection = "random"
+fallback = "reviewers"
+agents = ["claude:sonnet:low", "codex:gpt-6.1-sol:low"]
+
+[steps.cleanup]
+kind = "command"
+commands = ["uv run ruff format", "uv run ruff check --fix"]
+commit = true
+
+# Opens the pull request and stops there: the maintainer merges.
+[steps.pr]
+kind = "pr"
+file_issues = "deferred"
+on_failure = "stop"
