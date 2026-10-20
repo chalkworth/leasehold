@@ -624,6 +624,11 @@ The gates so far:
   margins are 1.05 for makespan and job mean (1.10 if the plan widens them) and 1.5 for wake p99
   and `git status` p95. The pilot kept `w=2-4` and `w=3-3,h=1`, which are its candidates in
   that order. The A/A run froze its plan at 12 rounds, two Williams cycles of its three arms.
+- [`defaults-h1.toml`](../bench/gates/defaults-h1.toml): the same gate with `w=3-3,h=1` as its
+  only candidate, on new seeds (2000 on). In the defaults gate `w=2-4` broke the hard rules
+  with OOM kills, so by that gate's order `w=3-3,h=1` was never tested. The same A/A run froze
+  this gate's plan, `bench/gates/defaults-h1.plan.toml`, at 8 rounds, four Williams cycles of
+  its two arms. If the candidate fails, leasehold keeps fixed weight 4.
 
 The workloads are pinned in the gate files and `compare` checks them against each run's
 `spec.json`:
