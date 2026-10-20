@@ -338,6 +338,13 @@ here.
   budget, to the slots whose assumed memory fits `[ceiling] memory`, as it already cut a
   range declaring memory per slot.
 
+### Fixed
+
+- Finding the daemon no longer crashes when the system socket sits in a directory the user may
+  not enter, as on a machine whose system daemon keeps `/run/leasehold` to its own group. That
+  socket is passed over with "permission denied", and every command that finds a daemon (`leases`,
+  `status`, `doctor`, `hold`) goes on to the next candidate.
+
 ### Compatibility
 
 - A daemon that does not serve `threads` gives every rule `"jobs"`, the thread count of 0.3.0,
