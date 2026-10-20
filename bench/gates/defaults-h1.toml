@@ -1,0 +1,91 @@
+# Confirmatory gate for `w=3-3,h=1` alone, after the defaults gate (bench/gates/defaults.toml)
+# failed `w=2-4` on OOM kills and so, by its order, never tested `w=3-3,h=1`. Written before
+# the runs, on new seeds (2000 on) so that no round of the defaults gate is reused. The rounds and
+# margins come from the frozen plan, which the same A/A run gives by the [plan] rule below:
+#   python bench/run.py compare AA-DIR --gate bench/gates/aa.toml \
+#       --plan bench/gates/defaults-h1.toml --arms 2 --write bench/gates/defaults-h1.plan.toml
+# Each workload runs into its own directory, scheduled for 12 rounds so that an extension needs
+# no new schedule:
+#   python bench/run.py --conditions 'lh-enforced@w=4,lh-enforced@w=3-3,h=1' \
+#       --rounds 12 --seed-base 2000 --workload full --dir DIR-FULL \
+#       --agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo
+#   python bench/run.py --conditions 'lh-enforced@w=4,lh-enforced@w=3-3,h=1' \
+#       --rounds 12 --seed-base 2000 --workload memheavy --dir DIR-MEMHEAVY \
+#       --agents 8 --duration 240 --mem-gib 3 --cap-gib 7 --git-repo /var/tmp/bigrepo
+# Add --round N to run one round at a time. The blind look after round 4, then the verdict:
+#   python bench/run.py compare DIR-FULL DIR-MEMHEAVY --gate bench/gates/defaults-h1.toml --blind-sd
+#   python bench/run.py compare DIR-FULL DIR-MEMHEAVY --gate bench/gates/defaults-h1.toml
+
+[gate]
+name = "defaults-h1"
+kind = "confirmatory"
+intent = "Decide whether a hold --weight range, with its pool settings (kept CPUs, headroom), can replace fixed weight 4 as what leasehold recommends for test runs."
+objective = "Per candidate against fixed weight 4: one-sided 95% upper bounds on the geometric-mean ratios of makespan, mean job time, wake p99 and git status p95, on both workloads."
+stop = "The frozen plan's rounds, a whole number of Williams cycles (8, 10 or 12 for two arms; 12 for three). After 4 rounds, a look blind to which arm leads may add whole cycles, up to 12, and is fixed once taken. The verdict uses exactly that many valid rounds; no early stop for success or failure."
+decision = "If the candidate passes every metric on both workloads, with no hard rule broken, it becomes the recommended range and pool settings. If not, leasehold keeps fixed weight 4 as what it recommends."
+
+[arms]
+control = "lh-enforced@w=4"
+# The defaults gate's second candidate, never tested there.
+candidates = ["lh-enforced@w=3-3,h=1"]
+
+[[workloads]]
+name = "full"
+args = "--agents 8 --duration 240 --mem-gib 2.5 --cap-gib 7 --git-repo /var/tmp/bigrepo"
+
+# Memory-heavy: larger mem jobs under the same cap. Memory is not declared, so this tests what
+# a user who sets only a weight range gets.
+[[workloads]]
+name = "memheavy"
+args = "--agents 8 --duration 240 --mem-gib 3 --cap-gib 7 --git-repo /var/tmp/bigrepo"
+
+# `planned` is replaced by the frozen plan's rounds.
+[rounds]
+planned = 8
+look_after = 4
+extend_to = 12
+seed_base = 2000
+
+# The plan rule, the defaults gate's. Joint power is the chance a candidate equal to the
+# control passes every metric on both workloads, taking them as independent. The gate runs the
+# fewest rounds from 8 to 12 that are a whole number of Williams cycles of its arms (8, 10 or 12
+# for two arms; only 12 for three, which is why max_rounds is 12) and whose joint power, at the
+# A/A paired SDs, is at least 0.8. If none reaches it, the makespan and job mean margins become
+# 1.10 and the search runs again. The latency margins never widen. If it still falls short, the
+# gate runs the largest whole-cycle count and the plan states its joint power as a known limit.
+# The A/A runs only `full`; its SDs stand for `memheavy` too. `compare --plan --write` freezes
+# the result in `frozen`, and the gate takes its rounds and margins from there.
+[plan]
+joint_power = 0.8
+min_rounds = 8
+max_rounds = 12
+widen = { makespan_s = 1.10, job_mean_s = 1.10 }
+frozen = "defaults-h1.plan.toml"
+
+[test]
+alpha = 0.05         # one-sided, for each metric; a candidate must pass them all
+
+# Co-primary metrics: the upper bound of the geometric-mean ratio must be under the margin.
+[[metrics]]
+name = "makespan_s"
+margin = 1.05        # the frozen plan's margin replaces this; 1.10 if widened
+
+[[metrics]]
+name = "job_mean_s"
+margin = 1.05        # the frozen plan's margin replaces this; 1.10 if widened
+
+[[metrics]]
+name = "wake_same_p99_ms"
+margin = 1.5
+
+[[metrics]]
+name = "git_p95_ms"
+margin = 1.5
+
+# Checked on every candidate run up to the last round the verdict uses; one break fails it.
+# Failed jobs and OOM kills count in any arm; a control run with either makes its round invalid.
+[hard]
+failed_jobs = 0
+oom_kills = 0
+psi_max = 10.0           # memory PSI some, highest sample in the run, percent
+psi_over_control = 5.0   # breaks only when also this many points above the control's round
