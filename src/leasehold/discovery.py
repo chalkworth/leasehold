@@ -14,6 +14,7 @@ candidate and why it was taken or passed over.
 from __future__ import annotations
 
 import errno
+import os
 import socket as _socket
 import tomllib
 from collections.abc import Mapping
@@ -38,8 +39,14 @@ class Candidate:
 
 def probe(path: Path, timeout: float = 1.0) -> tuple[bool, str]:
     """Whether a daemon accepts connections on `path`, and why not."""
-    if not path.exists():
+    try:
+        os.stat(path)
+    except FileNotFoundError:
         return False, "no socket there"
+    except PermissionError:
+        return False, "permission denied (its directory is closed to you; not in its group?)"
+    except OSError as exc:
+        return False, exc.strerror or str(exc)
     sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:

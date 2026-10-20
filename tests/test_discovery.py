@@ -97,6 +97,22 @@ def test_a_socket_this_user_may_not_open_is_passed_over_with_the_reason(sock_dir
         server.close()
 
 
+def test_a_socket_in_a_directory_this_user_may_not_enter_is_passed_over(sock_dir):
+    """A system daemon's directory closed to other users (0750) is passed over, not crashed on."""
+    if os.getuid() == 0:
+        return  # root enters anything
+    closed = sock_dir / "closed"
+    closed.mkdir()
+    server = listening(closed / "leasehold.sock")
+    try:
+        os.chmod(closed, 0o000)
+        answers, reason = discovery.probe(closed / "leasehold.sock")
+        assert not answers and "permission denied" in reason
+    finally:
+        os.chmod(closed, 0o700)
+        server.close()
+
+
 def test_no_runtime_directory_is_reported_not_crashed_on():
     found = discovery.candidates(None, None, {"HOME": "/nonexistent"}, probe=lambda p: (False, "-"))
     assert found[1].source == "user" and "XDG_RUNTIME_DIR" in found[1].reason
