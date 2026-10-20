@@ -69,6 +69,7 @@ source_modules =
     leasehold.exits
     leasehold.client
     leasehold.facts
+    leasehold.cgroup
     leasehold.access
     leasehold.paths
     leasehold.jobs

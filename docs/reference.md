@@ -268,6 +268,18 @@ and `[[standing]]` memory with it, and undeclared work by its slots and the guar
 size to assume a fixed amount a slot, or `"0g"` to count only what is declared (`leasehold
 doctor` warns about that).
 
+Your own daemon also looks for a cgroup memory limit, the lowest `memory.max` or `memory.high`
+set on its own cgroup or any cgroup above it (cgroup v2 only). A container, a systemd slice or
+scope with `MemoryMax` or `MemoryHigh`, or a user slice with a limit sets one. The daemon runs
+beside your work, so the same limit holds that work too, and the machine's free memory says
+nothing about it. When that limit is below the machine's memory, an `"auto"` budget is the
+limit less the same share of it that `kept` is of the machine: with `kept = "25%"` and a 7 GiB
+limit on a 16 GiB machine, the budget is 5.25 GiB (12 GiB without the limit), and `assumed_per_slot = "auto"`
+divides that among the slots. The limit is read when the daemon starts. A budget given as a
+size is left as it is. The machine's daemon (`serve --system`) ignores its own cgroup, since
+the work it admits runs in other parts of the tree. `status` reports the limit and the cgroup
+that sets it (`memory.limit_bytes`, `memory.limit_cgroup`).
+
 A budget given as a size must be more than 0 and more than the `[[standing]]` memory, and
 leave room beside it for every `[[commands.rule]]`'s declared memory, or the config does not
 load. An `"auto"` budget worked out as 0 (`kept` at or over the machine's memory) stops the
@@ -297,7 +309,9 @@ sets `MemoryHigh`. A 0.2 config gains the table with `leasehold setup --upgrade-
 ### Memory guard
 
 Running out of memory is what freezes a machine that runs too much at once. Your own daemon
-watches memory pressure (PSI `some avg10`) and available memory. The guard goes on when
+watches memory pressure (PSI `some avg10`) and available memory. Available memory is
+`MemAvailable`, or less under a cgroup memory limit (see [Memory](#memory)): that limit less
+what the cgroup that sets it uses now, its inactive file cache left out, read on every tick. The guard goes on when
 pressure passes `[guard] memory_pressure_on` (20%) or available memory drops under
 `min_available`, and off once pressure has stayed at most `memory_pressure_off` (5%), with
 memory above the floor, for `settle_s` (30 s). While it is on, what runs keeps running, and
@@ -1194,12 +1208,15 @@ when a field is removed or changes meaning:
   pool's `held_weight` includes its standing weight; `running` counts leases only;
   `memory_counted_bytes` is the memory admission counts there (0 without `[memory]`);
 - `load`: `pressure`, `loadavg`, `mem_available_bytes`, `mem_total_bytes`, `cgroup_v2`,
-  `slices`;
+  `slices`, `memory_limit` (the cgroup memory limit as last read: `cgroup`, `limit_bytes` and
+  `used_bytes`, or null without one);
 - `lend`: `eligible`, `reason`, `quiet_since`, `quiet_s`, `window`, `pools`, `switch`;
 - `guard`: `enabled`, `on`, `pressing` (whether the last reading was itself over a threshold,
   not only settling), `reason`, `since`, `memory_pressure_on`, `memory_pressure_off`,
   `min_available_bytes`, `settle_s`;
-- `memory`: `counted` (whether the config has `[memory]`), `machine_bytes`, and with it
+- `memory`: `counted` (whether the config has `[memory]`), `machine_bytes`, `limit_bytes` and
+  `limit_cgroup` (the cgroup memory limit when the daemon started, and the cgroup that sets it,
+  or null without one), and with it
   `budget_bytes`, `kept_bytes`, `assumed_per_slot_bytes`, `held_bytes` (counted now, standing
   memory included) and `free_now_bytes` (what may start now while the guard is on, else null);
   without it these are null;

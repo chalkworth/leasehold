@@ -182,7 +182,8 @@ class MemorySettings(_Strict):
     `[[commands.rule]]` `memory`), or, declaring none, its weight times `assumed_per_slot`."""
 
     #: `auto`: the machine's memory less `kept`; or a size such as `48g` (not 0, which would let
-    #: nothing that counts memory start).
+    #: nothing that counts memory start). Under a cgroup memory limit lower than the machine's
+    #: memory, `auto` is that limit less the same share of it that `kept` is of the machine.
     budget: str = "auto"
     #: With `budget = "auto"`, the memory kept back for you: a size, or a percentage of the
     #: machine's memory.
@@ -208,10 +209,15 @@ class MemorySettings(_Strict):
 
     _kept = field_validator("kept")(_share)
 
-    def resolve(self, *, memory_bytes: int, slots: int) -> MemoryBudget:
-        """The budget for a machine of `memory_bytes` and `slots` slots. An `auto` budget that
-        comes to nothing (`kept` at or over the machine's memory) is a ValueError, as a budget
-        of 0 given as a size is when the config loads."""
+    def resolve(
+        self, *, memory_bytes: int, slots: int, limit_bytes: int | None = None
+    ) -> MemoryBudget:
+        """The budget for a machine of `memory_bytes` and `slots` slots, its work held to
+        `limit_bytes` by a cgroup (None: no limit). An `auto` budget under a limit lower than
+        the machine's memory is the limit less the same share of it that `kept` is of the
+        machine; a budget given as a size is left as it is. An `auto` budget that comes to
+        nothing (`kept` at or over the machine's memory) is a ValueError, as a budget of 0
+        given as a size is when the config loads."""
         if self.budget == "auto":
             if self.kept.endswith("%"):
                 kept = int(memory_bytes * float(self.kept[:-1]) / 100)
@@ -223,6 +229,9 @@ class MemorySettings(_Strict):
                     f"memory: kept = {self.kept!r} leaves no budget of the machine's "
                     f"{memory_bytes / 2**30:.1f} GiB, so nothing that counts memory could start"
                 )
+            if limit_bytes is not None and limit_bytes < memory_bytes:
+                kept = kept * limit_bytes // memory_bytes
+                budget = max(1, limit_bytes - kept)
         else:
             kept, budget = 0, memory_to_bytes(self.budget)
         if self.assumed_per_slot == "auto":
@@ -649,11 +658,16 @@ class MachineConfig(_Strict):
                 totals[item.pool] = totals.get(item.pool, 0) + memory_to_bytes(item.memory)
         return totals
 
-    def memory_budget(self, memory_bytes: int) -> MemoryBudget | None:
-        """`[memory]` for a machine of `memory_bytes`, or None when memory is not counted."""
+    def memory_budget(
+        self, memory_bytes: int, limit_bytes: int | None = None
+    ) -> MemoryBudget | None:
+        """`[memory]` for a machine of `memory_bytes` whose work a cgroup holds to
+        `limit_bytes` (None: no limit), or None when memory is not counted."""
         if self.memory is None:
             return None
-        return self.memory.resolve(memory_bytes=memory_bytes, slots=self.ceiling.slots)
+        return self.memory.resolve(
+            memory_bytes=memory_bytes, slots=self.ceiling.slots, limit_bytes=limit_bytes
+        )
 
     @property
     def guarded(self) -> bool:
@@ -668,6 +682,7 @@ class MachineConfig(_Strict):
         max_overrides: dict[str, int] | None = None,
         capped: bool = False,
         memory_bytes: int | None = None,
+        memory_limit: int | None = None,
         memory_free: int | None = None,
         memory_short: str | None = None,
         memory_pressing: bool = False,
@@ -677,7 +692,8 @@ class MachineConfig(_Strict):
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
         `capped` every pool held to its reservation. With a `[memory]` table and the machine's
-        `memory_bytes`, the memory budget too (with `[[standing]]` memory held), and
+        `memory_bytes` (and the cgroup `memory_limit` its work is held to, if any), the memory
+        budget too (with `[[standing]]` memory held), and
         `memory_free` (why: `memory_short`) as the most one decision may admit (an item short
         of it lets others by unless it is in `memory_overdue`), and with
         `memory_pressing` nothing new admitted at all. `lease_memory` is the most memory one
@@ -695,7 +711,7 @@ class MachineConfig(_Strict):
                 update["headroom"] = 0
             pools[name] = pool.model_copy(update=update) if update else pool
         pool_set = PoolSet.model_construct(slots=pool_set.slots, pools=pools)
-        budget = None if memory_bytes is None else self.memory_budget(memory_bytes)
+        budget = None if memory_bytes is None else self.memory_budget(memory_bytes, memory_limit)
         unqueued = frozenset({observed}) if observed else frozenset()
         if budget is None:
             return AdmissionPolicy.from_pools(

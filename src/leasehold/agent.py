@@ -32,7 +32,7 @@ from leasehold.guard import Guard, Reading
 from leasehold.kinds import GRANTED, PREEMPTIBLE, LeaseKind
 from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
 from leasehold.lend import LendGate, Observation, Verdict
-from leasehold.load import LoadReader, some_avg10
+from leasehold.load import LoadReader, available, some_avg10
 from leasehold.machine import MachineConfig, lease_memory_limit
 from leasehold.proctable import Proc
 from leasehold.units import declared_to_bytes, memory_to_bytes
@@ -166,7 +166,10 @@ class MachineAgent:
         self.ledger.settle_s = config.elastic.settle_s
         self.ledger.headroom = config.elastic.headroom
         slices = list(dict.fromkeys(config.load.slices))
-        self.loader = load if load is not None else LoadReader(slices)
+        # A user's daemon runs beside the user's work (in the same container, user slice or
+        # limited scope), so a limit on its own cgroup bounds that work too. The machine's
+        # daemon serves work that runs in users' slices and services elsewhere in the tree.
+        self.loader = load if load is not None else LoadReader(slices, memory_limit=config.for_user)
         self._clock = clock
         #: The clock the guard's dwell and settling, and the settle window, are measured on:
         #: one that never steps. A fake `clock` (in tests and the demo) stands in for it too.
@@ -176,7 +179,11 @@ class MachineAgent:
         memory = self.facts.get("memory_bytes") or self.limits.memory_bytes
         #: The machine's memory, which `[memory]` budgets.
         self.memory_bytes = memory
-        self.budget = config.memory_budget(memory)
+        bound = self.loader.limit()
+        #: The cgroup memory limit the daemon's work was held to when it started, as
+        #: `LoadReader.limit` reports it (None: none); an `auto` budget is worked out under it.
+        self.memory_limit: dict | None = bound
+        self.budget = config.memory_budget(memory, self._limit_bytes)
         self.guard = Guard(config.guard, min_available=config.guard.floor(memory))
         self.verdict = Verdict(False, None, "not measured yet", None)
         self.last_load: dict | None = None
@@ -205,6 +212,10 @@ class MachineAgent:
         self._queued_at: dict[tuple[str, str], float] = {}
         self._seen = self._snapshot()
 
+    @property
+    def _limit_bytes(self) -> int | None:
+        return None if self.memory_limit is None else self.memory_limit["limit_bytes"]
+
     # --- decisions -----------------------------------------------------------------------------
 
     def policy(self) -> AdmissionPolicy:
@@ -217,6 +228,7 @@ class MachineAgent:
             max_overrides=self._max_overrides,
             capped=guarding and not counting,
             memory_bytes=self.memory_bytes,
+            memory_limit=self._limit_bytes,
             memory_free=free,
             memory_short=self._memory_short() if free is not None else None,
             memory_pressing=guarding and counting and self.guard.pressing,
@@ -227,11 +239,12 @@ class MachineAgent:
     def memory_free(self) -> int:
         """While the guard is on, the most memory new work may count: none while a reading is
         over a threshold, else what is available above the floor less what leases granted
-        within `settle_s` count (they may not have grown to it yet). A lease not yet seen
-        granted counts as recent. Observed leases are not counted: they record processes
-        already running, whose memory `MemAvailable` already leaves out."""
-        available = (self.last_load or {}).get("mem_available_bytes")
-        if self.guard.pressing or available is None or self.budget is None:
+        within `settle_s` count (they may not have grown to it yet). Available is the smaller
+        of `MemAvailable` and what the cgroup limit leaves (`leasehold.load.available`). A
+        lease not yet seen granted counts as recent. Observed leases are not counted: they
+        record processes already running, whose memory is already in use."""
+        free = available(self.last_load)
+        if self.guard.pressing or free is None or self.budget is None:
             return 0
         since = self._monotonic() - self.config.guard.settle_s
         recent = sum(
@@ -247,7 +260,7 @@ class MachineAgent:
             if row["scope"] != OBSERVED_SCOPE
             and self._granted_at.get(_grant_key(row), since) >= since
         )
-        return max(0, available - self.guard.min_available - recent)
+        return max(0, free - self.guard.min_available - recent)
 
     def _overdue(self) -> frozenset[tuple[str, str]]:
         """The waiting items that have waited longer than `settle_s`, measured on `_monotonic`:
@@ -393,7 +406,7 @@ class MachineAgent:
                         now=self._monotonic(),
                         at=self._clock(),
                         memory_pressure=some_avg10(load["pressure"]["memory"]),
-                        available=load.get("mem_available_bytes"),
+                        available=available(load),
                     )
                 )
             if not self._lend_off:
@@ -850,6 +863,7 @@ class MachineAgent:
             lend=self._lend_status(),
             guard=self.guard.status() | {"enabled": self.config.guarded},
             budget=self.budget,
+            memory_limit=self.memory_limit,
             leases=listing["leases"],
             queue=listing["queue"],
             now=self._clock(),
