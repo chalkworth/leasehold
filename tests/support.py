@@ -120,6 +120,11 @@ class FakeLoad:
         self.by_cgroup: dict[str, dict] = {}
         #: `MemAvailable` in bytes, as a test sets it.
         self.available: int | None = 8 << 30
+        #: The cgroup memory limit, as `LoadReader.limit` reports it (None: none).
+        self.memory_limit: dict | None = None
+
+    def limit(self) -> dict | None:
+        return self.memory_limit
 
     def set(self, **pressure: float | None) -> None:
         self.values |= pressure
@@ -136,6 +141,7 @@ class FakeLoad:
             "mem_total_bytes": 16 << 30,
             "cgroup_v2": True,
             "slices": {},
+            "memory_limit": self.memory_limit,
         }
 
 

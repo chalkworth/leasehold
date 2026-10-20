@@ -63,6 +63,8 @@ def test_declared_and_assumed_memory_count_against_the_budget(tmp_path):
     assert st["memory"] == {
         "counted": True,
         "machine_bytes": 16 * G,
+        "limit_bytes": None,
+        "limit_cgroup": None,
         "budget_bytes": 12 * G,
         "kept_bytes": 4 * G,
         "assumed_per_slot_bytes": 3 * G,

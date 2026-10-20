@@ -238,9 +238,29 @@ here.
   `Conflict`; `leasehold.machine.ElasticSettings` and `MachineConfig.elastic`;
   `leasehold.events.EventType.RESIZED`; `leasehold.hold.hold` and `run_leased` take
   `elastic`, and `child_env` takes `elastic_jobs`.
+- Status reports the cgroup memory limit (see Changed): `memory.limit_bytes` and
+  `memory.limit_cgroup` give the limit the daemon started under and the cgroup that sets it,
+  and `load.memory_limit` (`cgroup`, `limit_bytes`, `used_bytes`) the limit as last read. All
+  are null without a limit.
+- New public names for it: the module `leasehold.cgroup` (`own_cgroup`, `limit`, `used`,
+  `MemoryLimit`, `LIMIT_FILES`); `leasehold.load.available`, `LoadReader.limit` and its
+  `memory_limit` argument; `limit_bytes` for `MemorySettings.resolve` and
+  `MachineConfig.memory_budget`, and `memory_limit` for `MachineConfig.policy`;
+  `MachineAgent.memory_limit`; `memory_limit` for `leasehold.status.report` and `limit` for
+  `leasehold.status.memory`.
 
 ### Changed
 
+- Your own daemon's `"auto"` memory budget follows the cgroup memory limit its work runs
+  under: the lowest `memory.max` or `memory.high` on the daemon's cgroup and the cgroups above
+  it (cgroup v2). When that limit is below the machine's memory, the budget is the limit less
+  the same share of it that `kept` is of the machine, so `assumed_per_slot = "auto"` shrinks
+  with it. Inside a 7 GiB scope on a 16 GiB machine the budget was 12 GiB and is now 5.25 GiB. A
+  budget given as a size is left alone, and the machine's daemon (`serve --system`) still
+  budgets the whole machine.
+- The memory guard's available memory, and so what may start while it is on, is the smaller of
+  `MemAvailable` and what that limit leaves: the limit less what the limiting cgroup uses now,
+  without its inactive file cache.
 - A client's `--config` outranks `$LEASEHOLD_SOCKET`: it takes the socket of the config the
   flag names before the environment's, so a command inside `hold` can still name another
   daemon. `serve` is unchanged.

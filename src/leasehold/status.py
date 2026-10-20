@@ -115,14 +115,24 @@ def with_counted(policy: AdmissionPolicy, items: list[dict]) -> list[dict]:
 
 
 def memory(
-    budget: MemoryBudget | None, policy: AdmissionPolicy, leases: list[dict], machine_bytes: int
+    budget: MemoryBudget | None,
+    policy: AdmissionPolicy,
+    leases: list[dict],
+    machine_bytes: int,
+    limit: dict | None = None,
 ) -> dict:
-    """The memory budget as status reports it: `counted` false (and the rest None) when the
-    config has no `[memory]` table."""
+    """The memory budget as status reports it: `counted` false (and the budget's fields None)
+    when the config has no `[memory]` table. `limit_bytes` and `limit_cgroup` are the cgroup
+    memory limit the daemon's work was held to when it started, None without one."""
+    bound = {
+        "limit_bytes": None if limit is None else limit["limit_bytes"],
+        "limit_cgroup": None if limit is None else limit["cgroup"],
+    }
     if budget is None:
         return {
             "counted": False,
             "machine_bytes": machine_bytes,
+            **bound,
             "budget_bytes": None,
             "kept_bytes": None,
             "assumed_per_slot_bytes": None,
@@ -133,6 +143,7 @@ def memory(
     return {
         "counted": True,
         "machine_bytes": machine_bytes,
+        **bound,
         "budget_bytes": budget.budget,
         "kept_bytes": budget.kept,
         "assumed_per_slot_bytes": budget.assumed_per_slot,
@@ -185,6 +196,7 @@ def report(
     leases: list[dict],
     guard: dict | None = None,
     budget: MemoryBudget | None = None,
+    memory_limit: dict | None = None,
     queue: list[dict],
     now: float,
     version: str,
@@ -216,7 +228,13 @@ def report(
         "load": load,
         "lend": lend,
         "guard": guard,
-        "memory": memory(budget, policy, leases, facts.get("memory_bytes") or limits.memory_bytes),
+        "memory": memory(
+            budget,
+            policy,
+            leases,
+            facts.get("memory_bytes") or limits.memory_bytes,
+            memory_limit,
+        ),
         "contain": config.contain.model_dump(),
         "standing": standing(config),
         "observe": observing(config, leases),

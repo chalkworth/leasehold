@@ -4,7 +4,11 @@
   `some` and `full`, as `avg10`/`avg60` percentages;
 * `/proc/loadavg` and `MemAvailable` from `/proc/meminfo`;
 * per configured cgroup (systemd slices such as `work.slice`): CPU used since the last reading,
-  from `cpu.stat`'s `usage_usec`, as cores, `memory.current`, and the slice's own PSI.
+  from `cpu.stat`'s `usage_usec`, as cores, `memory.current`, and the slice's own PSI;
+* when asked for (`memory_limit`), the lowest memory limit on this process's own cgroup and its
+  ancestors (`leasehold.cgroup`), with what the cgroup that sets it uses now (its inactive
+  file cache left out). `available` is then the smaller of `MemAvailable` and what is left
+  under that limit.
 
 Anything missing -- no PSI (an older or a container kernel), cgroup v1, a slice not created
 yet -- is reported as None (unknown), never an error. Roots and the clock are injectable.
@@ -16,6 +20,7 @@ import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from leasehold import cgroup
 from leasehold.facts import meminfo
 
 RESOURCES = ("cpu", "memory", "io")
@@ -76,8 +81,11 @@ class LoadReader:
         proc: Path = Path("/proc"),
         cgroup_root: Path = Path("/sys/fs/cgroup"),
         clock: Callable[[], float] = time.monotonic,
+        memory_limit: bool = False,
     ) -> None:
         self.slices = list(slices)
+        #: Whether to read the memory limit of this process's own cgroup.
+        self.memory_limit = memory_limit
         self.proc = proc
         self.cgroup_root = cgroup_root
         self._clock = clock
@@ -92,6 +100,23 @@ class LoadReader:
             return {r: parse_pressure(_read(self.proc / "pressure" / r)) for r in RESOURCES}
         base = self.cgroup_root / cgroup
         return {r: parse_pressure(_read(base / f"{r}.pressure")) for r in RESOURCES}
+
+    def limit(self) -> dict | None:
+        """The lowest memory limit on this process's cgroup and its ancestors, as
+        `{"cgroup", "limit_bytes", "used_bytes"}` (`used_bytes`: what that cgroup uses now,
+        `leasehold.cgroup.used`, None if unreadable); None when not asked for, or when no
+        cgroup sets one."""
+        if not self.memory_limit:
+            return None
+        own = cgroup.own_cgroup(self.proc)
+        found = None if own is None else cgroup.limit(self.cgroup_root, own)
+        if found is None:
+            return None
+        return {
+            "cgroup": found.cgroup,
+            "limit_bytes": found.limit_bytes,
+            "used_bytes": cgroup.used(self.cgroup_root, found.cgroup),
+        }
 
     def _slice(self, name: str, now: float) -> dict | None:
         base = self.cgroup_root / name
@@ -124,7 +149,21 @@ class LoadReader:
             "mem_total_bytes": mem.get("MemTotal"),
             "cgroup_v2": v2,
             "slices": {name: (self._slice(name, now) if v2 else None) for name in self.slices},
+            "memory_limit": self.limit(),
         }
+
+
+def available(reading: dict | None) -> int | None:
+    """The memory available to new work in `reading` (a `LoadReader.read`): `MemAvailable`,
+    or less when a cgroup limit leaves less (its limit less what that cgroup uses now). None
+    when neither is known."""
+    reading = reading or {}
+    machine = reading.get("mem_available_bytes")
+    bound = reading.get("memory_limit")
+    if not bound or bound.get("used_bytes") is None:
+        return machine
+    left = max(0, bound["limit_bytes"] - bound["used_bytes"])
+    return left if machine is None else min(machine, left)
 
 
 def some_avg10(pressure: dict | None) -> float | None:

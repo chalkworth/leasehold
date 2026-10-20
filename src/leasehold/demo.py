@@ -83,6 +83,10 @@ class ScriptedLoad:
         cpu = max(0.0, self._cpu)
         return {"cpu": self._psi(cpu), "memory": self._psi(cpu / 12), "io": self._psi(cpu / 5)}
 
+    def limit(self) -> dict | None:
+        """No cgroup memory limit: the demo's machine is all its own."""
+        return None
+
     def read(self) -> dict:
         held = self._held()
         return {
@@ -92,6 +96,7 @@ class ScriptedLoad:
             "mem_total_bytes": 64 << 30,
             "cgroup_v2": True,
             "slices": {},
+            "memory_limit": None,
         }
 
 
