@@ -1,0 +1,30 @@
+# The frozen plan of gate `defaults-h1`, written by `bench/run.py compare --plan --write`
+# from an A/A run. The gate takes its rounds and margins from this file; write it
+# again rather than editing it.
+gate = "defaults-h1"
+arms = 2
+cycle = 2
+rounds = 8
+workloads = 2
+alpha = 0.05
+target = 0.8
+joint_power = 0.9999999999999911
+reached = true
+aa_gate = "aa"
+aa_dirs = ["e0-aa"]
+aa_paths = ["e0-aa"]
+aa_gate_file = "bench/gates/aa.toml"
+aa_data_sha256 = "7982e06356cecec52de8691b198204614c299d78df615406fa1107d8ebf41737"
+aa_git_sha = "47b427bc1eaf84f91cd2b3de44b2491685c21212"
+
+[margins]
+makespan_s = 1.05
+job_mean_s = 1.05
+wake_same_p99_ms = 1.5
+git_p95_ms = 1.5
+
+[sds]
+makespan_s = 0.0
+job_mean_s = 0.0
+wake_same_p99_ms = 0.05889151782819169
+git_p95_ms = 0.020486129309377363

@@ -925,7 +925,7 @@ def test_compare_says_when_the_order_is_not_a_whole_williams_cycle():
 
 def test_the_gate_files_load_and_pin_their_workloads():
     pinned = {}
-    for name in ("aa", "pilot", "defaults"):
+    for name in ("aa", "pilot", "defaults", "defaults-h1"):
         g = gate.load_gate(BENCH / "gates" / f"{name}.toml")
         assert g["gate"]["kind"] in gate.KINDS
         pinned |= {(name, w["name"]): w["sizes"] for w in g["workloads"]}
@@ -933,6 +933,14 @@ def test_the_gate_files_load_and_pin_their_workloads():
     assert raw["arms"]["candidates"] == ["lh-enforced@w=2-4", "lh-enforced@w=3-3,h=1"]
     frozen = tomllib.loads((BENCH / "gates" / "defaults.plan.toml").read_text())
     assert (frozen["gate"], frozen["arms"], frozen["rounds"]) == ("defaults", 3, 12)
+    h1 = tomllib.loads((BENCH / "gates" / "defaults-h1.toml").read_text())
+    assert h1["arms"] == {"control": "lh-enforced@w=4", "candidates": ["lh-enforced@w=3-3,h=1"]}
+    assert h1["rounds"]["seed_base"] == 2000
+    assert {k: v for k, v in h1.items() if k not in ("gate", "arms", "rounds", "plan")} == {
+        k: v for k, v in raw.items() if k not in ("gate", "arms", "rounds", "plan", "order")
+    }
+    frozen = tomllib.loads((BENCH / "gates" / "defaults-h1.plan.toml").read_text())
+    assert (frozen["gate"], frozen["arms"], frozen["rounds"]) == ("defaults-h1", 2, 8)
     assert [m["margin"] for m in raw["metrics"]] == [1.05, 1.05, 1.5, 1.5]
     assert raw["plan"] == {
         "joint_power": 0.8,
