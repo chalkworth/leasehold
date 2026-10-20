@@ -30,14 +30,15 @@ same lists, so every condition does the same work; only how the jobs are started
 * `lh-enforced-v020`: as `lh-enforced`, on the config leasehold 0.2.0's `init --user` wrote
   for this machine (no memory counted) with every job at 0.2.0's built-in weight, 4;
 * `lh-jobserver`: as `lh-enforced`, through `hold --jobserver`, with jobs that are clients of
-  the lease's jobserver (`job.py --jobserver`);
+  the lease's jobserver (`job.py --jobserver`), and leases that are never elastic
+  (`hold --no-elastic`, where the installed leasehold has elastic leases);
 * `lh-elastic`: as `lh-jobserver`, with elastic leases (`hold --elastic`). It needs a leasehold
   that has them, and stops with an error before anything runs if the installed one does not.
 
 The leasehold conditions take parameters (`bench/conditions.py`): `lh-enforced@w=2-4,h=1`
 asks for 2-4 slots with a work-pool headroom of 1; `kept=N` keeps N CPUs back from the slots,
-`mem=declared` declares memory, `budget=7g` sets the memory budget, and `arm=b` tells two arms
-of one condition apart.
+`grow=use` lets an `lh-elastic` lease grow into the headroom, `mem=declared` declares memory,
+`budget=7g` sets the memory budget, and `arm=b` tells two arms of one condition apart.
 
 leasehold's conditions run a private user-mode daemon on a socket of their own, with the
 config `leasehold init --user` writes for this machine (its `[memory] budget` replaced by
@@ -71,6 +72,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import functools
 import gzip
 import json
 import math
@@ -427,6 +429,8 @@ class Setup:
             declared = ["--memory", f"{size}b"] if self.cond.declared else []
             jobserver = ["--jobserver"] if self.cond.jobserver else []
             elastic = ["--elastic"] if self.cond.elastic else []
+            if self.cond.jobserver and not self.cond.elastic and elastic_supported():
+                elastic = ["--no-elastic"]
             return [
                 *leasehold_cli(),
                 "hold",
@@ -485,6 +489,7 @@ def init_config() -> str:
     )
 
 
+@functools.cache
 def elastic_supported() -> bool:
     """Whether the installed leasehold's `hold` has elastic leases (`--elastic`)."""
     done = subprocess.run(
