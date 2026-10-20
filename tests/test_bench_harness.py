@@ -887,13 +887,14 @@ def test_compare_says_when_the_order_is_not_a_whole_williams_cycle():
 
 def test_the_gate_files_load_and_pin_their_workloads():
     pinned = {}
-    for name in ("aa", "pilot"):
+    for name in ("aa", "pilot", "defaults"):
         g = gate.load_gate(BENCH / "gates" / f"{name}.toml")
         assert g["gate"]["kind"] in gate.KINDS
         pinned |= {(name, w["name"]): w["sizes"] for w in g["workloads"]}
-    with pytest.raises(SystemExit, match="candidates is empty"):
-        gate.load_gate(BENCH / "gates" / "defaults.toml")
     raw = tomllib.loads((BENCH / "gates" / "defaults.toml").read_text())
+    assert raw["arms"]["candidates"] == ["lh-enforced@w=2-4", "lh-enforced@w=3-3,h=1"]
+    frozen = tomllib.loads((BENCH / "gates" / "defaults.plan.toml").read_text())
+    assert (frozen["gate"], frozen["arms"], frozen["rounds"]) == ("defaults", 3, 12)
     assert [m["margin"] for m in raw["metrics"]] == [1.05, 1.05, 1.5, 1.5]
     assert raw["plan"] == {
         "joint_power": 0.8,

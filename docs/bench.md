@@ -619,8 +619,8 @@ The gates so far:
   a generated heavy rule: `[commands] heavy_weight` takes one number, not a range. Its rounds
   and margins come from its frozen plan, `bench/gates/defaults.plan.toml`. Before widening, the
   margins are 1.05 for makespan and job mean (1.10 if the plan widens them) and 1.5 for wake p99
-  and `git status` p95. Its candidates are filled in after the pilot, and `compare` refuses it
-  until they are and its plan is frozen.
+  and `git status` p95. The pilot kept `w=2-4` and `w=3-3,h=1`, which are its candidates in
+  that order. The A/A run froze its plan at 12 rounds, two Williams cycles of its three arms.
 
 The workloads are pinned in the gate files and `compare` checks them against each run's
 `spec.json`:
