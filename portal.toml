@@ -10,9 +10,12 @@ recheck = ["tests"]
 kind = "base_check"
 on_failure = "continue"
 
-# The checks in AGENTS.md. The bench group brings SimPy, which tests/test_sim.py needs.
+# The checks in AGENTS.md. The bench group brings SimPy, which tests/test_sim.py needs. They
+# run on the `gate` runner that the machine's config.toml declares, which falls back as it says
+# there when its host is down.
 [steps.tests]
 kind = "command"
+runner = "gate"
 commands = [
     "uv sync --frozen --group bench",
     "uv run pytest -q",
