@@ -316,7 +316,7 @@ class Lease:
         self.kind: str | None = request["kind"]
         self._take(self._granted)
         self._ttl = float(self._granted["ttl_s"])
-        self._interval = max(0.05, self._ttl / 3)
+        self._interval = self._ttl / 3
         self._quick = client
         if isinstance(client, _client.Client):
             # Calls that must not hold the next renewal up wait at most one interval.
@@ -362,7 +362,10 @@ class Lease:
 
     def _renew_until_released(self) -> None:
         last_ok = time.monotonic()
-        while not self._stop.wait(self._interval):
+        next_attempt = last_ok + self._interval
+        pending = False
+        while not self._stop.wait(max(0.0, next_attempt - time.monotonic())):
+            next_attempt = time.monotonic() + self._interval
             try:
                 renewal = self._quick.renew(self.lease_id)
             except (_client.Unavailable, _client.ApiError):
@@ -371,7 +374,8 @@ class Lease:
             if verdict in ("ok", "revoked"):
                 last_ok = time.monotonic()
             if verdict == "ok":
-                self._take(renewal)
+                if not pending:
+                    self._take(renewal)
             elif verdict == "revoked":
                 # Renewals go on, so the weight stays held while the caller stops its work, until
                 # the revoke grace ends and the daemon no longer knows the lease ("lost").
@@ -379,10 +383,13 @@ class Lease:
             elif verdict == "lost":
                 self._lose("the lease was lost")
                 return
-            elif verdict == "ask" and self.lost is None:
+            if verdict == "ask":
+                pending = True
+            if pending and self.lost is None:
                 again = self._ask_again()
                 if again.get("status") == "granted":
                     self._take(again["lease"], base=again["lease"])
+                    pending = False
                 elif again.get("status") == "refused":
                     self._lose(
                         f"the daemon had lost the lease and now refuses it ({again.get('reason')})"

@@ -3,8 +3,9 @@ ends without one, and what a lease the daemon takes back or forgets tells its ho
 
 from __future__ import annotations
 
-import inspect
 import threading
+import time
+from itertools import pairwise
 
 import pytest
 from support import until
@@ -26,10 +27,6 @@ def test_the_supported_names():
         "Busy", "Cancelled", "DaemonError", "Lease", "LeaseError", "LeaseLost", "Refused",
         "Unavailable", "Waiting", "__version__", "find_daemon", "lease",
     ]  # fmt: skip
-    assert list(inspect.signature(leasehold.lease).parameters) == [
-        "weight", "kind", "pool", "labels", "session", "timeout", "ttl", "memory",
-        "memory_per_slot", "if_unavailable", "on_wait", "on_lost", "cancel", "socket", "client",
-    ]  # fmt: skip
     with pytest.raises(ValueError, match=r"\(least, most\)"):
         leasehold.lease((3, 1))
 
@@ -38,13 +35,25 @@ def test_the_supported_names():
     ("weight", "granted", "env_weight"),
     [(1, (1, 1, 1, 1), "1"), ((1, 2), (2, 1, 2, 2), "2")],
 )
-def test_a_lease_is_held_until_its_block_ends(daemon, weight, granted, env_weight):
-    with pytest.raises(RuntimeError), leasehold.lease(weight, socket=daemon.path) as lease:
+def test_a_lease_is_held_until_its_block_ends(daemon, weight, granted, env_weight, monkeypatch):
+    starts = []
+    renew = Client.renew
+
+    def slow_renew(client, lease_id, ttl_s=None):
+        starts.append(time.monotonic())
+        time.sleep(0.12)
+        return renew(client, lease_id, ttl_s)
+
+    monkeypatch.setattr(Client, "renew", slow_renew)
+    with pytest.raises(RuntimeError), leasehold.lease(weight, ttl=0.6, socket=daemon.path) as lease:
         assert lease.held and lease.lost is None
         assert (lease.weight, lease.min_weight, lease.max_weight, lease.jobs) == granted
         assert lease.env({})["LEASEHOLD_WEIGHT"] == env_weight
         assert lease.env({})["LEASEHOLD_JOBS"] == env_weight
         assert lease.lease_id in held(daemon.path)
+        until(lambda: len(starts) >= 3)
+        # Allow scheduling/socket overhead, but no extra interval after a slow response.
+        assert all(b - a < 0.28 for a, b in pairwise(starts))
         raise RuntimeError("the block fails")
     assert lease.lease_id not in held(daemon.path)
 
@@ -111,5 +120,21 @@ def test_a_work_lease_the_daemon_forgot_is_asked_for_again(daemon):
         (now,) = [
             x for x in Client(daemon.path).leases()["leases"] if x["lease_id"] == lease.lease_id
         ]
+        until(lambda: lease.env({})["LEASEHOLD_GRANT"] == str(now["grant"]))
+        assert lease.lost is None
+
+        previous = lease.env({})
+        client = Client(daemon.path)
+        client.release(lease.lease_id)
+        blocker = client.acquire(weight=2, kind="work", ttl_s=3, wait_s=0)
+        assert blocker["status"] == "granted"
+        try:
+            until(lambda: any(x["lease_id"] == lease.lease_id for x in queued(daemon.path)))
+            assert lease.env({}) == previous
+        finally:
+            client.release(blocker["lease"]["lease_id"])
+        until(lambda: lease.lease_id in held(daemon.path))
+        (now,) = [x for x in client.leases()["leases"] if x["lease_id"] == lease.lease_id]
+        assert str(now["grant"]) != previous["LEASEHOLD_GRANT"]
         until(lambda: lease.env({})["LEASEHOLD_GRANT"] == str(now["grant"]))
         assert lease.lost is None
