@@ -170,9 +170,29 @@ class Command:
             if contained:
                 settings = lease._answer.get("contain") or {}
                 prefix = scope_prefix(lease.lease_id, weight, settings, memory)
-            if prefix and shutil.which(argv[0], path=env.get("PATH")) is None:
+            if prefix:
+                cwd = popen.get("cwd", os.getcwd())
+                path = env.get("PATH", "")
+                # Resolve relative PATH entries and argv[0] relative to cwd
+                resolved_dirs = []
+                for d in path.split(":") if path else []:
+                    if d == "":
+                        d = cwd
+                    elif not os.path.isabs(d):
+                        d = os.path.join(cwd, d)
+                    resolved_dirs.append(d)
+                resolved_path = ":".join(resolved_dirs)
+                # Determine if argv[0] is a path (contains separator)
+                if "/" in argv[0] or (os.path.sep in argv[0]):
+                    # Resolve relative to cwd
+                    abs_path = os.path.join(cwd, argv[0]) if not os.path.isabs(argv[0]) else argv[0]
+                    if not (os.path.isfile(abs_path) and os.access(abs_path, os.X_OK)):
+                        raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
+                else:
+                    # Search in resolved PATH
+                    if shutil.which(argv[0], path=resolved_path) is None:
+                        raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
                 # Said here: under systemd-run a missing program would be its error, not ours.
-                raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
         group = {"process_group": 0} if tty else {"start_new_session": True}
         try:
             self.process, self.uncontained = contain.spawn(
