@@ -38,22 +38,29 @@ def test_the_supported_names():
 def test_a_lease_is_held_until_its_block_ends(daemon, weight, granted, env_weight, monkeypatch):
     starts = []
     renew = Client.renew
+    interval = 0.6
+    response = 0.5
 
     def slow_renew(client, lease_id, ttl_s=None):
         starts.append(time.monotonic())
-        time.sleep(0.12)
+        time.sleep(response)
         return renew(client, lease_id, ttl_s)
 
     monkeypatch.setattr(Client, "renew", slow_renew)
-    with pytest.raises(RuntimeError), leasehold.lease(weight, ttl=0.6, socket=daemon.path) as lease:
+    with (
+        pytest.raises(RuntimeError),
+        leasehold.lease(weight, ttl=3 * interval, socket=daemon.path) as lease,
+    ):
         assert lease.held and lease.lost is None
         assert (lease.weight, lease.min_weight, lease.max_weight, lease.jobs) == granted
         assert lease.env({})["LEASEHOLD_WEIGHT"] == env_weight
         assert lease.env({})["LEASEHOLD_JOBS"] == env_weight
         assert lease.lease_id in held(daemon.path)
         until(lambda: len(starts) >= 3)
-        # Allow scheduling/socket overhead, but no extra interval after a slow response.
-        assert all(b - a < 0.28 for a, b in pairwise(starts))
+        # Renewals are spaced by the interval, counted from the start of the last one: a slow
+        # response (interval - 0.1s) does not add another interval. Under the old scheduling
+        # the gap was response + interval, so the threshold sits midway between the two.
+        assert all(b - a < interval + response / 2 for a, b in pairwise(starts))
         raise RuntimeError("the block fails")
     assert lease.lease_id not in held(daemon.path)
 
