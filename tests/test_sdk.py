@@ -109,7 +109,7 @@ def test_a_revoked_lend_lease_is_lost(daemon):
 
 
 def test_a_work_lease_the_daemon_forgot_is_asked_for_again(daemon):
-    with leasehold.lease(ttl=0.3, socket=daemon.path) as lease:
+    with leasehold.lease(ttl=3, socket=daemon.path) as lease:
         Client(daemon.path).release(lease.lease_id)
         until(lambda: lease.lease_id in held(daemon.path))
         (now,) = [

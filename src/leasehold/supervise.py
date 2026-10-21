@@ -171,22 +171,36 @@ class Command:
                 settings = lease._answer.get("contain") or {}
                 prefix = scope_prefix(lease.lease_id, weight, settings, memory)
             if prefix:
-                cwd = popen.get("cwd", os.getcwd())
-                path = env.get("PATH", "")
+                cwd = popen.get("cwd")
+                if cwd is None:
+                    try:
+                        cwd = os.getcwd()
+                    except OSError:
+                        cwd = None
+                path = env.get("PATH") or os.defpath
                 # Resolve relative PATH entries and argv[0] relative to cwd
                 resolved_dirs = []
-                for d in path.split(":") if path else []:
+                for d in path.split(":"):
                     if d == "":
-                        d = cwd
-                    elif not os.path.isabs(d):
+                        d = cwd if cwd is not None else ""
+                    elif cwd is not None and not os.path.isabs(d):
                         d = os.path.join(cwd, d)
                     resolved_dirs.append(d)
                 resolved_path = ":".join(resolved_dirs)
-                # Determine if argv[0] is a path (contains separator)
+                # Determine if argv[0] is a path (contains a separator)
                 if "/" in argv[0] or (os.path.sep in argv[0]):
-                    # Resolve relative to cwd
-                    abs_path = os.path.join(cwd, argv[0]) if not os.path.isabs(argv[0]) else argv[0]
-                    if not (os.path.isfile(abs_path) and os.access(abs_path, os.X_OK)):
+                    # Resolve relative to cwd; when cwd is unknown (the caller gave none and
+                    # os.getcwd() failed, as for a deleted directory), skip the check and let
+                    # systemd-run report a missing program.
+                    if os.path.isabs(argv[0]):
+                        abs_path = argv[0]
+                    elif cwd is not None:
+                        abs_path = os.path.join(cwd, argv[0])
+                    else:
+                        abs_path = None
+                    if abs_path is not None and not (
+                        os.path.isfile(abs_path) and os.access(abs_path, os.X_OK)
+                    ):
                         raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
                 else:
                     # Search in resolved PATH
