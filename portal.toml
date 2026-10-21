@@ -10,17 +10,28 @@ recheck = ["tests"]
 kind = "base_check"
 on_failure = "continue"
 
-# The checks in AGENTS.md. The bench group brings SimPy, which tests/test_sim.py needs.
+# The checks in AGENTS.md. The bench group brings SimPy, which tests/test_sim.py needs. pytest
+# runs last, so the JUnit report `test_time` reads survives on a runner that cleans its
+# checkout before each command.
 [steps.tests]
 kind = "command"
 commands = [
     "uv sync --frozen --group bench",
-    "uv run pytest -q",
     "uv run ruff check",
     "uv run ruff format --check",
     "uv run lint-imports",
+    "uv run pytest -q --junitxml=junit.xml",
 ]
 max_attempts = 2
+
+# No test may take more than 10 s, nor, once there are 20 tests, more than 20 times the
+# average and 2 s. The suite was empty when these were set, so they are a starting point to
+# recalibrate from real durations.
+[steps.tests.test_time]
+report = "junit.xml"
+max_ratio = 20
+min_seconds = 2
+max_seconds = 10
 
 [steps.review]
 kind = "review"
