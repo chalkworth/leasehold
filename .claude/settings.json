@@ -11,6 +11,19 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v portal >/dev/null 2>&1 || exit 0; m=$(portal hook claude-code growth 2>/dev/null) || exit 0; [ -n \"$m\" ] || exit 0; printf '%s\\n' \"$m\" >&2; exit 2",
+            "timeout": 120,
+            "async": true,
+            "asyncRewake": true
+          }
+        ]
+      }
     ]
   }
 }
