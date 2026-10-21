@@ -24,6 +24,7 @@ jobs:
         run: uvx --from "git+https://github.com/chalkworth/skills@v0.1.0" chalk-skills check
 
   test:
+    name: test (3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
