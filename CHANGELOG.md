@@ -24,6 +24,8 @@ here.
 - `leasehold.hold.lease_request` and `child_env` now live in `leasehold.leasing`, and
   `leasehold.hold` re-exports them. `hold` waits in line through `leasing.wait`, with the same
   messages and exit codes as before.
+- `PROGRESS_S` (and `POLL_S`) moved from `leasehold.hold` to `leasehold.leasing`, and is no
+  longer on `leasehold.hold`.
 - `hold`, and so the PATH shims, sets two groups of variables. The job count goes to
   `LEASEHOLD_JOBS`, `CARGO_BUILD_JOBS`, `CMAKE_BUILD_PARALLEL_LEVEL` and
   `PYTEST_XDIST_AUTO_NUM_WORKERS`. The thread count goes to the variables that limit the

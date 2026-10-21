@@ -70,13 +70,23 @@ def test_a_refusal_is_refused(daemon):
         leasehold.lease(pool="no-such-pool", socket=daemon.path)
 
 
-def test_with_no_daemon_it_runs_unleased_or_fails(sock_dir):
+def test_with_no_daemon_it_runs_unleased_or_fails(sock_dir, monkeypatch, tmp_path):
     missing = sock_dir / "none.sock"
     lease = leasehold.lease(socket=missing)
     assert not lease.held and lease.lease_id is None
     assert "LEASEHOLD_LEASE_ID" not in lease.env({"LEASEHOLD_WANT": "2"})
     with pytest.raises(leasehold.Unavailable):
         leasehold.lease(socket=missing, if_unavailable="fail")
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text("mode = 'nonsense'\n")
+    monkeypatch.setenv("LEASEHOLD_CONFIG", str(bad))
+    lease = leasehold.lease()
+    assert not lease.held and lease.lease_id is None
+    with pytest.raises(leasehold.Unavailable) as unavailable:
+        leasehold.lease(if_unavailable="fail")
+    assert str(bad) in str(unavailable.value)
+    assert "leasehold doctor" in str(unavailable.value)
 
 
 def test_a_revoked_lend_lease_is_lost(daemon):

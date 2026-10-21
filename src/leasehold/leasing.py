@@ -460,7 +460,10 @@ def lease(
     )
     try:
         if client is None:
-            path = find_daemon(socket)
+            try:
+                path = find_daemon(socket)
+            except discovery.DiscoveryError as exc:
+                raise _client.Unavailable(f"{exc}; see `leasehold doctor`") from exc
             if path is None:
                 raise _client.Unavailable("no leasehold daemon answers")
             client = _client.Client(path)
