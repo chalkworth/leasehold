@@ -149,6 +149,10 @@ def lease_request(
     declares in all, `memory_per_slot` for each slot it is granted; None declares none. It never
     asks for an elastic lease: `hold` makes its lease elastic later, once the command's jobs
     show they follow the jobserver (`leasehold.follow`)."""
+    if max_weight is not None and max_weight < weight:
+        raise ValueError(
+            f"max_weight {max_weight} is below weight {weight}; range must be (least, most)"
+        )
     ranged = max_weight is not None and max_weight > weight
     return {
         "kind": kind,
@@ -299,8 +303,7 @@ class Lease:
         self._thread: threading.Thread | None = None
         if client is None or request is None or answer is None:
             self.held = False
-            self.lease_id = self.kind = self.pool = None
-            self.weight = self.min_weight = self.max_weight = self.jobs = None
+            self.lease_id = self.kind = None
             self._granted: dict = {}
             return
         self.held = True
@@ -322,15 +325,37 @@ class Lease:
         )  # fmt: skip
         self._thread.start()
 
+    @property
+    def pool(self) -> str | None:
+        return self._granted.get("pool")
+
+    @property
+    def weight(self) -> int | None:
+        return self._granted.get("weight")
+
+    @property
+    def min_weight(self) -> int | None:
+        return self._granted.get("min_weight")
+
+    @property
+    def max_weight(self) -> int | None:
+        return self._granted.get("max_weight")
+
+    @property
+    def jobs(self) -> int | None:
+        return self._granted.get("jobs")
+
     def _take(self, answer: dict) -> None:
+        updated = dict(self._granted)
         for name in _HELD:
             if answer.get(name) is not None:
-                self._granted[name] = answer[name]
-        self.pool = self._granted.get("pool")
-        self.weight = int(self._granted["weight"])
-        self.min_weight = int(self._granted.get("min_weight") or self.weight)
-        self.max_weight = int(self._granted.get("max_weight") or self.weight)
-        self.jobs = int(self._granted.get("jobs") or self.weight)
+                updated[name] = answer[name]
+        weight = int(updated["weight"])
+        updated["weight"] = weight
+        updated["min_weight"] = int(updated.get("min_weight") or weight)
+        updated["max_weight"] = int(updated.get("max_weight") or weight)
+        updated["jobs"] = int(updated.get("jobs") or weight)
+        self._granted = updated
 
     def _renew_until_released(self) -> None:
         last_ok = time.monotonic()
@@ -390,10 +415,11 @@ class Lease:
         weight it holds now (`child_env`). Unleased, `base` without `LEASEHOLD_WANT`."""
         if not self.held:
             return own_env(base)
+        snapshot = self._granted
         return child_env(
             self.lease_id,
-            self._granted,
-            self.jobs,
+            snapshot,
+            snapshot["jobs"],
             job_env=job_env,
             threads=threads,
             env=base,
@@ -447,6 +473,8 @@ def lease(
     if if_unavailable not in ("run", "fail"):
         raise ValueError(f"if_unavailable {if_unavailable!r} is not run or fail")
     least, most = (weight, weight) if isinstance(weight, int) else weight
+    if most < least:
+        raise ValueError(f"weight range ({least}, {most}) must be (least, most) with most >= least")
     request = lease_request(
         kind=kind,
         pool=pool,

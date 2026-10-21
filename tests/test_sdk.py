@@ -30,6 +30,8 @@ def test_the_supported_names():
         "weight", "kind", "pool", "labels", "session", "timeout", "ttl", "memory",
         "memory_per_slot", "if_unavailable", "on_wait", "on_lost", "cancel", "socket", "client",
     ]  # fmt: skip
+    with pytest.raises(ValueError, match=r"\(least, most\)"):
+        leasehold.lease((3, 1))
 
 
 @pytest.mark.parametrize(
@@ -39,8 +41,12 @@ def test_the_supported_names():
 def test_a_lease_is_held_until_its_block_ends(daemon, weight, granted, env_weight):
     with pytest.raises(RuntimeError), leasehold.lease(weight, socket=daemon.path) as lease:
         assert lease.held and lease.lost is None
-        assert (lease.weight, lease.min_weight, lease.max_weight) == granted
+        assert (lease.weight, lease.min_weight, lease.max_weight, lease.jobs) == (
+            *granted,
+            granted[0],
+        )
         assert lease.env({})["LEASEHOLD_WEIGHT"] == env_weight
+        assert lease.env({})["LEASEHOLD_JOBS"] == env_weight
         assert lease.lease_id in held(daemon.path)
         raise RuntimeError("the block fails")
     assert lease.lease_id not in held(daemon.path)
@@ -74,6 +80,13 @@ def test_with_no_daemon_it_runs_unleased_or_fails(sock_dir, monkeypatch, tmp_pat
     missing = sock_dir / "none.sock"
     lease = leasehold.lease(socket=missing)
     assert not lease.held and lease.lease_id is None
+    assert (lease.weight, lease.min_weight, lease.max_weight, lease.jobs, lease.pool) == (
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
     assert "LEASEHOLD_LEASE_ID" not in lease.env({"LEASEHOLD_WANT": "2"})
     with pytest.raises(leasehold.Unavailable):
         leasehold.lease(socket=missing, if_unavailable="fail")
