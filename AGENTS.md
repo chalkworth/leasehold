@@ -17,7 +17,7 @@ uv run lint-imports       # the layer contracts in .importlinter
 ## Changes reach `main` by pull request
 
 - `main` takes no direct pushes. Work on a branch, open a pull request, and let CI (`lint`,
-  `test (3.12)`, `test (3.13)`, `test (3.14)`, `build`) pass on it, up to date with `main`.
+  `test`, `build`) pass on it, up to date with `main`.
 - Merges are squash merges, made by the maintainer. Portal's `guard` hook in
   `.claude/settings.json` refuses `gh` commands that merge, approve or auto-merge a pull request.
 - Review threads are resolved before merging. The branch is deleted on merge.
