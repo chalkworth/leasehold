@@ -97,6 +97,21 @@ def jobserver_env(env: Mapping[str, str], count: int, fifo: Path) -> dict[str, s
     return out
 
 
+def _findable(program: str, env: Mapping[str, str], cwd: str | None) -> bool:
+    """Whether `program` names an executable from `cwd` (default ours) with `env`'s PATH, as
+    the command would find it. True where `cwd` cannot be known: the check is left to the run."""
+    if cwd is None:
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            return True
+    if "/" in program:
+        found = os.path.join(cwd, program)
+        return os.path.isfile(found) and os.access(found, os.X_OK)
+    dirs = [os.path.join(cwd, d) for d in os.get_exec_path(env)]
+    return shutil.which(program, path=os.pathsep.join(dirs)) is not None
+
+
 class Command:
     """`argv` run under `lease`, started at once. `process` is its `subprocess.Popen` and `pid`
     its process id, which leads its group;
@@ -170,43 +185,9 @@ class Command:
             if contained:
                 settings = lease._answer.get("contain") or {}
                 prefix = scope_prefix(lease.lease_id, weight, settings, memory)
-            if prefix:
-                cwd = popen.get("cwd")
-                if cwd is None:
-                    try:
-                        cwd = os.getcwd()
-                    except OSError:
-                        cwd = None
-                path = env.get("PATH") or os.defpath
-                # Resolve relative PATH entries and argv[0] relative to cwd
-                resolved_dirs = []
-                for d in path.split(":"):
-                    if d == "":
-                        d = cwd if cwd is not None else ""
-                    elif cwd is not None and not os.path.isabs(d):
-                        d = os.path.join(cwd, d)
-                    resolved_dirs.append(d)
-                resolved_path = ":".join(resolved_dirs)
-                # Determine if argv[0] is a path (contains a separator)
-                if "/" in argv[0] or (os.path.sep in argv[0]):
-                    # Resolve relative to cwd; when cwd is unknown (the caller gave none and
-                    # os.getcwd() failed, as for a deleted directory), skip the check and let
-                    # systemd-run report a missing program.
-                    if os.path.isabs(argv[0]):
-                        abs_path = argv[0]
-                    elif cwd is not None:
-                        abs_path = os.path.join(cwd, argv[0])
-                    else:
-                        abs_path = None
-                    if abs_path is not None and not (
-                        os.path.isfile(abs_path) and os.access(abs_path, os.X_OK)
-                    ):
-                        raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
-                else:
-                    # Search in resolved PATH
-                    if shutil.which(argv[0], path=resolved_path) is None:
-                        raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
+            if prefix and not _findable(argv[0], env, popen.get("cwd")):
                 # Said here: under systemd-run a missing program would be its error, not ours.
+                raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
         group = {"process_group": 0} if tty else {"start_new_session": True}
         try:
             self.process, self.uncontained = contain.spawn(

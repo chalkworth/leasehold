@@ -420,16 +420,11 @@ class Lease:
                 return
             if verdict == "ask":
                 pending = True
-                if pending and self.lost is None and self._stop.is_set():
-                    # Release the lease id while pending (the reacquire request)
-                    with contextlib.suppress(_client.Unavailable, _client.ApiError):
-                        self._client.release(self.lease_id)
-                    return
             if pending and self.lost is None and not self._stop.is_set():
                 again = self._ask_again()
                 status = again.get("status")
-                if status == "granted" and self._stop.is_set():
-                    # Released while it asked: what was granted goes back too.
+                if status in ("granted", "queued") and self._stop.is_set():
+                    # Released while it asked: the grant, or the place in line, goes back too.
                     with contextlib.suppress(_client.Unavailable, _client.ApiError):
                         self._client.release(self.lease_id)
                     return
@@ -437,18 +432,12 @@ class Lease:
                     self._take(again["lease"], base=again["lease"])
                     pending = queued = False
                     self._say("the daemon had lost the lease; asked for it again")
-                elif status == "queued":
-                    if self._stop.is_set():
-                        with contextlib.suppress(_client.Unavailable, _client.ApiError):
-                            self._client.release(self.lease_id)
-                        return
-                    if not queued:
-                        queued = True
-                        self._say(
-                            "the daemon had lost the lease; asked for it again, and "
-                            "waiting in line "
-                            f"(place {again.get('position')})"
-                        )
+                elif status == "queued" and not queued:
+                    queued = True
+                    self._say(
+                        "the daemon had lost the lease; asked for it again, and waiting in line "
+                        f"(place {again.get('position')})"
+                    )
                 elif status == "refused":
                     self._lose(
                         f"the daemon had lost the lease and now refuses it ({again.get('reason')})"
