@@ -287,7 +287,9 @@ class Lease:
     thread of its own until `release()`, which leaving its `with` block calls.
 
     `weight` and `jobs` are what it holds now, `min_weight` and `max_weight` its range.
-    `lost` is None, or why the lease was revoked or lost for good."""
+    `lost` is None, or why the lease was revoked or lost for good. A `work` or `external` lease
+    the daemon forgot and grants again holds the new grant (its `LEASEHOLD_GRANT` included);
+    while it waits in line again, it keeps its last grant, as a command under `hold` runs on."""
 
     def __init__(
         self,
@@ -345,8 +347,9 @@ class Lease:
     def jobs(self) -> int | None:
         return self._granted.get("jobs")
 
-    def _take(self, answer: dict) -> None:
-        updated = dict(self._granted)
+    def _take(self, answer: dict, base: dict | None = None) -> None:
+        """Hold what `answer` says, over `base` (default what is held now), in one assignment."""
+        updated = dict(self._granted if base is None else base)
         for name in _HELD:
             if answer.get(name) is not None:
                 updated[name] = answer[name]
@@ -370,13 +373,17 @@ class Lease:
             if verdict == "ok":
                 self._take(renewal)
             elif verdict == "revoked":
+                # Renewals go on, so the weight stays held while the caller stops its work, until
+                # the revoke grace ends and the daemon no longer knows the lease ("lost").
                 self._lose(renewal.get("reason") or "revoked")
             elif verdict == "lost":
                 self._lose("the lease was lost")
                 return
             elif verdict == "ask" and self.lost is None:
                 again = self._ask_again()
-                if again.get("status") == "refused":
+                if again.get("status") == "granted":
+                    self._take(again["lease"], base=again["lease"])
+                elif again.get("status") == "refused":
                     self._lose(
                         f"the daemon had lost the lease and now refuses it ({again.get('reason')})"
                     )
@@ -473,8 +480,6 @@ def lease(
     if if_unavailable not in ("run", "fail"):
         raise ValueError(f"if_unavailable {if_unavailable!r} is not run or fail")
     least, most = (weight, weight) if isinstance(weight, int) else weight
-    if most < least:
-        raise ValueError(f"weight range ({least}, {most}) must be (least, most) with most >= least")
     request = lease_request(
         kind=kind,
         pool=pool,

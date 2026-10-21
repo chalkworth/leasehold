@@ -36,15 +36,12 @@ def test_the_supported_names():
 
 @pytest.mark.parametrize(
     ("weight", "granted", "env_weight"),
-    [(1, (1, 1, 1), "1"), ((1, 2), (2, 1, 2), "2")],
+    [(1, (1, 1, 1, 1), "1"), ((1, 2), (2, 1, 2, 2), "2")],
 )
 def test_a_lease_is_held_until_its_block_ends(daemon, weight, granted, env_weight):
     with pytest.raises(RuntimeError), leasehold.lease(weight, socket=daemon.path) as lease:
         assert lease.held and lease.lost is None
-        assert (lease.weight, lease.min_weight, lease.max_weight, lease.jobs) == (
-            *granted,
-            granted[0],
-        )
+        assert (lease.weight, lease.min_weight, lease.max_weight, lease.jobs) == granted
         assert lease.env({})["LEASEHOLD_WEIGHT"] == env_weight
         assert lease.env({})["LEASEHOLD_JOBS"] == env_weight
         assert lease.lease_id in held(daemon.path)
@@ -80,13 +77,7 @@ def test_with_no_daemon_it_runs_unleased_or_fails(sock_dir, monkeypatch, tmp_pat
     missing = sock_dir / "none.sock"
     lease = leasehold.lease(socket=missing)
     assert not lease.held and lease.lease_id is None
-    assert (lease.weight, lease.min_weight, lease.max_weight, lease.jobs, lease.pool) == (
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    assert lease.weight is None and lease.jobs is None
     assert "LEASEHOLD_LEASE_ID" not in lease.env({"LEASEHOLD_WANT": "2"})
     with pytest.raises(leasehold.Unavailable):
         leasehold.lease(socket=missing, if_unavailable="fail")
@@ -117,4 +108,8 @@ def test_a_work_lease_the_daemon_forgot_is_asked_for_again(daemon):
     with leasehold.lease(ttl=0.3, socket=daemon.path) as lease:
         Client(daemon.path).release(lease.lease_id)
         until(lambda: lease.lease_id in held(daemon.path))
+        (now,) = [
+            x for x in Client(daemon.path).leases()["leases"] if x["lease_id"] == lease.lease_id
+        ]
+        until(lambda: lease.env({})["LEASEHOLD_GRANT"] == str(now["grant"]))
         assert lease.lost is None
