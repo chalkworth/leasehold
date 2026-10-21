@@ -604,7 +604,10 @@ def lease(
             except discovery.DiscoveryError as exc:
                 raise _client.Unavailable(f"{exc}; see `leasehold doctor`") from exc
             if path is None:
-                raise _client.Unavailable("no leasehold daemon answers")
+                raise _client.Unavailable(
+                    "no leasehold daemon answers; start one with `leasehold serve --user` "
+                    "(or `--system`), or see `leasehold doctor`"
+                )
             client = _client.Client(path)
         answer = wait(client, request, timeout, on_wait=on_wait, cancel=cancel)
     except _client.Unavailable as exc:
