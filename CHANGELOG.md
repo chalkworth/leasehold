@@ -26,6 +26,22 @@ here.
   messages and exit codes as before.
 - `PROGRESS_S` moved from `leasehold.hold` to `leasehold.leasing`, and is no longer on
   `leasehold.hold`.
+- `Lease.popen(argv, ...)` runs a command under a lease and returns a `Command`, and
+  `Lease.run(argv, ...)` waits for it and returns its exit status. The command leads a process
+  group of its own and gets the lease's environment. Where the daemon allows, it runs in the
+  lease's systemd scope (`contain=False` turns that off). With `jobserver=True` it gets a make
+  jobserver, and a range then follows its target as `hold --jobserver` does. A revoked `lend`
+  lease stops the group, SIGTERM then SIGKILL after `grace` seconds, and `Command.stopped_for`
+  says why. Whatever the command leaves in its group is stopped when it ends. A command that
+  cannot start raises `NotStarted`. The code is in `leasehold.supervise`.
+- `hold` runs its command through `supervise.Command`, so `hold` and the Python API share one
+  code path. Its messages and exit codes are unchanged. `leasehold.hold.run_leased` no longer
+  takes `socket`: the command gets the lease's daemon as `LEASEHOLD_SOCKET`, and a PATH shim's
+  command now gets it too. `hold.spawn`, `scope_prefix` and `jobserver_env` moved to
+  `leasehold.supervise` (`spawn` is folded into `Command`).
+- A lease released while its renewal thread is asking again for a lease the daemon forgot no
+  longer gets that lease back. If the daemon grants it after the release, it is given back at
+  once.
 - `hold`, and so the PATH shims, sets two groups of variables. The job count goes to
   `LEASEHOLD_JOBS`, `CARGO_BUILD_JOBS`, `CMAKE_BUILD_PARALLEL_LEVEL` and
   `PYTEST_XDIST_AUTO_NUM_WORKERS`. The thread count goes to the variables that limit the

@@ -25,7 +25,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +58,8 @@ POLL_S = 20.0
 CANCEL_POLL_S = 1.0
 #: While nothing changes in line, how often a wait says it is still waiting.
 PROGRESS_S = 20.0
+#: How often a busy follower (`leasehold.follow`) is stepped between renewals.
+_FOLLOW_S = 0.2
 
 _log = logging.getLogger("leasehold")
 
@@ -298,19 +300,26 @@ class Lease:
         answer: dict | None = None,
         *,
         on_lost: Callable[[str], object] | None = None,
+        _say: Callable[[str], object] = lambda _: None,
     ) -> None:
         self.lost: str | None = None
         self._on_lost = on_lost
+        self._say = _say
         self._stop = threading.Event()
+        #: Set to wake the renewal thread: a release, or a follower to step.
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+        self._follower = None
         if client is None or request is None or answer is None:
             self.held = False
             self.lease_id = self.kind = None
             self._granted: dict = {}
+            self._answer: dict = {}
             return
         self.held = True
         self._client = client
         self._request = request
+        self._answer = answer
         self._granted = dict(answer["lease"])
         self.lease_id: str | None = request["lease_id"]
         self.kind: str | None = request["kind"]
@@ -360,12 +369,34 @@ class Lease:
         updated["jobs"] = int(updated.get("jobs") or weight)
         self._granted = updated
 
+    def _follow(self, follower, every: float | None) -> None:
+        """Step `follower` (`leasehold.follow`) from the renewal thread, renewing at least every
+        `every` seconds; None stops it."""
+        self._follower = follower
+        self._interval = max(0.05, self._ttl / 3 if every is None else min(self._ttl / 3, every))
+        self._wake.set()
+
     def _renew_until_released(self) -> None:
-        last_ok = time.monotonic()
+        last_ok = last_attempt = time.monotonic()
         next_attempt = last_ok + self._interval
-        pending = False
-        while not self._stop.wait(max(0.0, next_attempt - time.monotonic())):
-            next_attempt = time.monotonic() + self._interval
+        pending = queued = False
+        while True:
+            follower = self._follower
+            wait = next_attempt - time.monotonic()
+            if follower is not None and follower.busy():
+                wait = min(wait, _FOLLOW_S)
+            self._wake.wait(max(0.0, wait))
+            self._wake.clear()
+            if self._stop.is_set():
+                return
+            # A shorter interval (a follower's) counts from the start of the last renewal.
+            next_attempt = min(next_attempt, last_attempt + self._interval)
+            if time.monotonic() < next_attempt:
+                if follower is not None:
+                    follower.step()
+                continue
+            last_attempt = time.monotonic()
+            next_attempt = last_attempt + self._interval
             try:
                 renewal = self._quick.renew(self.lease_id)
             except (_client.Unavailable, _client.ApiError):
@@ -373,9 +404,11 @@ class Lease:
             verdict = judge(self.kind, renewal, time.monotonic() - last_ok, self._ttl)
             if verdict in ("ok", "revoked"):
                 last_ok = time.monotonic()
-            if verdict == "ok":
-                if not pending:
-                    self._take(renewal)
+            if verdict == "ok" and not pending:
+                self._take(renewal)
+                if follower is not None:
+                    follower.heard(renewal)
+                    follower.step()
             elif verdict == "revoked":
                 # Renewals go on, so the weight stays held while the caller stops its work, until
                 # the revoke grace ends and the daemon no longer knows the lease ("lost").
@@ -385,12 +418,25 @@ class Lease:
                 return
             if verdict == "ask":
                 pending = True
-            if pending and self.lost is None:
+            if pending and self.lost is None and not self._stop.is_set():
                 again = self._ask_again()
-                if again.get("status") == "granted":
+                status = again.get("status")
+                if status == "granted" and self._stop.is_set():
+                    # Released while it asked: what was granted goes back too.
+                    with contextlib.suppress(_client.Unavailable, _client.ApiError):
+                        self._client.release(self.lease_id)
+                    return
+                if status == "granted":
                     self._take(again["lease"], base=again["lease"])
-                    pending = False
-                elif again.get("status") == "refused":
+                    pending = queued = False
+                    self._say("the daemon had lost the lease; asked for it again")
+                elif status == "queued" and not queued:
+                    queued = True
+                    self._say(
+                        "the daemon had lost the lease; asked for it again, and waiting in line "
+                        f"(place {again.get('position')})"
+                    )
+                elif status == "refused":
                     self._lose(
                         f"the daemon had lost the lease and now refuses it ({again.get('reason')})"
                     )
@@ -423,10 +469,12 @@ class Lease:
         *,
         job_env: bool = True,
         threads: jobs.Threads = "jobs",
+        elastic_jobs: int | None = None,
     ) -> dict[str, str]:
         """The environment for a command run under this lease, from `base` (default ours): the
         lease's `LEASEHOLD_*` variables and, with `job_env`, job and thread counts for the
-        weight it holds now (`child_env`). Unleased, `base` without `LEASEHOLD_WANT`."""
+        weight it holds now (`child_env`; `elastic_jobs` is the most jobs a jobserver may grow
+        to). Unleased, `base` without `LEASEHOLD_WANT`."""
         if not self.held:
             return own_env(base)
         snapshot = self._granted
@@ -438,13 +486,50 @@ class Lease:
             threads=threads,
             env=base,
             socket=getattr(self._client, "path", None),
+            elastic_jobs=elastic_jobs,
         )
+
+    def popen(
+        self,
+        argv: Sequence[str],
+        *,
+        jobserver: bool = False,
+        elastic: bool | None = None,
+        contain: bool = True,
+        grace: float = 30.0,
+        job_env: bool = True,
+        threads: jobs.Threads = "jobs",
+        memory: str | None = None,
+        memory_per_slot: str | None = None,
+        env: Mapping[str, str] | None = None,
+        **popen,
+    ):
+        """Start `argv` under this lease (`leasehold.supervise`): a `Command` leading a process
+        group of its own, in the lease's environment (`env()`, from `env`), in a systemd scope
+        sized to the lease where the daemon and this caller allow one and `contain`, with a
+        make jobserver when `jobserver` (a range is then elastic unless `elastic` is false). A
+        revoked `lend` lease stops its group, SIGTERM then SIGKILL after `grace` seconds, and so
+        does its end. `popen` goes to `subprocess.Popen`. Raises `NotStarted`."""
+        from leasehold.supervise import Command
+
+        return Command(
+            self, argv, jobserver=jobserver, elastic=elastic, contain=contain, grace_s=grace,
+            job_env=job_env, threads=threads, memory=memory, memory_per_slot=memory_per_slot,
+            env=env, **popen,
+        )  # fmt: skip
+
+    def run(self, argv: Sequence[str], **options) -> int:
+        """`popen(argv, **options)` waited for: the command's exit status (negative: the signal
+        that ended it)."""
+        with self.popen(argv, **options) as command:
+            return command.wait()
 
     def release(self) -> None:
         """Stop renewing and release the lease. Safe to call more than once."""
         if not self.held or self._stop.is_set():
             return
         self._stop.set()
+        self._wake.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=self._interval + 1.0)
         with contextlib.suppress(_client.Unavailable, _client.ApiError):

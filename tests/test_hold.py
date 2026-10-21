@@ -4,14 +4,12 @@ or the command ends or takes jobserver tokens."""
 
 from __future__ import annotations
 
-import os
 import signal
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
-from support import CHILD_ENV, cli, until
+from support import CHILD_ENV, cli, gone, until
 
 import leasehold
 from leasehold.client import Client
@@ -43,14 +41,6 @@ def hold(sock, *args, **kw) -> subprocess.Popen:
         [sys.executable, "-m", "leasehold", "--socket", str(sock), "hold", *args],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw,
     )  # fmt: skip
-
-
-def gone(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
 
 
 def test_a_revoked_lease_stops_the_command(daemon):
