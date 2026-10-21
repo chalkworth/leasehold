@@ -26,6 +26,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -165,7 +166,7 @@ class Command:
                     server = self._stack.enter_context(jobs.Jobserver(lease.jobs))
                 except OSError as exc:
                     raise NotStarted(f"cannot make a jobserver: {exc}") from exc
-                env |= jobserver_env(os.environ, lease.jobs, server.fifo)
+                env |= jobserver_env(env, lease.jobs, server.fifo)
             if contained:
                 settings = lease._answer.get("contain") or {}
                 prefix = scope_prefix(lease.lease_id, weight, settings, memory)
@@ -180,6 +181,11 @@ class Command:
         except OSError as exc:
             raise NotStarted(f"cannot run {argv[0]}: {exc}") from exc
         self.pid = self.process.pid
+        if lease.held and lease.kind in PREEMPTIBLE:
+            watcher = threading.Thread(
+                target=self._stop_when_lost, name=f"leasehold-watch-{self.pid}", daemon=True
+            )
+            watcher.start()
         if elastic and server is not None:
             settings = lease._answer.get("contain") or {}
             scoped = prefix and not self.uncontained
@@ -192,8 +198,15 @@ class Command:
             lease._follow(follower, settle_s)
             self._stack.callback(lease._follow, None, None)
 
-    def _lost(self) -> bool:
-        return self.lease.lost is not None and self.lease.kind in PREEMPTIBLE
+    def _stop_when_lost(self) -> None:
+        """Stop the group once the lease is lost, whether or not anyone waits for the command."""
+        while self.process.poll() is None:
+            if self.lease._lost_event.wait(_POLL_S):
+                if self.process.poll() is None:
+                    self.stopped_for = self.lease.lost
+                    self._say(f"lease revoked ({self.stopped_for}); stopping the command")
+                    stop_group(self.process, self.grace_s)
+                return
 
     def wait(self, timeout: float | None = None) -> int:
         """Wait for the command to end, or for the lease to stop it, then stop whatever it left
@@ -201,20 +214,7 @@ class Command:
         `subprocess.TimeoutExpired` when `timeout` passes first."""
         if self.returncode is not None:
             return self.returncode
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            try:
-                code = self.process.wait(timeout=_POLL_S)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if self._lost():
-                self.stopped_for = self.lease.lost
-                self._say(f"lease revoked ({self.stopped_for}); stopping the command")
-                code = stop_group(self.process, self.grace_s)
-                break
-            if deadline is not None and time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired(self.process.args, timeout)
+        code = self.process.wait(timeout=timeout)
         self._end(code)
         return code
 

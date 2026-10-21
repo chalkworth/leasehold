@@ -306,6 +306,8 @@ class Lease:
         self._on_lost = on_lost
         self._say = _say
         self._stop = threading.Event()
+        #: Set once `lost` is.
+        self._lost_event = threading.Event()
         #: Set to wake the renewal thread: a release, or a follower to step.
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -452,6 +454,7 @@ class Lease:
         if self.lost is not None:
             return
         self.lost = reason
+        self._lost_event.set()
         if self._on_lost is not None:
             try:
                 self._on_lost(reason)

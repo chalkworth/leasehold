@@ -129,10 +129,10 @@ example of each.
 ## Stability
 
 leasehold is alpha and before 1.0. The command line, exit codes, config file, HTTP API with its
-`status` schema, the names `leasehold` exports (`leasehold.__all__`: `lease()` and its
-errors), and the library modules `model`, `admission`, `ledger`, `quota` and `client` are its
-interface; a minor release may change them, and [`CHANGELOG.md`](CHANGELOG.md) says how. The
-ledger file is not an interface.
+`status` schema, the names `leasehold` exports (`leasehold.__all__`: `lease()`, `Lease`,
+`Command` and their errors), and the library modules `model`, `admission`, `ledger`, `quota`
+and `client` are its interface; a minor release may change them, and
+[`CHANGELOG.md`](CHANGELOG.md) says how. The ledger file is not an interface.
 
 ## Licence
 

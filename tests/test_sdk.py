@@ -4,6 +4,7 @@ ends without one, and what a lease the daemon takes back or forgets tells its ho
 from __future__ import annotations
 
 import inspect
+import os
 import signal
 import subprocess
 import threading
@@ -138,6 +139,20 @@ def test_a_command_runs_in_the_lease_and_its_leftovers_stop_with_it(daemon):
     with leasehold.lease(socket=daemon.path) as lease:
         mine = ["sh", "-c", f'test "$LEASEHOLD_LEASE_ID" = {lease.lease_id} && exit 4']
         assert lease.run(mine, contain=False) == 4
+        flags = [
+            "sh",
+            "-c",
+            'case "$MAKEFLAGS" in *--keep-going*--jobserver-auth*) exit 0;; esac; exit 1',
+        ]
+        assert (
+            lease.run(
+                flags,
+                jobserver=True,
+                contain=False,
+                env={**os.environ, "MAKEFLAGS": "--keep-going"},
+            )
+            == 0
+        )
         with lease.popen(["sh", "-c", "sleep 30 & echo $!; exec sleep 30"], contain=False,
                          grace=1, stdout=subprocess.PIPE, text=True) as command:  # fmt: skip
             left = int(command.process.stdout.readline())
@@ -149,5 +164,6 @@ def test_a_revoked_lend_lease_stops_its_command(daemon):
     with leasehold.lease(kind="lend", ttl=0.3, socket=daemon.path) as lease:
         command = lease.popen(["sleep", "30"], contain=False, grace=1)
         daemon.agent.set_lend(False)
-        assert command.wait(timeout=10) == -signal.SIGTERM
+        until(lambda: gone(command.pid))  # stopped with no one waiting for it
         assert command.stopped_for == lease.lost
+        assert command.wait(timeout=10) == -signal.SIGTERM
