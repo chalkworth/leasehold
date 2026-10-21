@@ -7,3 +7,6 @@ dist/
 .import_linter_cache/
 /bench-results/
 /sim-results/
+
+# The JUnit report the tests step and CI write
+junit.xml
