@@ -23,6 +23,16 @@
             "asyncRewake": true
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/.agents/hooks/test-nudge/test_nudge.py\"; [ -f \"$f\" ] || exit 0; exec python3 -I \"$f\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [

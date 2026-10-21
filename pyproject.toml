@@ -63,8 +63,8 @@ bench = ["simpy>=4.1"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# Skills vendored from chalkworth/skills are checked there and never edited here.
-extend-exclude = [".agents/skills", ".claude/skills"]
+# Skills and hooks vendored from chalkworth/skills are checked there and never edited here.
+extend-exclude = [".agents", ".claude/skills"]
 
 [tool.ruff.lint]
 # Pyflakes and pycodestyle, plus import order, bugbear, pyupgrade, simplify, blind excepts

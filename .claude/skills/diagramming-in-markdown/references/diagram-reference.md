@@ -57,8 +57,6 @@ When exporting an SVG or PNG for a destination that cannot render Mermaid, keep 
 
 ## Render with mermaid-cli
 
-The check command in `SKILL.md` also makes the SVG for a page that inlines one; a syntax error writes no SVG.
-
-mermaid-cli drives a Chrome through puppeteer. Without the two variables, puppeteer downloads its own Chrome into `~/.cache/puppeteer` on first run. Point `PUPPETEER_EXECUTABLE_PATH` at an installed Chrome or Chromium (`which google-chrome chromium`) and set `PUPPETEER_SKIP_DOWNLOAD=true` so nothing is downloaded. When Chrome refuses to start because it runs as root or in a container, save `{"args": ["--no-sandbox"]}` as `puppeteer.json` and add `-p puppeteer.json`.
+mermaid-cli drives a Chrome through puppeteer, which downloads its own Chrome on first run unless `PUPPETEER_SKIP_DOWNLOAD=true` and `PUPPETEER_EXECUTABLE_PATH` point it elsewhere. `scripts/check_mermaid.py` sets both. It looks for a Chrome in `$PUPPETEER_EXECUTABLE_PATH`, then on `PATH` (`google-chrome`, `chromium` and similar), then in Playwright's and puppeteer's caches under `~/.cache`, then in macOS's `/Applications`. `--find-chrome` prints what it found. To export an SVG for a page that inlines one, run mermaid-cli yourself with `PUPPETEER_EXECUTABLE_PATH=$(python3 scripts/check_mermaid.py --find-chrome)`. When Chrome refuses to start because it runs as root or in a container, save `{"args": ["--no-sandbox"]}` as `puppeteer.json` and add `-p puppeteer.json`.
 
 A successful parse shows the diagram is valid, not that the destination renders it or that it matches the system it describes; compare it with the code.

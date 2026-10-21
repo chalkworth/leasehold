@@ -6,8 +6,55 @@
     "antigravity",
     "pi"
   ],
-  "hook_files": {},
-  "hooks": {},
+  "hook_files": {
+    ".claude/settings.json": {
+      "created": []
+    },
+    ".codex/hooks.json": {
+      "created": [
+        "",
+        "hooks",
+        "hooks/PostToolUse"
+      ]
+    }
+  },
+  "hooks": {
+    "test-nudge": {
+      "commit": "8f68e9443f414b5f914fcaf1566ad028c560ebe0",
+      "entries": {
+        "claude": {
+          "file": ".claude/settings.json",
+          "records": [
+            {
+              "command": "f=\"$CLAUDE_PROJECT_DIR/.agents/hooks/test-nudge/test_nudge.py\"; [ -f \"$f\" ] || exit 0; exec python3 -I \"$f\"",
+              "path": [
+                "hooks",
+                "PostToolUse"
+              ],
+              "sha256": "2a1ff69c8da543d7ca485a305d1926d69241d75c3d8fab392539ece6c5693f92"
+            }
+          ]
+        },
+        "codex": {
+          "file": ".codex/hooks.json",
+          "records": [
+            {
+              "command": "sh -c 'r=$(git rev-parse --show-toplevel 2>/dev/null) && f=\"$r/.agents/hooks/test-nudge/test_nudge.py\" && [ -f \"$f\" ] && exec python3 -I \"$f\"; exit 0'",
+              "path": [
+                "hooks",
+                "PostToolUse"
+              ],
+              "sha256": "c2c6a482bdaa526227646774fd1ddf61e63633eccef0e7a81f8ad759224345fd"
+            }
+          ]
+        }
+      },
+      "files": {
+        "test_nudge.py": "e3b71c2f13562edda2b9fa8f0c7d673515e1805cbe38c2bf6d75bcde01782ad4"
+      },
+      "source": "https://github.com/chalkworth/skills"
+    }
+  },
   "mirror_claude": true,
   "skills": {
     "checking-a-derivation": {
@@ -44,9 +91,10 @@
     "diagramming-in-markdown": {
       "files": {
         "LICENSE": "16550e9337d15fb566d4dc1f2dab56c42ac8840d4bd1441d2fd0405fc8b846e7",
-        "SKILL.md": "4380f0f3038c92736a724f9dd8b8bee3628b8371e746ba49468681dc08a3db3e",
-        "UPSTREAM.json": "5f93ea012445da0292c7a2af45bec2b61ce96180f80df0f8a5f55cb6ddcc4f11",
-        "references/diagram-reference.md": "2be513e8e4a859e83a8ee390263d0c768c5dc09ae195b4a0a78e31f36b35d24d"
+        "SKILL.md": "7f70a54407faee15bad2482f7594a7462f8199d16bea919a8b208c513389b6f7",
+        "UPSTREAM.json": "8d2f73be3e54d56c8c8394bb635aaeb547b9b85820c6529fce61ef4b53458342",
+        "references/diagram-reference.md": "712df50ed4fa11ada0504b121771341697d7d4991574144068edc83b807726f7",
+        "scripts/check_mermaid.py": "403af7a63e540c1e1789378dcd230aa66faa131dedc9d234b1d751dd14c6bb06"
       },
       "pack": "docs",
       "source": "https://github.com/chalkworth/skills"
@@ -83,13 +131,13 @@
   },
   "sources": [
     {
-      "commit": "6695174389295f22629450e9a20918a8bc2cf140",
+      "commit": "8f68e9443f414b5f914fcaf1566ad028c560ebe0",
       "dirty": false,
       "packs": [
         "docs",
         "experiments"
       ],
-      "ref": "v0.1.0",
+      "ref": "v0.3.4",
       "skills": [],
       "url": "https://github.com/chalkworth/skills"
     }

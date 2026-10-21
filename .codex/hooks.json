@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'r=$(git rev-parse --show-toplevel 2>/dev/null) && f=\"$r/.agents/hooks/test-nudge/test_nudge.py\" && [ -f \"$f\" ] && exec python3 -I \"$f\"; exit 0'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

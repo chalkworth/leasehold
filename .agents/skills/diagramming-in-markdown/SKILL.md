@@ -23,14 +23,13 @@ Draw the diagram as Mermaid text, so it diffs in review and agents can read it.
 
 ## Check before committing
 
-Save the diagram body without its fence as `diagram.mmd` in a scratch directory and parse it:
+Parse every diagram in the page with mermaid-cli:
 
 ```bash
-PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome \
-  npx -y @mermaid-js/mermaid-cli -i diagram.mmd -o diagram.svg
+python3 scripts/check_mermaid.py path/to/page.md
 ```
 
-`Parse error on line N` means fix the diagram. Parse every diagram in the page. Delete the SVG afterwards unless the page embeds it. Without node, say the diagram is unchecked.
+It prints `page.md:LINE: ok` or the parse error for each fence, and exits 1 if any diagram fails. It uses a Chrome that is already installed or cached (Playwright's and puppeteer's caches count) and never downloads one. Exit 2 means there is no Chrome or no `npx`: say the diagram is unchecked rather than installing a browser.
 
 → Choosing a diagram type, quoting special characters, the Mermaid version in the destination, or Chrome setup for mermaid-cli: read `references/diagram-reference.md`.
 
