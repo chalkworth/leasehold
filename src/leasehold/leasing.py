@@ -316,7 +316,7 @@ class Lease:
         self.kind: str | None = request["kind"]
         self._take(self._granted)
         self._ttl = float(self._granted["ttl_s"])
-        self._interval = self._ttl / 3
+        self._interval = max(0.05, self._ttl / 3)
         self._quick = client
         if isinstance(client, _client.Client):
             # Calls that must not hold the next renewal up wait at most one interval.

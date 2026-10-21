@@ -3,6 +3,7 @@ ends without one, and what a lease the daemon takes back or forgets tells its ho
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from itertools import pairwise
@@ -26,6 +27,11 @@ def test_the_supported_names():
     assert sorted(leasehold.__all__) == [
         "Busy", "Cancelled", "DaemonError", "Lease", "LeaseError", "LeaseLost", "Refused",
         "Unavailable", "Waiting", "__version__", "find_daemon", "lease",
+    ]  # fmt: skip
+    # Callers pass these by keyword, so their names are part of the API.
+    assert list(inspect.signature(leasehold.lease).parameters) == [
+        "weight", "kind", "pool", "labels", "session", "timeout", "ttl", "memory",
+        "memory_per_slot", "if_unavailable", "on_wait", "on_lost", "cancel", "socket", "client",
     ]  # fmt: skip
     with pytest.raises(ValueError, match=r"\(least, most\)"):
         leasehold.lease((3, 1))
