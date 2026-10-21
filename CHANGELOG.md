@@ -9,6 +9,21 @@ here.
 
 ### Added
 
+- A Python API for taking leases without running `leasehold hold`. `leasehold.lease()` waits in
+  line and returns a `Lease`, which a thread of its own renews until it is released. Leaving
+  its `with` block releases it. The lease reports `weight`, `min_weight`, `max_weight` and
+  `jobs`. `lost` says whether it was revoked or lost for good, `on_lost` is called when that
+  happens, `check()` raises `LeaseLost` after it, and `env()` gives the variables `hold` gives
+  its command. A wait ends in `Busy` (timed out), `Cancelled` (a `cancel` event was set),
+  `Refused` or `DaemonError`, and each of these gives the place in line back. With no daemon,
+  `if_unavailable="run"` returns an unleased `Lease` and `"fail"` raises `Unavailable`. All
+  of these errors are subclasses of `LeaseError`. `find_daemon()` finds a daemon's socket as
+  the command line does. The API is synchronous and installs no signal handlers. Its supported
+  names are those in `leasehold.__all__`, which the README's "Stability" section covers. The
+  code is in `leasehold.leasing`.
+- `leasehold.hold.lease_request` and `child_env` now live in `leasehold.leasing`, and
+  `leasehold.hold` re-exports them. `hold` waits in line through `leasing.wait`, with the same
+  messages and exit codes as before.
 - `hold`, and so the PATH shims, sets two groups of variables. The job count goes to
   `LEASEHOLD_JOBS`, `CARGO_BUILD_JOBS`, `CMAKE_BUILD_PARALLEL_LEVEL` and
   `PYTEST_XDIST_AUTO_NUM_WORKERS`. The thread count goes to the variables that limit the
