@@ -2,8 +2,9 @@
 # Change them there, then run `chalk-skills vendor` here; never edit the copies.
 mirror_claude = true
 public = true
+hooks = ["test-nudge"]
 
 [[source]]
 url = "https://github.com/chalkworth/skills"
-ref = "v0.1.0"
+ref = "v0.3.4"
 packs = ["experiments", "docs"]

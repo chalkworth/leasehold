@@ -14,7 +14,8 @@
     "assets/examples/: example documents"
   ],
   "local_changes": [
-    "SKILL.md and references/diagram-reference.md: new, written here; add the fence rule for the destination, the 15-node limit, the sequence-diagram semicolon escape, and the mermaid-cli check with an installed Chrome"
+    "SKILL.md and references/diagram-reference.md: new, written here; add the fence rule for the destination, the 15-node limit, the sequence-diagram semicolon escape, and the mermaid-cli check with an installed Chrome",
+    "scripts/check_mermaid.py: new; parses every mermaid fence in a page with mermaid-cli, using a Chrome already installed or cached instead of a fixed path or a download"
   ],
   "tests": "tests/skills/diagramming_in_markdown/",
   "moved_from": {

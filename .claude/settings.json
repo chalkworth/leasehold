@@ -10,6 +10,29 @@
             "statusMessage": "ruff"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v portal >/dev/null 2>&1 || exit 0; m=$(portal hook claude-code watch 2>/dev/null) || exit 0; [ -n \"$m\" ] || exit 0; printf '%s\\n' \"$m\" >&2; exit 2",
+            "timeout": 7200,
+            "if": "Bash(portal run*)",
+            "async": true,
+            "asyncRewake": true
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/.agents/hooks/test-nudge/test_nudge.py\"; [ -f \"$f\" ] || exit 0; exec python3 -I \"$f\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -21,6 +44,29 @@
             "timeout": 120,
             "async": true,
             "asyncRewake": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v portal >/dev/null 2>&1 || exit 0; portal hook claude-code guard 2>/dev/null; exit 0",
+            "timeout": 10,
+            "if": "Bash(gh *)"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v portal >/dev/null 2>&1 || exit 0; portal hook claude-code guard 2>/dev/null; exit 0",
+            "timeout": 10
           }
         ]
       }
