@@ -233,11 +233,13 @@ def _upgraded(config: MachineConfig, old: str) -> tuple[str, bool, tuple[str, ..
             name=config.name, mode="user", slots=c.slots, cpus=c.cpus, memory=c.memory,
             about=_about(old), two_at_once=False,
         )  # fmt: skip
-        changes = (
+        said = (
             "rewritten from today's template (it was exactly as leasehold 0.2 wrote it): "
-            'adds [memory] budget = "auto", kept = "25%"; leaves the two-at-once weights '
-            "commented",
+            'adds [memory] budget = "auto", kept = "25%"'
         )
+        if template._two_at_once(c.slots, set_them=False):
+            said += "; leaves the two-at-once weights commented"
+        changes = (said,)
         return text, True, changes
     text = old
     changes: list[str] = []

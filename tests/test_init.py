@@ -50,3 +50,10 @@ def test_an_upgraded_0_2_config_keeps_the_built_in_weights(tmp_path):
     assert "leaves the two-at-once weights commented" in planned.changes[0]
     (tmp_path / "new.toml").write_text(planned.text)
     assert machine.load(tmp_path / "new.toml").commands.heavy_weight == 4
+
+    wide = tmp_path / "wide.toml"
+    wide.write_text(
+        template.render_user_0_2(name="box", slots=8, cpus=8, memory="16g", about="A box.")
+    )
+    planned = upgrade.plan(wide, machine.load(wide), memory_bytes=16 * 2**30)
+    assert planned.pristine and "commented" not in planned.changes[0]

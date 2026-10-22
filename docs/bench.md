@@ -638,7 +638,7 @@ The gates so far:
   the geometric-mean ratios were 0.857 for makespan, 0.795 for job mean, 1.125 for wake p99
   and 1.14 to 1.16 for `git status` p95. On this machine's 6 slots, `w=3-3` is a fixed weight
   of 3 and `h=1` is the headroom `auto` already gives, so the setting it supports is
-  `[commands] heavy_weight = 3`, which a new config on 4 to 7 slots now writes. Memory
+  `[commands] heavy_weight = 3`, which is half the slots on a new config of 4 to 7 slots. Memory
   pressure stayed at 0 in every round of both workloads, so `memheavy` did not test behaviour
   under memory pressure. The guest booted afresh before the last round reported 12 KiB more
   memory than before; `bench/run.py` and `compare` now accept a difference of up to 1%.
