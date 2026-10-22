@@ -686,6 +686,30 @@ A command started from a system service, a CI runner's job or an operator's slic
 it is, under that service's limits and clean-up. Elsewhere, or with `LEASEHOLD_CONTAIN=off`, the
 command runs as before and the lease is advisory. `leasehold doctor` says which applies.
 
+While a contained command runs, its client reads the scope's cgroup files about once a second
+and keeps the last values, since the scope is removed when the command ends. When the lease is
+released, the client sends what it read with the release, and the daemon keeps it in the ledger
+with the lease's size, range and declared memory. `leasehold outcomes` lists it. A record has:
+
+- `peak_bytes`: `memory.peak`, the most memory the scope used, page cache included. It is null
+  on kernels before 5.19, which have no such file, and the last read can miss what the final
+  second added.
+- `anon_bytes`: the most `anon` seen in `memory.stat`. Page cache is not counted here, so it is
+  a lower bound on what the command needed.
+- `oom_kills` and `high_events`: `oom_kill` and `high` from `memory.events`.
+- `cpu_usec`: `usage_usec` from `cpu.stat`. `wall_s` is how long the command ran and
+  `exit_status` how it ended (negative: the signal that killed it).
+- `rule`: the [`[commands]` rule](#which-commands-take-a-lease-commands) that sized the command,
+  when `hold` was given no `--weight`. It is the rule's programs, sorted and joined by `, `, then
+  ` ~ ` and its `args` when it has them (`make ~ -j`). The built-in pytest-xdist rule is
+  `py.test, pytest ~ xdist`.
+- `repo`: the top of the git work tree the command ran in, or null.
+
+An uncontained command records nothing. A lease from `leasehold.lease()` records its last
+contained command's outcome, with no rule. The ledger keeps the newest 50 outcomes for each
+user, rule and repository, none older than 30 days, and keeps them when it is rebuilt for a new
+schema. Outcomes are only shown: nothing about admission uses them yet.
+
 ### Sizing the command to its lease
 
 A lease of weight W (for a [range](#ranges-min-max-slots), the weight granted)
@@ -1285,6 +1309,11 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
 - `leasehold ui` serves the same view to a browser on `127.0.0.1`, at a link that carries a
   random token, and opens it (`--no-open` to only print it). The page is read-only; requests
   without the token, or for another `Host`, are refused.
+- `leasehold outcomes` lists what [contained commands used](#containment), one line for each
+  rule and repository: the runs kept, the 95th percentile and the most of `memory.peak`, the
+  most anonymous memory, how many runs the OOM killer or `MemoryHigh` reached, and the mean CPUs
+  a run kept busy (CPU time over wall time). Your own runs only, unless you are an
+  administrator. `--json` prints the API's answer, every outcome included.
 - `leasehold metrics` prints the status in the Prometheus text format;
   `--textfile DIR` writes `DIR/leasehold.prom` for node_exporter's textfile collector.
   `leasehold ui` serves the same at `/metrics?token=...`.
@@ -1320,7 +1349,8 @@ client for it.
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs` |
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
 | `POST /v1/elastic` | `lease_id` | `elastic`, with the lease's `weight`, `jobs`, `target` and `target_jobs`: a held range is elastic from now on; 409 `conflict` when it is not held, 400 for a lease with no range |
-| `POST /v1/release` | `lease_id` | `released` |
+| `POST /v1/release` | `lease_id`, `outcome` | `released` |
+| `GET /v1/outcomes` | | `outcomes`, newest first, and `groups`, one for each rule and repository: the asking user's, or every user's for an administrator |
 | `POST /v1/lend` | `open`: true or false | the lend state; administrators only |
 | `POST /v1/pools/<name>` | `max`: a number, or null to reset | the pool; administrators only |
 
@@ -1351,6 +1381,12 @@ command's jobs take jobserver tokens. A daemon from before elastic leases does n
 
 An acquire naming a pool that does not exist is `refused` with `reason` `there is no pool
 'NAME'`.
+
+A release may carry an `outcome`, what the lease's command used ([containment](#containment)):
+`rule`, `repo`, `peak_bytes`, `anon_bytes`, `oom_kills`, `high_events`, `cpu_usec`, `wall_s`
+and `exit_status`. Fields the daemon does not know are ignored. It is kept only while the lease
+is still held. A 0.4 daemon refuses the field, so when a release with an outcome is answered 400,
+or with an error of 500 or more, `leasehold.client.Client` sends it again without the outcome.
 
 An error is answered with an `error` and a `detail`: 400 `bad_request` (a malformed request,
 including a `Content-Length` that is not a non-negative integer), 403 `forbidden` (another
@@ -1419,8 +1455,9 @@ when a field is removed or changes meaning:
 ## The command line
 
 Every command takes `--config PATH` and `--socket PATH`, before or after the command's name.
-`leasehold --help` lists the everyday commands; the rest (`acquire`, `keep`, `release`, `hook`,
-`shims`, `facts`, `ui`, `metrics`, `mcp`, `report`, `observe`, `lend`, `pool`) work the same and
+`leasehold --help` lists the everyday commands; the rest (`acquire`, `keep`, `release`,
+`outcomes`, `hook`, `shims`, `facts`, `ui`, `metrics`, `mcp`, `report`, `observe`, `lend`,
+`pool`) work the same and
 are named at its end. `leasehold COMMAND --help` says more; `mcp`, `ui`, `metrics`, `report`,
 `observe` and `lend` are experimental and may change before 1.0.
 
@@ -1514,6 +1551,12 @@ give a lease back:
 
 ```
 leasehold release lease_id
+```
+
+what contained commands used, by rule and repository:
+
+```
+leasehold outcomes [--json]
 ```
 
 this machine's facts (no daemon needed):

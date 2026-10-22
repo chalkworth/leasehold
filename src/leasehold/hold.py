@@ -26,7 +26,9 @@ runs (`leasehold.terminal`); otherwise it runs in a session of its own.
   makes `hold` exit 128 + the signal.
 
 Where the daemon allows it and the caller runs in the user's own session, the command is started
-in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it runs as is.
+in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it runs as is. What a
+contained command used is sent with the release (`leasehold.measure`), filed under the
+`[commands]` rule that sized it when `hold` was given no weight.
 
 A lease asked for as a range (`--weight 2-4`) is sized to the weight it was granted: its job
 and thread counts, jobserver, `LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot,
@@ -245,6 +247,7 @@ def hold(
     if weight is None and kind in WHOLE:
         weight = 1  # the daemon gives a maintenance lease the whole machine, whatever is asked
     request = None
+    rule_key = None
     try:
         with _interruptible():
             # Rules are read for the weight, or for the threads the job variables use.
@@ -252,6 +255,7 @@ def hold(
                 rule = auto_size(client, argv) if client is not None else _UNSIZED
                 if weight is None:
                     weight, max_weight = rule.weight, rule.max_weight
+                    rule_key = rule.key
                     if memory is None and memory_per_slot is None:
                         memory, memory_per_slot = rule.memory, rule.memory_per_slot
                 if threads is None:
@@ -300,6 +304,7 @@ def hold(
                 threads=threads,
                 memory_per_slot=memory_per_slot,
                 elastic=elastic,
+                rule=rule_key,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -361,19 +366,21 @@ def run_leased(
     threads: jobs.Threads = "jobs",
     memory_per_slot: str | None = None,
     elastic: bool = False,
+    rule: str | None = None,
 ) -> int:
     """`hold` once `request` is granted (`answer`): run `argv` under the lease
     (`supervise.Command`: sized to the weight granted, its thread pools to `threads`, held to
     `memory` or `memory_per_slot` when contained, a jobserver with `jobserver`, elastic with
-    `elastic`), renewing the lease, and release it when the command ends; the command's exit
-    code (`_ended`), or `EXIT_REVOKED`. SIGINT, SIGTERM or SIGHUP before the command runs gives
+    `elastic`), renewing the lease, and release it when the command ends, with what a contained
+    command used filed under `rule` (`shell.Rule.key`; None: no rule sized it); the command's
+    exit code (`_ended`), or `EXIT_REVOKED`. SIGINT, SIGTERM or SIGHUP before the command runs gives
     the lease back and stops what was started of it."""
 
     def lost(reason: str) -> None:
         if request["kind"] not in PREEMPTIBLE:
             _say(f"{reason}; the command runs on without a lease")
 
-    lease = leasing.Lease(client, request, answer, on_lost=lost, _say=_say)
+    lease = leasing.Lease(client, request, answer, on_lost=lost, _say=_say, _rule=rule)
     return _run(
         lease,
         argv,

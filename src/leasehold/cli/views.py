@@ -1,5 +1,5 @@
-"""`status`, `leases`, `facts`, `ui` and `metrics`: looking at the machine. The first three
-take `--json` for the same object the API returns."""
+"""`status`, `leases`, `outcomes`, `facts`, `ui` and `metrics`: looking at the machine. The first
+four take `--json` for the same object the API returns."""
 
 from __future__ import annotations
 
@@ -24,6 +24,10 @@ def register(sub) -> None:
     s = sub.add_parser("leases", help="the leases held and the queue")
     s.add_argument("--json", action="store_true")
     s.set_defaults(run=_leases)
+
+    s = sub.add_parser("outcomes", help="what contained commands used, by rule and repository")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(run=_outcomes)
 
     s = sub.add_parser("facts", help="this machine's facts (no daemon needed)")
     s.add_argument("--json", action="store_true")
@@ -68,6 +72,65 @@ def _leases(args, ctx) -> int:
         return ctx.unreachable(exc)
     print(json.dumps(listing, indent=2)) if args.json else _print_leases(listing, time.time())
     return 0
+
+
+def _outcomes(args, ctx) -> int:
+    try:
+        listing = ctx.client().outcomes()
+    except ApiError as exc:
+        if exc.status != 404:
+            return ctx.unreachable(exc)
+        sys.stderr.write(
+            "leasehold: this daemon keeps no outcomes (it has no GET /v1/outcomes); "
+            "restart it on this version of leasehold\n"
+        )
+        return 1
+    except Unavailable as exc:
+        return ctx.unreachable(exc)
+    print(json.dumps(listing, indent=2)) if args.json else _print_outcomes(listing["groups"])
+    return 0
+
+
+def _print_outcomes(groups: list[dict]) -> None:
+    if not groups:
+        print("no outcomes yet: what a contained command used is kept when its lease is released")
+        return
+    home = os.path.expanduser("~")
+    rows = [("RULE", "REPO", "RUNS", "PEAK P95", "PEAK MAX", "ANON MAX", "OOM", "HIGH", "CPUS")]
+    for g in groups:
+        repo = g["repo"] or "-"
+        if home != "~" and (repo == home or repo.startswith(home + "/")):
+            repo = "~" + repo[len(home) :]
+        rows.append(
+            (
+                g["rule"] or "-",
+                repo,
+                str(g["runs"]),
+                _size(g["peak_p95_bytes"]),
+                _size(g["peak_max_bytes"]),
+                _size(g["anon_max_bytes"]),
+                str(g["oom_runs"]),
+                str(g["high_runs"]),
+                _cpus(g["parallelism"]),
+            )
+        )
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths, strict=True)).rstrip())
+
+
+def _cpus(p: float | None) -> str:
+    """A mean number of CPUs to two places; `<0.01` for less, but more than none."""
+    if p is None:
+        return "-"
+    return "<0.01" if 0 < p < 0.005 else f"{p:.2f}"
+
+
+def _size(n: int | None) -> str:
+    """`n` bytes in GiB from 1 GiB up, else in MiB; `-` for None."""
+    if n is None:
+        return "-"
+    return f"{n / 2**30:.1f} GiB" if n >= 2**30 else f"{n / 2**20:.0f} MiB"
 
 
 def _ui(args, ctx) -> int:

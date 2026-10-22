@@ -1,12 +1,12 @@
 """The `leasehold` command.
 
 Each module here registers one group of subcommands (`register`) and handles them: `setup`
-(`setup`), `run` (`run`), `daemon`
-(`serve`, `init`, `doctor`, `observe`), `leases` (`hold`, `acquire`, `keep`, `release`),
-`views` (`status`, `leases`, `facts`, `ui`, `metrics`), `watch` (`top`), `admin` (`lend`,
-`pool`), `push` (`report`), `hooks` (`commands`, `hook`, `shims`), `agents` (`mcp`) and
-`demo`. A handler takes the parsed arguments and a `Context`, and returns the exit code. A
-command that Ctrl-C (SIGINT) interrupts ends by SIGINT, with no traceback (`exits.end_by`).
+(`setup`), `run` (`run`), `daemon` (`serve`, `init`, `doctor`, `observe`), `leases` (`hold`,
+`acquire`, `keep`, `release`), `views` (`status`, `leases`, `outcomes`, `facts`, `ui`,
+`metrics`), `watch` (`top`), `admin` (`lend`, `pool`), `push` (`report`), `hooks` (`commands`,
+`hook`, `shims`), `agents` (`mcp`) and `demo`. A handler takes the parsed arguments and a
+`Context`, and returns the exit code. A command that Ctrl-C (SIGINT) interrupts ends by SIGINT,
+with no traceback (`exits.end_by`).
 """
 
 from __future__ import annotations

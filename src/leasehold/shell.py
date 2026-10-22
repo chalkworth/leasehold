@@ -152,6 +152,18 @@ class Rule:
             return xdist.in_args(args) is True
         return self.args is None or re.search(self.args, " ".join(args)) is not None
 
+    @property
+    def key(self) -> str | None:
+        """The name a command's outcome is filed under for this rule: its programs, sorted and
+        joined by `, `, then ` ~ ` and its `args` when it has them (`xdist` for the built-in
+        pytest-xdist rule's: `py.test, pytest ~ xdist`). None for a rule with no programs,
+        which no command matched."""
+        if not self.programs:
+            return None
+        names = ", ".join(sorted(self.programs))
+        args = "xdist" if self.args == xdist.XDIST_ARGS else self.args
+        return f"{names} ~ {args}" if args else names
+
 
 def _threads(value: object) -> int | str:
     """A served `threads`: "jobs" when missing, the value when it is "jobs", a count of at

@@ -9,6 +9,21 @@ here.
 
 ### Added
 
+- A contained command's resource use is now recorded. While it runs, its client reads the
+  scope's `memory.peak`, the most `anon` in `memory.stat`, `oom_kill` and `high` from
+  `memory.events`, and `usage_usec` from `cpu.stat` about once a second. At release it sends
+  these with the wall time, the exit status, the `[commands]` rule that sized the command and
+  the git repository it ran in. The daemon keeps each outcome in a new ledger table, with the
+  lease's size, range and declared memory: the newest 50 for each user, rule and repository,
+  none older than 30 days. Nothing about admission uses them yet.
+- `POST /v1/release` takes an optional `outcome`, and `leasehold.client.Client.release` an
+  `outcome` argument. A 0.4 daemon refuses the field, so when a release with an outcome is
+  answered 400, or with an error of 500 or more, the client sends it again without the outcome.
+- `GET /v1/outcomes`, `Client.outcomes()` and `leasehold outcomes [--json]` list the outcomes
+  kept, summed up for each rule and repository: runs, the 95th percentile and the most of
+  `memory.peak`, the most anonymous memory, runs reached by the OOM killer or `MemoryHigh`, and
+  mean parallelism (CPU time over wall time). A user sees their own outcomes; an administrator
+  sees everyone's.
 - A `maintenance` lease kind takes the whole machine for a while, for a benchmark window or an
   upgrade. While it waits, the machine drains. Requests that arrive after it wait behind it in
   every pool, the owner's own `work` included, and the leases already running finish. Once no

@@ -15,6 +15,8 @@ lease's own keeps it renewed until it is released.
   caller's thread and no signal handler is installed: `check()` raises `LeaseLost` when asked.
 * Leaving the `with` block, or `release()`, stops the renewals and releases the lease, however
   the block ends.
+* A lease that ran a contained command (`popen`) sends what the command used with its release
+  (`leasehold.measure`): the last such command's, when it ran more than one.
 """
 
 from __future__ import annotations
@@ -301,8 +303,13 @@ class Lease:
         *,
         on_lost: Callable[[str], object] | None = None,
         _say: Callable[[str], object] = lambda _: None,
+        _rule: str | None = None,
     ) -> None:
         self.lost: str | None = None
+        #: The `[commands]` rule that sized the lease (`shell.Rule.key`), for its outcome.
+        self._rule = _rule
+        #: What its last contained command used (`supervise.Command`), sent with the release.
+        self._outcome: dict | None = None
         self._on_lost = on_lost
         self._say = _say
         self._stop = threading.Event()
@@ -536,7 +543,10 @@ class Lease:
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=self._interval + 1.0)
         with contextlib.suppress(_client.Unavailable, _client.ApiError):
-            self._client.release(self.lease_id)
+            if isinstance(self._client, _client.Client):
+                self._client.release(self.lease_id, outcome=self._outcome)
+            else:  # a stand-in (`lease(client=...)`) need not take an outcome
+                self._client.release(self.lease_id)
 
     def __enter__(self) -> Lease:
         return self

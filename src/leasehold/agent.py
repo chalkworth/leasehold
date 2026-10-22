@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from leasehold import __version__, maintenance, observe, proctable, status
+from leasehold import __version__, maintenance, observe, outcomes, proctable, status
 from leasehold.access import Forbidden
 from leasehold.admission import AdmissionPolicy, alone
 from leasehold.events import EventLog, EventType, Snapshot, changes
@@ -751,9 +751,15 @@ class MachineAgent:
             "target_jobs": self.config.jobs.for_weight(done.target),
         }
 
-    def release(self, lease_id: str, *, user: str | None) -> dict:
+    def release(
+        self, lease_id: str, *, user: str | None, outcome: outcomes.Outcome | None = None
+    ) -> dict:
+        """Release `lease_id`, keeping `outcome`, what its command used, with what the lease
+        held (`Ledger.record_outcome`) when the lease is still held."""
         with self._lock:
             self._check_owner(lease_id, user)
+            if outcome is not None:
+                self.ledger.record_outcome((SCOPE, lease_id), outcome.model_dump())
             self._released.add((SCOPE, lease_id))
             self.ledger.release((SCOPE, lease_id))
             self.ledger.settle(self.policy())
@@ -809,6 +815,13 @@ class MachineAgent:
             )
         )  # stable: arrival order breaks ties
         return {"leases": [status.public(r) for r in self.ledger.leases()], "queue": queue}
+
+    def outcomes(self, *, user: str | None, everyone: bool = False) -> dict:
+        """The outcomes kept (`Ledger.outcomes`): `user`'s, or with `everyone` every user's,
+        newest first (`outcomes`), and summed up by rule and repository (`groups`,
+        `leasehold.outcomes.summarize`)."""
+        rows = self.ledger.outcomes(user=user, everyone=everyone)
+        return {"groups": outcomes.summarize(rows), "outcomes": rows}
 
     def _lend_status(self) -> dict:
         v = self.verdict
