@@ -1,0 +1,4 @@
+# A 4-slot machine. Without [pools], 4 slots split as: `work` reserves 2 and may use all 4;
+# `external` and `lend` may use 2 each; `observed` may use 4.
+[ceiling]
+slots = 4
