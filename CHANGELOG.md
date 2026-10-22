@@ -18,6 +18,9 @@ here.
   `Refused` or `DaemonError`. A refusal holds no place in line; each of the others gives its
   place back. With no daemon, `if_unavailable="run"` returns an unleased `Lease` and `"fail"`
   raises `Unavailable`. All of these errors are subclasses of `LeaseError`. `find_daemon()` finds a daemon's socket as
+  `Refused` or `DaemonError`, and each of these gives the place in line back. With no daemon,
+  `if_unavailable="run"` returns an unleased `Lease` and `"fail"` raises `Unavailable`. All
+  of these errors are subclasses of `LeaseError`. `find_daemon()` finds a daemon's socket as
   the command line does. The API is synchronous and installs no signal handlers. Its supported
   names are those in `leasehold.__all__`, which the README's "Stability" section covers. The
   code is in `leasehold.leasing`.
