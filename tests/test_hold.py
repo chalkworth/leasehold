@@ -24,7 +24,7 @@ CASES = {
         ["--kind", "maintenance", "--timeout", "0.3"],
         True,
         75,
-        "draining: waiting for the 1 lease running to end",
+        "whole machine (maintenance): place 1; draining: waiting for the 1 lease running to end",
     ),
     "until without maintenance": (["--until", "07:00"], True, 1, "are for --kind maintenance"),
     "no daemon": ([], False, 0, "running without a lease"),

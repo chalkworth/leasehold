@@ -556,8 +556,11 @@ class Ledger:
                     row["memory"]
                     if row["memory_per_slot"] is None
                     else weight * row["memory_per_slot"],
-                    row["weight"],
-                    policy.most(
+                    # A whole item is granted its host, not a size from its range.
+                    weight if row["kind"] in WHOLE else row["weight"],
+                    weight
+                    if row["kind"] in WHOLE
+                    else policy.most(
                         row["pool"],
                         row["weight"],
                         row["max_weight"],

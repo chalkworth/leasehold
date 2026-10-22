@@ -248,9 +248,8 @@ class MachineAgent:
         return None
 
     def _whole(self) -> int:
-        """The weight a maintenance lease takes: every slot standing work does not hold, and
-        at least 1."""
-        return max(1, self.limits.slots - sum(self.config.standing_held().values()))
+        """The weight a maintenance lease takes: every slot standing work does not hold."""
+        return self.limits.slots - sum(self.config.standing_held().values())
 
     def memory_free(self) -> int:
         """While the guard is on, the most memory new work may count: none while a reading is
@@ -537,6 +536,11 @@ class MachineAgent:
         if (req.kind in PREEMPTIBLE) != (pool in self.lend_pools):
             return None, f"pool {pool!r} takes " + (
                 "only lend leases" if pool in self.lend_pools else "no lend leases"
+            )
+        if req.kind in WHOLE and self._whole() < 1:
+            return None, (
+                f"[[standing]] work holds all {self.limits.slots} slots, so a maintenance lease "
+                "has none to take; lower its weight to take the machine"
             )
         return pool, None
 

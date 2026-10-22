@@ -96,13 +96,15 @@ declares a total `memory` (the total does not grow with the size), and the host'
 **Whole hosts.** An item marked `whole` (a maintenance lease) takes its host to itself:
 
 * it is admitted only once its host holds no lease at all (standing weight aside), and is
-  granted its `weight` whatever its pool's `max`, its per-user limit or memory say;
+  granted every slot the host's standing work does not hold (at least 1), whatever its
+  `weight`, its pool's `max`, its per-user limit or memory say;
 * while it waits, the host drains: no item queued after it there, in any pool, is admitted,
   while the leases running end in their own time. Items queued before it keep their turns
   (`State.waiting` order). Of several whole items on one host, the oldest goes first and the
   others wait behind it;
 * nothing else on the host is admitted around it: an item behind it waits without blocking
-  anything, and is not kept room for.
+  anything, and is not kept room for. While one is held, nothing else on its host is admitted,
+  whatever its weight leaves free.
 
 Weight held beyond a pool's `max` or a host's slots is allowed (`leasehold.ledger.Ledger.impose`
 records work that was never asked for, such as an observed process): `fits` then fails for that
@@ -694,6 +696,13 @@ def _behind(item: Waiting, drains: Mapping[str, Waiting], policy: AdmissionPolic
     return first is not None and item.key != first.key and item.order > first.order
 
 
+def _whole_size(policy: AdmissionPolicy, host: str) -> int:
+    """The weight a whole item is granted on `host`: every slot its standing work does not
+    hold, and at least 1."""
+    standing = _Tally.of(State(), policy).host_used.get(host, 0)
+    return max(1, policy.slots.get(host, 0) - standing)
+
+
 def _pools_in_order(policy: AdmissionPolicy) -> list[str]:
     return sorted(policy.pools, key=lambda name: (policy.pools[name].priority, name))
 
@@ -953,8 +962,16 @@ def _admit_least(
     admits: list[Waiting] = []
     stopped: dict[str, list[Waiting]] = {}
     drains = draining(state, policy)
-    # Whole items go in once their host is empty, below; what waits behind one stays put.
-    lines = [w for w in state.waiting if not w.whole and not _behind(w, drains, policy)]
+    taken = {h.host for h in state.held if h.whole}
+    # Whole items go in once their host is empty, below; what waits behind one, or on a host one
+    # holds, stays put.
+    lines = [
+        w
+        for w in state.waiting
+        if not w.whole
+        and not _behind(w, drains, policy)
+        and (w.pool not in policy.pools or policy.pools[w.pool].host not in taken)
+    ]
     for pool in _pools_in_order(policy):
         if pool in policy.closed:
             continue
@@ -992,6 +1009,7 @@ def _admit_least(
         )
         if busy:
             continue
+        first = replace(first, weight=_whole_size(policy, host), max_weight=None)
         counted = policy.counted(host, first.weight, first.memory, first.memory_per_slot)
         tally.add(first.pool, host, first.user, first.session, first.weight, counted)
         tally.serve(first.pool, first.user, first.session)

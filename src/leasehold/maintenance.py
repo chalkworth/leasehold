@@ -64,9 +64,11 @@ def describe(lease: dict, *, held: bool, now: float) -> dict:
 
 
 def holder_line(info: dict) -> str:
-    """One line a script can read: `held by NAME (maintenance) until RFC3339`, without the
-    `until` part when the lease gives no end."""
-    line = f"held by {info.get('name') or 'someone'} (maintenance)"
+    """One line a script can read: `held by NAME (maintenance) until RFC3339`, or `draining
+    for NAME ...` while the lease waits for the machine to empty, without the `until` part
+    when the lease gives no end."""
+    verb = "held by" if info.get("state") == "held" else "draining for"
+    line = f"{verb} {info.get('name') or 'someone'} (maintenance)"
     return f"{line} until {info['until']}" if info.get("until") else line
 
 

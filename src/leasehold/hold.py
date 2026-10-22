@@ -142,6 +142,8 @@ def waiting_line(request: dict, answer: dict) -> str:
     weight = request.get("weight", 1)
     most = request.get("max_weight") or weight
     slots = "1 slot" if most == weight == 1 else f"{weights.text(weight, most)} slots"
+    if request.get("kind") in WHOLE:
+        slots = "the whole machine"
     where = f" in pool {request['pool']}" if request.get("pool") else ""
     line = f"waiting for {slots}{where} ({request['kind']}): place {answer.get('position')}"
     blocked = answer.get("blocked")
