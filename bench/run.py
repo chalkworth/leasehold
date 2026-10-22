@@ -1129,6 +1129,9 @@ RESUME_KEYS = (
 
 #: The machine facts a resumed run must find again: its class and what it is made of.
 MACHINE_KEYS = ("class", "cpus", "memory_bytes", "swap_bytes", "kernel", "virt")
+#: How far `memory_bytes` may move between sessions of one run. A guest booted afresh reports a
+#: few KiB more or less MemTotal; the sizes a run uses come from its own flags.
+MEMORY_DRIFT = 0.01
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1296,10 +1299,14 @@ def resume(spec_path: Path, fresh: dict, rounds: int, parser) -> dict:
             )
     now = fresh["machine"]
     for key in MACHINE_KEYS:
-        if spec.get("machine", {}).get(key) != now.get(key):
+        then, here = spec.get("machine", {}).get(key), now.get(key)
+        drifted = (
+            key == "memory_bytes" and then and here and abs(here - then) <= MEMORY_DRIFT * then
+        )
+        if then != here and not drifted:
             parser.error(
                 f"{spec_path.parent} was started on a machine with {key} "
-                f"{spec.get('machine', {}).get(key)!r}; this one has {now.get(key)!r}. Run more "
+                f"{then!r}; this one has {here!r}. Run more "
                 "of it on the machine, and with the --machine-class, it started with"
             )
     if (spec.get("rounds", 1) == 1) != (rounds == 1):
