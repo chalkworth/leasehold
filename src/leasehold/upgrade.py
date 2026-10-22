@@ -235,8 +235,8 @@ def _upgraded(config: MachineConfig, old: str) -> tuple[str, bool, tuple[str, ..
         )  # fmt: skip
         changes = (
             "rewritten from today's template (it was exactly as leasehold 0.2 wrote it): "
-            '[memory] budget = "auto", kept = "25%"; every other default and comment as '
-            "today's",
+            'adds [memory] budget = "auto", kept = "25%"; leaves the two-at-once weights '
+            "commented",
         )
         return text, True, changes
     text = old

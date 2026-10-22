@@ -298,6 +298,7 @@ def config(
             slots=slots,
             cpus=slots,
             memory=raw["ceiling"]["memory"],
+            two_at_once=False,
             about=f"Sized for {cpus} CPUs: one slot per CPU; {condition.kept} CPUs are kept "
             "back by the benchmark.",
         )

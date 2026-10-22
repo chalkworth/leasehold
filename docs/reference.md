@@ -432,7 +432,7 @@ and says so; `leasehold init` writes a commented config sized for the machine to
 3 to 7 CPUs), two pools (`work` for your agents and commands, `background` for `--kind
 external`, which never takes work's reserved half), no lending, memory counted against
 three quarters of the machine's (`[memory]`), the memory guard on, and the built-in build and
-test rules at their weight of 4, so on 8 CPUs (6 slots) one build or test run runs at a time.
+test rules with weights that run two at once on 8 CPUs (6 slots).
 
 The two kept CPUs are kept only from commands that run as many jobs as their lease gives them
 (`MAKEFLAGS`, `CARGO_BUILD_JOBS` and the others under [Containment](#containment)); a tool that

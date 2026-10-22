@@ -193,8 +193,9 @@ improve on.
 `[commands] heavy_weight = 3` and `light_weight = 2` on 6 slots let two builds or test runs
 run at once, with memory counted as above. An earlier draft of 0.3 generated this setting by
 default; these runs measured it then and did not show it to be better, so 0.3 left it opt-in.
-The [`defaults-h1` gate](#pre-registered-comparisons), with 8 rounds on fresh seeds, later found it faster on every
-metric it judges, and since 0.4 a new config sets it. The runs below are one run per condition,
+The [`defaults-h1` gate](#pre-registered-comparisons), with 8 rounds on fresh seeds, later found
+makespan and mean job time faster; wake p99 and git status p95 rose but stayed within their
+1.5 margins. Since 0.4 a new config sets it. The runs below are one run per condition,
 in sessions earlier the same day as the runs above.
 
 Like those, they are not directly comparable with the 0.2 tables at the top. Other people's work
