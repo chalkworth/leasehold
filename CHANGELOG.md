@@ -17,8 +17,8 @@ here.
   lease's size, range and declared memory: the newest 50 for each user, rule and repository,
   none older than 30 days. Nothing about admission uses them yet.
 - `POST /v1/release` takes an optional `outcome`, and `leasehold.client.Client.release` an
-  `outcome` argument. A 0.4 daemon refuses the field, so the client sends the release again
-  without it whenever a release with an outcome gets an error.
+  `outcome` argument. A 0.4 daemon refuses the field, so when a release with an outcome is
+  answered 400, or with an error of 500 or more, the client sends it again without the outcome.
 - `GET /v1/outcomes`, `Client.outcomes()` and `leasehold outcomes [--json]` list the outcomes
   kept, summed up for each rule and repository: runs, the 95th percentile and the most of
   `memory.peak`, the most anonymous memory, runs reached by the OOM killer or `MemoryHigh`, and

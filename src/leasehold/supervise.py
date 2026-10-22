@@ -204,10 +204,10 @@ class Command:
             raise NotStarted(f"cannot run {argv[0]}: {exc}") from exc
         self.pid = self.process.pid
         if prefix and not self.uncontained:
+            self._repo = measure.repository(popen.get("cwd"))
             unit = contain.lease_unit(lease.lease_id)
             self._meter = measure.Meter(self.pid, unit, started=started)
             self._stack.callback(self._meter.stop)
-            self._repo = measure.repository(popen.get("cwd"))
         if lease.held and lease.kind in PREEMPTIBLE:
             watcher = threading.Thread(
                 target=self._stop_when_lost, name=f"leasehold-watch-{self.pid}", daemon=True

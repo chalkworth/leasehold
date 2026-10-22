@@ -654,7 +654,8 @@ with the lease's size, range and declared memory. `leasehold outcomes` lists it.
   `exit_status` how it ended (negative: the signal that killed it).
 - `rule`: the [`[commands]` rule](#which-commands-take-a-lease-commands) that sized the command,
   when `hold` was given no `--weight`. It is the rule's programs, sorted and joined by `, `, then
-  ` ~ ` and its `args` when it has them (`pytest ~ -n`).
+  ` ~ ` and its `args` when it has them (`make ~ -j`). The built-in pytest-xdist rule is
+  `py.test, pytest ~ xdist`.
 - `repo`: the top of the git work tree the command ran in, or null.
 
 An uncontained command records nothing. A lease from `leasehold.lease()` records its last
@@ -1337,8 +1338,8 @@ An acquire naming a pool that does not exist is `refused` with `reason` `there i
 A release may carry an `outcome`, what the lease's command used ([containment](#containment)):
 `rule`, `repo`, `peak_bytes`, `anon_bytes`, `oom_kills`, `high_events`, `cpu_usec`, `wall_s`
 and `exit_status`. Fields the daemon does not know are ignored. It is kept only while the lease
-is still held. A 0.4 daemon refuses the field, and so `leasehold.client.Client` sends a release
-again without its outcome whenever a release with one gets an error.
+is still held. A 0.4 daemon refuses the field, so when a release with an outcome is answered 400,
+or with an error of 500 or more, `leasehold.client.Client` sends it again without the outcome.
 
 An error is answered with an `error` and a `detail`: 400 `bad_request` (a malformed request,
 including a `Content-Length` that is not a non-negative integer), 403 `forbidden` (another

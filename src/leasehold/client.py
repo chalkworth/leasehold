@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import http.client
 import json
 import socket
@@ -96,12 +95,16 @@ class Client:
     def release(self, lease_id: str, outcome: dict | None = None) -> dict:
         """Release `lease_id` (`POST /v1/release`), sending `outcome`, what its command used
         (`leasehold.measure`), when given. A release with an outcome that the daemon answers
-        with an error (one from before outcomes refuses the field) is sent again without it, so
-        an outcome never keeps a lease from being released."""
+        400 (one from before outcomes refuses the field) or 500 and over (it failed keeping
+        the outcome) is sent again without it, so an outcome never keeps a lease from being
+        released. Any other error is raised as it is."""
         body = {"lease_id": lease_id}
         if outcome is not None:
-            with contextlib.suppress(ApiError):
+            try:
                 return self.request("POST", "/v1/release", body | {"outcome": outcome})
+            except ApiError as exc:
+                if exc.status != 400 and exc.status < 500:
+                    raise
         return self.request("POST", "/v1/release", body)
 
     def outcomes(self) -> dict:
