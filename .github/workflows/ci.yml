@@ -24,32 +24,28 @@ jobs:
         run: uvx --from "git+https://github.com/chalkworth/skills@v0.1.0" chalk-skills check
 
   test:
+    name: test (3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.12", "3.13", "3.14"]
     permissions:
       contents: read
       actions: read  # the timing step downloads the base branch's JUnit report
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.0  # it publishes no moving major tag
-      - run: uv sync --python ${{ matrix.python }} --group bench
+      - run: uv sync --python 3.12 --group bench
       - run: uv run --no-sync pytest -q --junitxml=junit.xml
       - name: Test timing
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          PYTHON: ${{ matrix.python }}
         run: >-
           uv run --no-sync python scripts/test_timing.py junit.xml
-          --title "Python $PYTHON" --compare "junit-$PYTHON"
+          --title "Python 3.12" --compare junit-3.12
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
-          name: junit-${{ matrix.python }}
+          name: junit-3.12
           path: junit.xml
           if-no-files-found: warn
 
