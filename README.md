@@ -124,10 +124,7 @@ A Python tool can take leases itself, without running `hold`:
 import leasehold
 
 with leasehold.lease(4, kind="external", timeout=600) as lease:
-    argv = ["make"]
-    if lease.jobs is not None:
-        argv += ["-j", str(lease.jobs)]
-    lease.run(argv)
+    lease.run(["make"], jobserver=True)  # make's jobs follow the slots granted
 ```
 
 The reference's [From Python](docs/reference.md#from-python) section covers the errors,

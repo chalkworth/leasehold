@@ -13,11 +13,8 @@ leasehold serve &
 uv run --with leasehold python take.py
 ```
 
-`take.py` imports the `leasehold` package, so it must be installed in the Python 3.12+
-interpreter that runs it. `uv run --with leasehold` installs it for the script; `uv tool install`
-alone provides only the `leasehold` command. In a virtual environment instead, run
-`python3 -m venv .venv && .venv/bin/pip install leasehold`, then use that environment's command
-and interpreter (`.venv/bin/leasehold serve` and `.venv/bin/python take.py`).
+`uv tool install` gives you the `leasehold` command only; `take.py` imports the package, which
+`uv run --with leasehold` installs for it (Python 3.12 or later).
 
 `LEASEHOLD_CONFIG` names the config for `serve` and tells the clients, `take.py` included, to use
 its daemon's socket. `serve` refuses to start if a daemon of yours already answers on that
