@@ -93,6 +93,17 @@ declares a total `memory` (the total does not grow with the size), and the host'
 `assumed_memory` otherwise; an item declaring both counts the per-slot size. Refusals and
 `heaviest` judge an item by its `weight`.
 
+**Whole hosts.** An item marked `whole` (a maintenance lease) takes its host to itself:
+
+* it is admitted only once its host holds no lease at all (standing weight aside), and is
+  granted its `weight` whatever its pool's `max`, its per-user limit or memory say;
+* while it waits, the host drains: no item queued after it there, in any pool, is admitted,
+  while the leases running end in their own time. Items queued before it keep their turns
+  (`State.waiting` order). Of several whole items on one host, the oldest goes first and the
+  others wait behind it;
+* nothing else on the host is admitted around it: an item behind it waits without blocking
+  anything, and is not kept room for.
+
 Weight held beyond a pool's `max` or a host's slots is allowed (`leasehold.ledger.Ledger.impose`
 records work that was never asked for, such as an observed process): `fits` then fails for that
 pool and host until enough of it ends.
@@ -168,6 +179,10 @@ class AdmissionPolicy:
     #: already running): no extra slot ever lands there, so their headroom keeps nothing free
     #: on the host.
     observed: frozenset[str] = frozenset()
+    #: What `blocker` says of an item a whole item holds up, in words (who holds the machine
+    #: and until when). None: it says only that the machine is in, or draining for,
+    #: maintenance.
+    maintenance: str | None = None
 
     @classmethod
     def from_pools(
@@ -186,6 +201,7 @@ class AdmissionPolicy:
         memory_overdue: frozenset[ItemKey] = frozenset(),
         lease_memory: int | None = None,
         observed: frozenset[str] = frozenset(),
+        maintenance: str | None = None,
     ) -> AdmissionPolicy:
         """The policy for one machine's `PoolSet`, every pool on host `MACHINE`. `memory` is
         the machine's memory budget in bytes (None: no memory is counted), `assumed_memory`
@@ -193,8 +209,8 @@ class AdmissionPolicy:
         most one decision may admit while memory is short (None: no such limit).
         `memory_pressing` stops every new start on the machine. `memory_overdue` are
         the items that no longer let others by when short. `lease_memory` is the most memory
-        one lease may count (None: no such limit), and `observed` the pools nothing waits in
-        line for."""
+        one lease may count (None: no such limit), `observed` the pools nothing waits in
+        line for, and `maintenance` what `blocker` says of an item a whole item holds up."""
         return cls(
             slots={MACHINE: pool_set.slots},
             pools={
@@ -220,6 +236,7 @@ class AdmissionPolicy:
             memory_overdue=memory_overdue,
             lease_memory={} if lease_memory is None else {MACHINE: lease_memory},
             observed=observed,
+            maintenance=maintenance,
         )
 
     def counted(
@@ -244,19 +261,24 @@ class AdmissionPolicy:
         weight: int,
         memory: int | None = None,
         memory_per_slot: int | None = None,
+        *,
+        whole: bool = False,
     ) -> str | None:
         """Why an item of `weight` (declaring `memory` bytes in all, `memory_per_slot` bytes a
         slot, or neither) could never be admitted
         to `pool`, or None if it could: it is below 1, it would not fit `pool` even with
         nothing held but the standing work (whatever is capped now), or the memory it counts
         would not fit its host's budget even then. Such an item would block its pool's line
-        forever."""
+        forever. A `whole` item is judged only on its pool being there and its weight being
+        at least 1: it waits for an empty host, not for room."""
         policy = self.pools.get(pool)
         if policy is None:
             return f"there is no pool {pool!r}"
         slots = self.slots.get(policy.host, 0)
         if weight < 1:
             return f"weight {weight} is below 1"
+        if whole:
+            return None
         if weight > policy.max:
             return f"weight {weight} is more than pool {pool!r}'s max {policy.max}"
         if weight > slots:
@@ -381,6 +403,8 @@ class Held:
     memory: int | None = None
     #: The memory, in bytes, the item declared for each slot it holds; None: none.
     memory_per_slot: int | None = None
+    #: A whole item's lease (the module docstring's whole hosts).
+    whole: bool = False
 
 
 @dataclass(frozen=True)
@@ -400,6 +424,8 @@ class Waiting:
     max_weight: int | None = None
     #: The memory, in bytes, the item declares for each slot it is granted; None: none.
     memory_per_slot: int | None = None
+    #: The item takes its host to itself (the module docstring's whole hosts).
+    whole: bool = False
 
     @property
     def most(self) -> int:
@@ -649,6 +675,23 @@ def _next_session(
 
 def _any(sessions: dict[str | None, list[Waiting]]) -> bool:
     return any(sessions.values())
+
+
+def draining(state: State, policy: AdmissionPolicy) -> dict[str, Waiting]:
+    """Per host, the whole item it drains for: the oldest whole item waiting there, in a pool
+    the policy has. A host with none is absent."""
+    out: dict[str, Waiting] = {}
+    for item in sorted(state.waiting, key=lambda w: w.order):
+        if item.whole and item.pool in policy.pools:
+            out.setdefault(policy.pools[item.pool].host, item)
+    return out
+
+
+def _behind(item: Waiting, drains: Mapping[str, Waiting], policy: AdmissionPolicy) -> bool:
+    """Whether `item` waits behind the whole item its host drains for: queued after it."""
+    p = policy.pools.get(item.pool)
+    first = None if p is None else drains.get(p.host)
+    return first is not None and item.key != first.key and item.order > first.order
 
 
 def _pools_in_order(policy: AdmissionPolicy) -> list[str]:
@@ -909,11 +952,14 @@ def _admit_least(
     admitted (the one blocking the pool, and those waiting for the memory allowance)."""
     admits: list[Waiting] = []
     stopped: dict[str, list[Waiting]] = {}
+    drains = draining(state, policy)
+    # Whole items go in once their host is empty, below; what waits behind one stays put.
+    lines = [w for w in state.waiting if not w.whole and not _behind(w, drains, policy)]
     for pool in _pools_in_order(policy):
         if pool in policy.closed:
             continue
         limit = policy.pools[pool].per_user_max_running
-        line = _line(state.waiting, pool)
+        line = _line(lines, pool)
         at_limit: set[str | None] = set()
         while True:
             user = _next_user(line, tally, pool, at_limit)
@@ -940,6 +986,16 @@ def _admit_least(
                 tally.fresh_memory[host] = tally.fresh_memory.get(host, 0) + counted
             tally.serve(pool, user, session)
             admits.append(head)
+    for host, first in drains.items():
+        busy = any(h.host == host for h in state.held) or any(
+            policy.pools[a.pool].host == host for a in admits
+        )
+        if busy:
+            continue
+        counted = policy.counted(host, first.weight, first.memory, first.memory_per_slot)
+        tally.add(first.pool, host, first.user, first.session, first.weight, counted)
+        tally.serve(first.pool, first.user, first.session)
+        admits.append(first)
     return admits, stopped
 
 
@@ -970,7 +1026,9 @@ def blocker(
     places: Mapping[ItemKey, int] | None = None,
 ) -> str | None:
     """Why the waiting item `key` is not admitted now, in words, or None when it is not waiting
-    (or would be admitted). The first reason that applies, in this order: its pool is closed;
+    (or would be admitted). The first reason that applies, in this order: a whole item holds
+    its host (`policy.maintenance`); it waits behind the whole item its host drains for (the
+    same); it is that whole item, and leases still run there; its pool is closed;
     another item is ahead of it; its user is at the pool's per-user limit; its pool is capped
     to its reservation; memory is under pressure (`memory_pressing`) or short (`memory_free`);
     its pool is full; the machine's free
@@ -980,6 +1038,17 @@ def blocker(
     if item is None or item.pool not in policy.pools:
         return None
     pool = policy.pools[item.pool]
+    drains = draining(state, policy)
+    if any(h.whole and h.host == pool.host for h in state.held):
+        return policy.maintenance or "the machine is in maintenance"
+    if _behind(item, drains, policy):
+        return policy.maintenance or "the machine is draining for maintenance"
+    if item.whole:
+        running = sum(1 for h in state.held if h.host == pool.host)
+        if running == 0:
+            return None
+        leases = "lease" if running == 1 else "leases"
+        return f"draining: waiting for the {running} {leases} running to end"
     if item.pool in policy.closed:
         return f"pool {item.pool} is closed"
     place = (places if places is not None else positions(state, policy)).get(key, 1)

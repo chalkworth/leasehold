@@ -7,9 +7,9 @@ import os
 import re
 from collections.abc import Sequence
 
-from leasehold import handoff, weights
+from leasehold import handoff, maintenance, weights
 from leasehold.hold import hold
-from leasehold.kinds import GRANTED, KINDS
+from leasehold.kinds import GRANTED, KINDS, WHOLE
 from leasehold.units import declared_to_bytes
 
 ENV_SESSION = "LEASEHOLD_SESSION"
@@ -64,7 +64,12 @@ def _lease_options(s: argparse.ArgumentParser) -> None:
         default=os.environ.get(ENV_SESSION),
         help=f"which of your sessions this is for; they take turns (default ${ENV_SESSION})",
     )
-    s.add_argument("--timeout", type=float, help="give up waiting after S seconds (exit 75)")
+    s.add_argument(
+        "--timeout",
+        type=_seconds,
+        metavar="S|Nm|Nh",
+        help="give up waiting after S seconds, or N minutes or hours (exit 75)",
+    )
     s.add_argument("--ttl", type=float, help="the lease's TTL (default: the machine's)")
     s.add_argument(
         "--memory",
@@ -78,6 +83,17 @@ def _lease_options(s: argparse.ArgumentParser) -> None:
         type=_memory,
         help="instead of --memory: the memory each slot granted will use, e.g. 2g, counted at "
         "the size the lease is granted (and hold holds a contained command to that much)",
+    )
+    s.add_argument(
+        "--until",
+        type=_until,
+        metavar="HH:MM|ISO",
+        help="--kind maintenance only: when the machine is back, shown to those waiting (HH:MM "
+        "is the next such time in UTC). Advisory: the lease lasts as long as it is renewed",
+    )
+    s.add_argument(
+        "--reason",
+        help="--kind maintenance only: why the machine is taken, shown to those waiting",
     )
 
 
@@ -161,6 +177,18 @@ def _sizes(args) -> tuple[int | None, int | None]:
     return args.weight if args.weight is not None else (None, None)
 
 
+def _labels(args) -> dict[str, str]:
+    """`--label`s, with `--until` and `--reason` as the labels a maintenance lease is
+    described by (`leasehold.maintenance`); exit with a message when either is given for
+    another kind."""
+    out = labels(args.label)
+    given = {maintenance.UNTIL: args.until, maintenance.REASON: args.reason}
+    given = {k: v for k, v in given.items() if v is not None}
+    if given and args.kind not in WHOLE:
+        raise SystemExit("leasehold: --until and --reason are for --kind maintenance")
+    return out | given
+
+
 def _hold(args, ctx) -> int:
     weight, max_weight = _sizes(args)
     cmd = list(args.argv)
@@ -184,7 +212,7 @@ def _hold(args, ctx) -> int:
         pool=args.pool,
         weight=weight,
         max_weight=max_weight,
-        labels=labels(args.label),
+        labels=_labels(args),
         session=session(args.session),
         timeout_s=args.timeout,
         ttl_s=args.ttl,
@@ -214,6 +242,26 @@ def _weight(value: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def _seconds(value: str) -> float:
+    """A wait: seconds, or minutes or hours with an `m` or `h`."""
+    scale = {"m": 60.0, "h": 3600.0}.get(value[-1:], 1.0)
+    number = value[:-1] if scale != 1.0 else value.removesuffix("s")
+    try:
+        seconds = float(number) * scale
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not seconds, Nm or Nh") from None
+    if seconds < 0:
+        raise argparse.ArgumentTypeError(f"{value!r} is below 0")
+    return seconds
+
+
+def _until(value: str) -> str:
+    try:
+        return maintenance.parse_until(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def _memory(value: str) -> str:
     try:
         declared_to_bytes(value)
@@ -223,7 +271,7 @@ def _memory(value: str) -> str:
 
 
 def _acquire(args, ctx) -> int:
-    args.labels = labels(args.label)
+    args.labels = _labels(args)
     args.session = session(args.session)
     least, most = _sizes(args)
     args.weight = 1 if least is None else least
