@@ -237,7 +237,7 @@ def _upgraded(config: MachineConfig, old: str) -> tuple[str, bool, tuple[str, ..
             "rewritten from today's template (it was exactly as leasehold 0.2 wrote it): "
             'adds [memory] budget = "auto", kept = "25%"'
         )
-        if template._two_at_once(c.slots, set_them=False):
+        if template.two_at_once_lines(c.slots, set_them=False):
             said += "; leaves the two-at-once weights commented"
         changes = (said,)
         return text, True, changes

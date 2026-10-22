@@ -613,8 +613,9 @@ def apply_frozen(gate: dict, where: Path) -> None:
 
 #: The facts of the machine a run ran on that results from one machine share.
 MACHINE_FACTS = ("cpus", "memory_bytes", "swap_bytes", "kernel", "virt")
-#: How far `memory_bytes` may differ between runs pooled as one machine's, as `bench/run.py`
-#: lets a resumed run's: a guest booted afresh reports a few KiB more or less MemTotal.
+#: How far `memory_bytes` may differ between runs that `compare` pools as one machine's runs,
+#: as it may between the sessions of a run `bench/run.py` resumes: a guest booted afresh
+#: reports a few KiB more or less MemTotal.
 MEMORY_DRIFT = 0.01
 
 

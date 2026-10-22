@@ -38,8 +38,7 @@ def weights(slots: int) -> tuple[int, int]:
     slots: half the slots from 4 up, all of them below (one at a time, at full width, rather
     than two of one job each). Light is half of heavy, rounded up. A user's new config sets
     them (`[commands] heavy_weight`, `light_weight`) where the built-in 4 lets only one run at
-    a time: on 6 slots, two at a time at weight 3 finished sooner than one at weight 4 (the
-    `defaults-h1` bench gate, docs/bench.md)."""
+    a time."""
     heavy = slots // 2 if slots >= 4 else max(1, slots)
     return heavy, max(1, (heavy + 1) // 2)
 
@@ -84,7 +83,7 @@ def _paths(mode: Mode) -> str:
     )
 
 
-def _two_at_once(slots: int, *, set_them: bool) -> str:
+def two_at_once_lines(slots: int, *, set_them: bool) -> str:
     """The `[commands]` lines that run two heavy commands at once on `slots` slots: set, or
     (`set_them` false) offered as comments. Empty where the built-in weights already do."""
     heavy, light = weights(slots)
@@ -120,15 +119,14 @@ def render(
     if mode == "user":
         reserved = pools["work"].reserved
         text = (files("leasehold") / "templates" / "user.toml").read_text()
-        two = _two_at_once(slots, set_them=two_at_once)
+        two = two_at_once_lines(slots, set_them=two_at_once)
         at_once = slots // min(HEAVY_WEIGHT, slots)
         if at_once > 1:
             note = f"{at_once} of them run at once."
         elif two and two_at_once:
             note = (
-                "4 would run one of them at a time; the two lines below run two at once,\n"
-                "# each with fewer jobs, which finished sooner in the bench (docs/bench.md).\n"
-                "# Delete them for one at a time."
+                "the built-in weight 4 would run one of them at a time; the two lines\n"
+                "# below run two at once, each with fewer jobs. Delete them for one at a time."
             )
         else:
             note = "one of them runs at a time."
