@@ -62,7 +62,7 @@ class Glyphs:
 
 
 UNICODE = Glyphs(
-    marks={"work": "■", "external": "▲", "lend": "○", "observed": "▨"},
+    marks={"work": "■", "external": "▲", "lend": "○", "maintenance": "◇", "observed": "▨"},
     other="◆",
     free="·",
     reserved="╌",
@@ -76,7 +76,7 @@ UNICODE = Glyphs(
     cut="…",
 )
 ASCII = Glyphs(
-    marks={"work": "#", "external": "^", "lend": "o", "observed": "%"},
+    marks={"work": "#", "external": "^", "lend": "o", "maintenance": "M", "observed": "%"},
     other="*",
     free=".",
     reserved="-",

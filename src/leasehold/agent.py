@@ -23,13 +23,13 @@ from collections.abc import Callable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from leasehold import __version__, observe, proctable, status
+from leasehold import __version__, maintenance, observe, proctable, status
 from leasehold.access import Forbidden
 from leasehold.admission import AdmissionPolicy, alone
 from leasehold.events import EventLog, EventType, Snapshot, changes
 from leasehold.facts import probe
 from leasehold.guard import Guard, Reading
-from leasehold.kinds import GRANTED, PREEMPTIBLE, LeaseKind
+from leasehold.kinds import GRANTED, PREEMPTIBLE, WHOLE, LeaseKind
 from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
 from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, available, some_avg10
@@ -234,7 +234,22 @@ class MachineAgent:
             memory_pressing=guarding and counting and self.guard.pressing,
             memory_overdue=self._overdue() if free is not None else frozenset(),
             lease_memory=self.limits.memory_bytes,
+            maintenance=None if (info := self.maintenance()) is None else info["message"],
         )
+
+    def maintenance(self) -> dict | None:
+        """The maintenance lease waiters are told about (`leasehold.maintenance.describe`):
+        the oldest one held, else the oldest one waiting for the machine to drain. None when
+        there is neither."""
+        for rows, held in ((self.ledger.leases(), True), (self.ledger.queued(), False)):
+            for row in rows:
+                if row["kind"] in WHOLE:
+                    return maintenance.describe(status.public(row), held=held, now=self._clock())
+        return None
+
+    def _whole(self) -> int:
+        """The weight a maintenance lease takes: every slot standing work does not hold."""
+        return self.limits.slots - sum(self.config.standing_held().values())
 
     def memory_free(self) -> int:
         """While the guard is on, the most memory new work may count: none while a reading is
@@ -511,7 +526,7 @@ class MachineAgent:
         """(pool, None) for a request that may go in line, or (None, why not)."""
         if req.kind not in GRANTED:
             return None, f"{req.kind} leases are made by the machine agent, never asked for"
-        pool = req.pool or self.config.kinds.get(req.kind)
+        pool = req.pool or self.config.kind_pool(req.kind)
         if pool is None:
             return None, f"no pool is set for {req.kind} leases"
         if pool not in self.config.pool_set().pools:
@@ -522,6 +537,11 @@ class MachineAgent:
             return None, f"pool {pool!r} takes " + (
                 "only lend leases" if pool in self.lend_pools else "no lend leases"
             )
+        if req.kind in WHOLE and self._whole() < 1:
+            return None, (
+                f"[[standing]] work holds all {self.limits.slots} slots, so a maintenance lease "
+                "has none to take; lower its weight to take the machine"
+            )
         return pool, None
 
     def acquire(self, req: AcquireRequest, *, user: str | None, in_line: bool = False) -> dict:
@@ -531,6 +551,11 @@ class MachineAgent:
         pool, refused = self._refusal(req)
         if refused is not None:
             return {"status": "refused", "reason": refused}
+        if req.kind in WHOLE:
+            # The whole machine, whatever was asked: its size is not the client's to choose.
+            req = req.model_copy(
+                update={"weight": self._whole(), "max_weight": None, "elastic": False}
+            )
         lease_id = req.lease_id or uuid.uuid4().hex
         memory = None if req.memory is None else memory_to_bytes(req.memory)
         per_slot = None if req.memory_per_slot is None else memory_to_bytes(req.memory_per_slot)
@@ -612,12 +637,15 @@ class MachineAgent:
                 "elastic": self.config.elastic.model_dump(),
             }
         if isinstance(outcome, Queued):
+            info = self.maintenance()
+            held_up = {} if info is None or info["lease_id"] == lease_id else {"maintenance": info}
             return {
                 "status": "queued",
                 "lease_id": lease_id,
                 "position": outcome.position,
                 "blocked": outcome.blocked,
                 **self._waiting_range(lease_id),
+                **held_up,
             }
         return {"status": "refused", "lease_id": lease_id, "reason": outcome.reason}
 
@@ -866,6 +894,7 @@ class MachineAgent:
             memory_limit=self.memory_limit,
             leases=listing["leases"],
             queue=listing["queue"],
+            maintenance=self.maintenance(),
             now=self._clock(),
             version=__version__,
         )

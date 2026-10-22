@@ -226,6 +226,8 @@ def _print_status(st: dict) -> None:
     print(f"load {load.get('loadavg')}  pressure {psi or 'unknown (no PSI)'}")
     lend = st["lend"]
     print(f"lend {'open' if lend['eligible'] else 'closed'}: {lend['reason']}")
+    if st.get("maintenance"):
+        print(st["maintenance"]["message"])
     print("pools:")
     for name, p in st["pools"].items():
         flags = " preemptible" if p["preemptible"] else ""

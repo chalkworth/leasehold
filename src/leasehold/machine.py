@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from leasehold.admission import AdmissionPolicy
 from leasehold.commands import CommandRule, CommandSettings
 from leasehold.elastic import DEFAULT_HEADROOM, Headroom
-from leasehold.kinds import KINDS, PREEMPTIBLE
+from leasehold.kinds import KINDS, PREEMPTIBLE, WHOLE
 from leasehold.ledger import FILENAME
 from leasehold.model import Name, Pool, PoolSet
 from leasehold.observe import ObserveRule
@@ -350,6 +350,15 @@ class MachineConfig(_Strict):
         if value is not None:
             int(value, 8)
         return value
+
+    def kind_pool(self, kind: str) -> str | None:
+        """The pool a request of `kind` goes to when it names none: the one `[kinds]` gives it,
+        and for a `maintenance` lease that `[kinds]` leaves out, the `work` kind's. None when
+        there is neither."""
+        pool = self.kinds.get(kind)
+        if pool is None and kind in WHOLE:
+            pool = self.kinds.get("work")
+        return pool
 
     @classmethod
     def defaults(cls, *, slots: int) -> MachineConfig:
@@ -688,6 +697,7 @@ class MachineConfig(_Strict):
         memory_pressing: bool = False,
         memory_overdue: frozenset[tuple[str, str]] = frozenset(),
         lease_memory: int | None = None,
+        maintenance: str | None = None,
     ) -> AdmissionPolicy:
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
@@ -699,7 +709,8 @@ class MachineConfig(_Strict):
         `memory_pressing` nothing new admitted at all. `lease_memory` is the most memory one
         lease may count (`[ceiling] memory`), with a budget or without one. The observed pool
         is `observed`, since nothing waits in line for it, and its headroom is 0 unless the
-        config gives one."""
+        config gives one. `maintenance` is what waiters held up by a maintenance lease are
+        told."""
         pool_set = self.pool_set()
         observed = self.observed_pool
         pools = {}
@@ -721,6 +732,7 @@ class MachineConfig(_Strict):
                 capped=frozenset(pool_set.pools) if capped else frozenset(),
                 lease_memory=lease_memory,
                 observed=unqueued,
+                maintenance=maintenance,
             )
         return AdmissionPolicy.from_pools(
             pool_set,
@@ -736,6 +748,7 @@ class MachineConfig(_Strict):
             memory_overdue=memory_overdue,
             lease_memory=lease_memory,
             observed=unqueued,
+            maintenance=maintenance,
         )
 
     @property

@@ -5,6 +5,35 @@ and versions follow [Semantic Versioning](https://semver.org/) as described unde
 the README: before 1.0, a minor release may break the public API, and every break is listed
 here.
 
+## [Unreleased]
+
+### Added
+
+- A `maintenance` lease kind takes the whole machine for a while, for a benchmark window or an
+  upgrade. While it waits, the machine drains. Requests that arrive after it wait behind it in
+  every pool, the owner's own `work` included, and the leases already running finish. Once no
+  lease is held, it is granted every slot that standing work does not hold. It is never
+  revoked and revokes nothing but `lend` leases. With no `[kinds]` entry it goes to the `work`
+  kind's pool. `[kinds]` accepts `maintenance`. On a machine whose `[[standing]]` work holds
+  every slot, it is refused.
+- `hold` and `acquire` take `--until HH:MM|ISO` and `--reason TEXT` with `--kind maintenance`.
+  They become the lease's `until` (RFC 3339, UTC) and `reason` labels. The end is advisory:
+  leasehold shows it and never ends the lease by it. Either option with another kind exits 1.
+- A request held up by a maintenance lease gives `blocked` as `machine draining for maintenance
+  until 07:00 UTC (benchmark window)`, or `machine in maintenance until ...` once it is held.
+  A queued `/v1/acquire` answer then carries `maintenance`.
+- The status object has a `maintenance` field: null, or the lease's `lease_id`, `state`
+  (`held` or `draining`), `user`, `name`, `reason`, `until` and `message`. `leasehold status`
+  prints the message.
+- When `hold` or `acquire` gives up (exit 75) while a maintenance lease holds or drains the
+  machine, it prints `held by NAME (maintenance) until TIME`, or `draining for ...` while the
+  lease still waits, a line scripts can read.
+- `hold --timeout` and `acquire --timeout` also take minutes and hours (`30m`, `2h`). A
+  negative timeout is now refused.
+- `leasehold.kinds.WHOLE`, `leasehold.maintenance`, `MachineConfig.kind_pool`, and in
+  `leasehold.admission` the `whole` field of `Held` and `Waiting`, `AdmissionPolicy.maintenance`,
+  `refusal(..., whole=)` and `draining()`.
+
 ## [0.4.0]
 
 ### Added

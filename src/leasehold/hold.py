@@ -52,7 +52,7 @@ import sys
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, jobs, leasing, shell, supervise, terminal, weights
+from leasehold import contain, jobs, leasing, maintenance, shell, supervise, terminal, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -62,7 +62,7 @@ from leasehold.exits import (
     EXIT_UNAVAILABLE,
     end_by,
 )
-from leasehold.kinds import PREEMPTIBLE
+from leasehold.kinds import PREEMPTIBLE, WHOLE
 from leasehold.leasing import child_env, lease_request
 
 __all__ = [
@@ -103,7 +103,9 @@ def wait_for_grant(
     answer, or an error answer under 500); `EXIT_UNAVAILABLE` when no daemon answers (said,
     unless `quiet_unavailable`); `fault` when the daemon answers with an error of 500 or more,
     a fault of its own rather than an answer to the request (`EXIT_UNAVAILABLE` unless given).
-    For an error answer, `answer["reason"]` is the daemon's error text. While it waits it says
+    For an error answer, `answer["reason"]` is the daemon's error text. Giving up while a
+    maintenance lease holds the machine, or drains it, it also says who holds it and until
+    when, as one line a script can read (`maintenance.holder_line`). While it waits it says
     its place and why whenever they change, and at least every `leasing.PROGRESS_S` with the
     time waited so far."""
     said: list[str] = []
@@ -120,6 +122,8 @@ def wait_for_grant(
         return None, leasing.wait(client, request, timeout_s, on_wait=waiting)
     except leasing.Busy as exc:
         say(f"gave up after {timeout_s:g}s in line")
+        if exc.answer.get("maintenance"):
+            say(maintenance.holder_line(exc.answer["maintenance"]))
         return EXIT_BUSY, exc.answer
     except leasing.Refused as exc:
         say(f"refused: {exc.reason}" if exc.status is None else exc.reason)
@@ -138,6 +142,8 @@ def waiting_line(request: dict, answer: dict) -> str:
     weight = request.get("weight", 1)
     most = request.get("max_weight") or weight
     slots = "1 slot" if most == weight == 1 else f"{weights.text(weight, most)} slots"
+    if request.get("kind") in WHOLE:
+        slots = "the whole machine"
     where = f" in pool {request['pool']}" if request.get("pool") else ""
     line = f"waiting for {slots}{where} ({request['kind']}): place {answer.get('position')}"
     blocked = answer.get("blocked")
@@ -236,6 +242,8 @@ def hold(
             "many as it can) whatever the lease holds, and the lease keeps its size; leave "
             "the count out to use the lease's"
         )
+    if weight is None and kind in WHOLE:
+        weight = 1  # the daemon gives a maintenance lease the whole machine, whatever is asked
     request = None
     try:
         with _interruptible():

@@ -68,6 +68,7 @@ source_modules =
     leasehold.units
     leasehold.process
     leasehold.kinds
+    leasehold.maintenance
     leasehold.exits
     leasehold.client
     leasehold.facts
