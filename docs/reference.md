@@ -899,8 +899,9 @@ except leasehold.Busy:
     ...  # try again later
 except leasehold.Cancelled:
     ...  # stopping was set
-with lease:
-    ...
+else:
+    with lease:
+        ...
 ```
 
 A revoked `lend` lease, or a `lend` lease whose renewals go unanswered past its TTL, sets
