@@ -5,7 +5,7 @@ and versions follow [Semantic Versioning](https://semver.org/) as described unde
 the README: before 1.0, a minor release may break the public API, and every break is listed
 here.
 
-## [Unreleased]
+## [0.4.0]
 
 ### Added
 

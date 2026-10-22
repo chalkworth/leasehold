@@ -51,4 +51,4 @@ __all__ = [
 ]
 
 #: The one place the version is written; the build reads it from here (`[tool.hatch.version]`).
-__version__ = "0.3.0"
+__version__ = "0.4.0"
