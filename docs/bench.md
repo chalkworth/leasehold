@@ -188,12 +188,14 @@ What these say:
 The README's headline table still shows the 0.2 run, which these runs neither contradict nor
 improve on.
 
-## Two heavy jobs at once (opt-in)
+## Two heavy jobs at once
 
 `[commands] heavy_weight = 3` and `light_weight = 2` on 6 slots let two builds or test runs
 run at once, with memory counted as above. An earlier draft of 0.3 generated this setting by
-default; these runs measured it then, and are why it is opt-in. One run per condition, in
-sessions earlier the same day as the runs above.
+default; these runs measured it then and did not show it to be better, so 0.3 left it opt-in.
+The [`defaults-h1` gate](#pre-registered-comparisons), with 8 rounds on fresh seeds, later found it faster on every
+metric it judges, and since 0.4 a new config sets it. The runs below are one run per condition,
+in sessions earlier the same day as the runs above.
 
 Like those, they are not directly comparable with the 0.2 tables at the top. Other people's work
 was using about 6 GiB of the machine's memory that day, so the benchmark's limit was lowered to
@@ -260,8 +262,8 @@ What these say:
   whatever its weight, so its wakeup tail is unmanaged's (19 ms) unless `hard_cpu` is on, as at
   0.2.
 
-These runs did not show two at once to be better on this machine, which is why it is not the
-default.
+These runs did not show two at once to be better on this machine. The `defaults-h1` gate, with
+more rounds and a pre-registered verdict, did.
 
 ## Simulator
 
@@ -629,6 +631,16 @@ The gates so far:
   with OOM kills, so by that gate's order `w=3-3,h=1` was never tested. The same A/A run froze
   this gate's plan, `bench/gates/defaults-h1.plan.toml`, at 8 rounds, four Williams cycles of
   its two arms. If the candidate fails, leasehold keeps fixed weight 4.
+
+  It passed: every metric on both workloads, no hard rule broken, over all 8 rounds
+  ([verdict](../bench/results/8cpu-16g/defaults-h1/compare-defaults-h1.md)). Against fixed 4,
+  the geometric-mean ratios were 0.857 for makespan, 0.795 for job mean, 1.125 for wake p99
+  and 1.14 to 1.16 for `git status` p95. On this machine's 6 slots, `w=3-3` is a fixed weight
+  of 3 and `h=1` is the headroom `auto` already gives, so the setting it supports is
+  `[commands] heavy_weight = 3`, which a new config on 4 to 7 slots now writes. Memory
+  pressure stayed at 0 in every round of both workloads, so `memheavy` did not test behaviour
+  under memory pressure. The guest booted afresh before the last round reported 12 KiB more
+  memory than before; `bench/run.py` and `compare` now accept a difference of up to 1%.
 
 The workloads are pinned in the gate files and `compare` checks them against each run's
 `spec.json`:

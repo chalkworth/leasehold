@@ -270,7 +270,12 @@ def config(
     """The config the daemon of `condition` runs on: `init_text` (what `leasehold init --user
     --print` writes for this machine) with the condition's parameters applied, its ledger at
     `ledger`. A ValueError if the generated config cannot take them."""
-    text = neutral(init_text)
+    # The arm alone sets the weights: drop those `init` writes to run two heavy commands at once.
+    text = "".join(
+        line
+        for line in neutral(init_text).splitlines(keepends=True)
+        if not line.startswith(("heavy_weight = ", "light_weight = "))
+    )
     raw = tomllib.loads(text)
     if condition.base == "lh-enforced-v020":
         from leasehold.template import render_user_0_2

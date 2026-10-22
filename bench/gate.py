@@ -613,6 +613,18 @@ def apply_frozen(gate: dict, where: Path) -> None:
 
 #: The facts of the machine a run ran on that results from one machine share.
 MACHINE_FACTS = ("cpus", "memory_bytes", "swap_bytes", "kernel", "virt")
+#: How far `memory_bytes` may differ between runs pooled as one machine's, as `bench/run.py`
+#: lets a resumed run's: a guest booted afresh reports a few KiB more or less MemTotal.
+MEMORY_DRIFT = 0.01
+
+
+def _one_machine(machines: list) -> bool:
+    """Whether `machines` (each `MACHINE_FACTS` in order) are one machine: equal but for
+    memory, which may differ by `MEMORY_DRIFT`."""
+    rest = {json.dumps(m[:1] + m[2:]) for m in machines}
+    memory = [m[1] for m in machines if m[1]]
+    drift = max(memory) - min(memory) if memory else 0
+    return len(rest) == 1 and drift <= MEMORY_DRIFT * min(memory or [0])
 
 
 def collect(dirs: list[Path]) -> tuple[list[dict], list[dict]]:
@@ -723,6 +735,8 @@ def check_provenance(gate: dict, records: list[dict], infos: list[dict]) -> None
         ("machine", "machines (CPUs, memory, swap, kernel, virtualisation)"),
     ):
         values = sorted({str(r.get(field)) for r in records})
+        if field == "machine" and _one_machine([r[field] for r in records]):
+            continue
         if len(values) > 1:
             why.append(f"the runs come from {len(values)} {label}: {', '.join(values)}")
     if why:

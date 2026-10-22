@@ -231,7 +231,7 @@ def _upgraded(config: MachineConfig, old: str) -> tuple[str, bool, tuple[str, ..
         assert c.cpus is not None and c.memory is not None
         text = template.render(
             name=config.name, mode="user", slots=c.slots, cpus=c.cpus, memory=c.memory,
-            about=_about(old),
+            about=_about(old), two_at_once=False,
         )  # fmt: skip
         changes = (
             "rewritten from today's template (it was exactly as leasehold 0.2 wrote it): "

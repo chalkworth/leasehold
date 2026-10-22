@@ -36,9 +36,10 @@ EXAMPLE = {
 def weights(slots: int) -> tuple[int, int]:
     """The (heavy, light) weights that let two builds or test runs run at once on `slots`
     slots: half the slots from 4 up, all of them below (one at a time, at full width, rather
-    than two of one job each). Light is half of heavy, rounded up. A user's config offers them
-    as an opt-in (`[commands] heavy_weight`, `light_weight`) where the built-in 4 lets only one
-    run at a time."""
+    than two of one job each). Light is half of heavy, rounded up. A user's new config sets
+    them (`[commands] heavy_weight`, `light_weight`) where the built-in 4 lets only one run at
+    a time: on 6 slots, two at a time at weight 3 finished sooner than one at weight 4 (the
+    `defaults-h1` bench gate, docs/bench.md)."""
     heavy = slots // 2 if slots >= 4 else max(1, slots)
     return heavy, max(1, (heavy + 1) // 2)
 
@@ -52,8 +53,8 @@ def kept_for_you(cpus: int) -> int:
 def sized(mode: Mode, facts: dict) -> str:
     """The config `init` (and `setup`) writes for a machine of these `facts` (`facts.probe`):
     one slot per CPU, less `kept_for_you` for a user's own daemon, and at most three quarters of
-    the memory to any one lease. A user's own also counts memory (`[memory]`), and offers the
-    `weights` that run two builds at once as an opt-in."""
+    the memory to any one lease. A user's own also counts memory (`[memory]`), and sets the
+    `weights` that run two builds at once."""
     cpus = facts.get("cpus_logical") or os.cpu_count() or 1
     memory = facts.get("memory_bytes") or 0
     kept = kept_for_you(cpus) if mode == "user" else 0
@@ -83,28 +84,54 @@ def _paths(mode: Mode) -> str:
     )
 
 
-def _opt_in(slots: int) -> str:
+def _two_at_once(slots: int, *, set_them: bool) -> str:
+    """The `[commands]` lines that run two heavy commands at once on `slots` slots: set, or
+    (`set_them` false) offered as comments. Empty where the built-in weights already do."""
     heavy, light = weights(slots)
     if heavy >= min(HEAVY_WEIGHT, slots):
         return ""
+    if not set_them:
+        return (
+            f"# To run two at once instead, each with fewer jobs (opt-in):\n"
+            f"# heavy_weight = {heavy}\n"
+            f"# light_weight = {light}\n"
+            "# A command that declares no memory then counts its weight times the budget "
+            "over the\n# slots, which may be less than it uses: declare memory for memory-heavy "
+            "work (a rule's\n# `memory`, or `hold --memory`).\n"
+        )
     return (
-        f"# To run two at once instead, each with fewer jobs (opt-in):\n"
-        f"# heavy_weight = {heavy}\n"
-        f"# light_weight = {light}\n"
-        "# A command that declares no memory then counts its weight times the budget over the\n"
-        "# slots, which may be less than it uses: declare memory for memory-heavy work (a rule's\n"
+        f"heavy_weight = {heavy}\n"
+        f"light_weight = {light}\n"
+        "# A command that declares no memory counts its weight times the budget over the slots,\n"
+        "# which may be less than it uses: declare memory for memory-heavy work (a rule's\n"
         "# `memory`, or `hold --memory`).\n"
     )
 
 
-def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about: str) -> str:
+def render(
+    *, name: str, mode: Mode, slots: int, cpus: float, memory: str, about: str,
+    two_at_once: bool = True,
+) -> str:  # fmt: skip
     """The config text for a machine with `slots` slots, `cpus` CPUs and `memory` to lend one
-    lease (a size such as `48g`)."""
+    lease (a size such as `48g`). A user's config sets the weights that run two heavy commands
+    at once where the built-in ones run one; with `two_at_once` false it offers them as
+    comments instead and keeps the built-in weights."""
     pools = default_pools(slots)
     if mode == "user":
         reserved = pools["work"].reserved
         text = (files("leasehold") / "templates" / "user.toml").read_text()
+        two = _two_at_once(slots, set_them=two_at_once)
         at_once = slots // min(HEAVY_WEIGHT, slots)
+        if at_once > 1:
+            note = f"{at_once} of them run at once."
+        elif two and two_at_once:
+            note = (
+                "4 would run one of them at a time; the two lines below run two at once,\n"
+                "# each with fewer jobs, which finished sooner in the bench (docs/bench.md).\n"
+                "# Delete them for one at a time."
+            )
+        else:
+            note = "one of them runs at a time."
         return Template(text).substitute(
             name=name,
             about=about,
@@ -113,11 +140,8 @@ def render(*, name: str, mode: Mode, slots: int, cpus: float, memory: str, about
             memory=memory,
             work_reserved=reserved,
             background_max=max(1, slots - reserved),
-            heavy_note=f"On {slots} slots, "
-            + (
-                "one of them runs at a time." if at_once == 1 else f"{at_once} of them run at once."
-            ),
-            opt_in=_opt_in(slots) if at_once == 1 else "",
+            heavy_note=f"On {slots} slots, {note}",
+            opt_in=two,
         )
 
     text = (files("leasehold") / "templates" / "machine.toml").read_text()

@@ -35,6 +35,12 @@ The machine stays usable and nothing is lost, at a price: the same work took up 
 long, because heavy jobs wait their turn instead of overlapping. One machine and one run per
 condition so far; the memory results vary from run to run.
 
+Since 0.4, a config `setup` writes for a machine of 4 to 7 slots runs two heavy jobs at once
+(weight 3 each on 6 slots) instead of one at weight 4. In a pre-registered gate of 8 rounds on
+the same machine, that cut the time to finish the same work by 14% and each job's mean time by
+20%, with `git status` and wakeup latency within the gate's margins
+([the verdict](bench/results/8cpu-16g/defaults-h1/compare-defaults-h1.md)).
+
 ## Start
 
 ```sh
