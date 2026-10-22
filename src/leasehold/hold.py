@@ -52,11 +52,10 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, follow, jobs, shell, terminal, weights
+from leasehold import contain, follow, jobs, leasing, shell, terminal, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -66,7 +65,7 @@ from leasehold.exits import (
     EXIT_UNAVAILABLE,
     end_by,
 )
-from leasehold.kinds import PREEMPTIBLE
+from leasehold.leasing import child_env, lease_request, own_env
 from leasehold.units import memory_to_bytes
 
 __all__ = [
@@ -75,14 +74,12 @@ __all__ = [
     "EXIT_REFUSED",
     "EXIT_REVOKED",
     "EXIT_UNAVAILABLE",
+    "child_env",
     "hold",
+    "lease_request",
     "wait_for_grant",
     "waiting_line",
 ]
-#: The most one acquire request waits before asking again (each ask keeps the place in line).
-_POLL_S = 20.0
-#: While nothing changes in line, how often a wait says it is still waiting.
-PROGRESS_S = 20.0
 #: The signals that interrupt `hold` before its command runs, and are sent on to it after.
 _SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 #: The signals that, killing the command on a terminal, end `hold` the same way.
@@ -118,63 +115,40 @@ def wait_for_grant(
     quiet_unavailable: bool = False,
     fault: int = EXIT_UNAVAILABLE,
 ) -> tuple[int | None, dict]:
-    """Ask for `request`'s lease, waiting in line (each ask keeps the place) until it is granted
-    or `timeout_s` is up. `(None, answer)` on a grant, else `(exit code, answer)`: `EXIT_BUSY`
+    """Ask for `request`'s lease, waiting in line (`leasing.wait`) until it is granted or
+    `timeout_s` is up. `(None, answer)` on a grant, else `(exit code, answer)`: `EXIT_BUSY`
     with the place in line given back; `EXIT_REFUSED` when the daemon said no (a `refused`
     answer, or an error answer under 500); `EXIT_UNAVAILABLE` when no daemon answers (said,
     unless `quiet_unavailable`); `fault` when the daemon answers with an error of 500 or more,
     a fault of its own rather than an answer to the request (`EXIT_UNAVAILABLE` unless given).
-    For an error answer, `answer["reason"]` is the daemon's error text. While it waits it
-    says its place and why whenever they change, and
-    at least every `PROGRESS_S` with the time waited so far. Anything raised while waiting (an
-    interrupt) gives the place back before it goes on."""
-    start = time.monotonic()
-    deadline = None if timeout_s is None else start + timeout_s
-    waited = False
-    last_line = None
-    last_said = start
-    answer: dict = {}
+    For an error answer, `answer["reason"]` is the daemon's error text. While it waits it says
+    its place and why whenever they change, and at least every `leasing.PROGRESS_S` with the
+    time waited so far."""
+    said: list[str] = []
+
+    def waiting(where: leasing.Waiting) -> None:
+        line = waiting_line(request, {"position": where.position, "blocked": where.blocked})
+        if said and said[-1] == line:
+            say(f"{line}; {where.waited_s:.0f}s so far")
+        else:
+            say(line)
+            said.append(line)
+
     try:
-        while True:
-            left = _POLL_S if deadline is None else max(0.0, deadline - time.monotonic())
-            # The first ask answers at once, so a wait is reported as it starts.
-            wait_s = min(_POLL_S, left) if waited else 0.0
-            answer = client.acquire(**request, wait_s=wait_s)
-            status = answer["status"]
-            if status == "granted":
-                return None, answer
-            if status == "refused":
-                say(f"refused: {answer.get('reason')}")
-                return EXIT_REFUSED, answer
-            line = waiting_line(request, answer)
-            now = time.monotonic()
-            if line != last_line:
-                say(line)
-                last_line, last_said = line, now
-            elif now - last_said >= PROGRESS_S:
-                say(f"{line}; {now - start:.0f}s so far")
-                last_said = now
-            waited = True
-            if deadline is not None and time.monotonic() >= deadline:
-                with contextlib.suppress(Unavailable, ApiError):
-                    client.release(request["lease_id"])
-                say(f"gave up after {timeout_s:g}s in line")
-                return EXIT_BUSY, answer
+        return None, leasing.wait(client, request, timeout_s, on_wait=waiting)
+    except leasing.Busy as exc:
+        say(f"gave up after {timeout_s:g}s in line")
+        return EXIT_BUSY, exc.answer
+    except leasing.Refused as exc:
+        say(f"refused: {exc.reason}" if exc.status is None else exc.reason)
+        return EXIT_REFUSED, exc.answer
+    except leasing.DaemonError as exc:
+        say(exc.reason)
+        return fault, {"reason": exc.reason, "status": exc.status}
     except Unavailable as exc:
         if not quiet_unavailable:
             say(f"{exc}; is a daemon running? (`leasehold doctor` says what it finds)")
-        return EXIT_UNAVAILABLE, answer
-    except ApiError as exc:
-        say(str(exc))
-        if exc.status >= 500:
-            with contextlib.suppress(Unavailable, ApiError):
-                client.release(request["lease_id"])
-            return fault, {"reason": str(exc), "status": exc.status}
-        return EXIT_REFUSED, {"reason": str(exc), "status": exc.status}
-    except BaseException:
-        with contextlib.suppress(Unavailable, ApiError):
-            client.release(request["lease_id"])
-        raise
+        return EXIT_UNAVAILABLE, {}
 
 
 def waiting_line(request: dict, answer: dict) -> str:
@@ -447,38 +421,6 @@ def auto_size(
     return dataclasses.replace(matched.rule, threads=count or matched.rule.threads)
 
 
-def lease_request(
-    *,
-    kind: str = "work",
-    pool: str | None = None,
-    weight: int = 1,
-    labels: dict[str, str] | None = None,
-    session: str | None = None,
-    ttl_s: float | None = None,
-    memory: str | None = None,
-    max_weight: int | None = None,
-    memory_per_slot: str | None = None,
-) -> dict:
-    """An acquire request for a new lease of its own id, as `hold` sends it: `weight` to
-    `max_weight` slots (None, or `weight`: no range is sent). `memory` (a size such as `4g`)
-    is the memory the work declares in all, `memory_per_slot` for each slot it is granted;
-    None declares none. It never asks for an elastic lease: `hold` makes its lease elastic
-    later, once the command's jobs show they follow the jobserver (`leasehold.follow`)."""
-    ranged = max_weight is not None and max_weight > weight
-    return {
-        "kind": kind,
-        "pool": pool,
-        "weight": weight,
-        "labels": labels or {},
-        "lease_id": uuid.uuid4().hex,
-        "session": session,
-        "ttl_s": ttl_s,
-        "memory": memory,
-        "max_weight": max_weight if ranged else None,
-        "memory_per_slot": memory_per_slot,
-    }
-
-
 def run_leased(
     client: Client,
     argv: Sequence[str],
@@ -691,46 +633,6 @@ def scope_prefix(request: dict, answer: dict, memory: str | None) -> list[str] |
     )
 
 
-def own_env() -> dict[str, str]:
-    """This process's environment as every command `hold` runs starts from, leased or not:
-    without `LEASEHOLD_WANT`, which is what `hold` was asked for, not its command."""
-    return {k: v for k, v in os.environ.items() if k != weights.ENV_WANT}
-
-
-def child_env(
-    lease_id: str,
-    granted: dict,
-    count: int,
-    *,
-    job_env: bool,
-    threads: jobs.Threads = "jobs",
-    env: Mapping[str, str] | None = None,
-    socket: str | None = None,
-    elastic_jobs: int | None = None,
-) -> dict[str, str]:
-    """The command's environment: `env` (default ours) without `LEASEHOLD_WANT` (what this
-    lease was asked for is not what the commands it runs ask for), with the lease's
-    `LEASEHOLD_*` variables (`LEASEHOLD_WEIGHT` is the weight granted), and with `job_env` the
-    job-count and thread-count variables for this lease (`jobs.sized_env`). Without `job_env`,
-    the enclosing lease's sizing is removed (`jobs.unsized_env`). Which variables an enclosing
-    lease set is read from `env` before this lease's id is added, so it counts only when `env`
-    holds a `LEASEHOLD_LEASE_ID`. `socket`, the daemon's, is passed on as `LEASEHOLD_SOCKET`,
-    made absolute. `elastic_jobs`, for a lease whose jobserver may grow to that many jobs, is
-    passed to `jobs.sized_env`."""
-    outer = {k: v for k, v in (os.environ if env is None else env).items() if k != weights.ENV_WANT}
-    lease = {
-        "LEASEHOLD_LEASE_ID": lease_id,
-        "LEASEHOLD_GRANT": str(granted["grant"]),
-        "LEASEHOLD_POOL": granted["pool"],
-        "LEASEHOLD_WEIGHT": str(granted["weight"]),
-    }
-    if socket:
-        lease["LEASEHOLD_SOCKET"] = os.path.abspath(socket)
-    if job_env:
-        return {**jobs.sized_env(outer, count, threads, elastic_jobs=elastic_jobs), **lease}
-    return {**jobs.unsized_env(outer), **lease}
-
-
 def jobserver_env(env: Mapping[str, str], count: int, fifo: Path) -> dict[str, str]:
     """`MAKEFLAGS` naming the jobserver, and the same in `CARGO_MAKEFLAGS` and `MFLAGS` where
     they are set (cargo reads those first, so an outer build's would win)."""
@@ -768,20 +670,19 @@ def _supervise(child, lease, request, grace_s, follower: follow.Follower | None 
                 follower.step()
                 continue
             renewal = lease.renew()
-            status = None if renewal is None else renewal["status"]
-            if status == "ok":
+            verdict = leasing.judge(
+                lease.kind, renewal, time.monotonic() - lease.last_ok, lease.ttl
+            )
+            if verdict == "ok":
                 queued = False
                 if follower is not None:
                     follower.heard(renewal)
                     follower.step()
-            if status == "revoked":
+            if verdict == "revoked":
                 revoked = renewal.get("reason") or "revoked"
-            elif lease.kind in PREEMPTIBLE and (
-                status == "unknown"
-                or (status is None and time.monotonic() - lease.last_ok > lease.ttl)
-            ):
+            elif verdict == "lost":
                 revoked = "the lease was lost"
-            elif status == "unknown":
+            elif verdict == "ask":
                 again = lease.ask_again(request) or {}
                 if again.get("status") == "refused":
                     _say(

@@ -41,6 +41,7 @@ source_modules =
     leasehold.busy
     leasehold.follow
     leasehold.hold
+    leasehold.leasing
     leasehold.handoff
     leasehold.report
     leasehold.webui
