@@ -3,7 +3,7 @@
 The detail behind the [README](../README.md): how leases are admitted, every config key, the
 command line, the HTTP API, and the integrations.
 
-- [Leases](#leases): kinds, pools, turns, memory, lending, observed programs
+- [Leases](#leases): kinds, pools, turns, memory, lending, observed programs, maintenance
 - [Installing](#installing): your own daemon, the machine's daemon
 - [The config file](#the-config-file)
 - [Running work under a lease](#running-work-under-a-lease): `hold`, sizing, exit codes, `acquire`, [from Python](#from-python)
@@ -29,10 +29,12 @@ number, a fencing token.
 | `work` | the machine owner's own work | never |
 | `external` | someone else's bounded job: a CI runner, a test gate | never |
 | `lend` | spare capacity lent out (a batch job, a volunteer-computing client) | always: revoked when the machine needs it back |
+| `maintenance` | the whole machine, for a while: a benchmark window, an upgrade ([below](#maintenance)) | never |
 | `observed` | a known program seen running that never asked for a lease (`[[observe]]`) | never; only the daemon makes them |
 
-Each kind goes to a pool (`[kinds]`, by default the pool of the same name). A pool listed in
-`[lend] pools` takes only `lend` leases, and reserves nothing.
+Each kind goes to a pool (`[kinds]`, by default the pool of the same name; `maintenance`, when
+`[kinds]` leaves it out, goes to the `work` kind's pool). A pool listed in `[lend] pools` takes
+only `lend` leases, and reserves nothing.
 
 ### Pools and turns
 
@@ -392,6 +394,49 @@ by default). `leasehold observe` shows what the rules match right now.
 Where `/proc` is mounted with `hidepid`, the daemon sees only the processes its user may see,
 and process fencing falls back to the pid alone; `leasehold doctor` says so.
 
+### Maintenance
+
+A `maintenance` lease takes the whole machine for a while, so that it can go out of service: a
+test host shut down for a benchmark window, a VM stopped for an upgrade. It drains the machine
+first, and it tells everyone waiting when the machine will be back.
+
+```sh
+leasehold hold --kind maintenance --until 07:00 --reason "benchmark window" \
+    --label name=benchmark-window --timeout 30m -- ./run-benchmarks
+```
+
+While it waits, nothing new starts on the machine. Requests that arrive after it wait behind
+it, in every pool and whoever makes them, the owner's own `work` included. Requests that were
+already waiting keep their turns. The leases already running finish in their own time: only
+`lend` leases are revoked, as they are for any other waiting work. Observed programs count as
+running work. Once no lease is held (standing work aside), the maintenance lease is granted
+every slot that standing work does not hold, whatever its pool's `max` or `--weight` say, and
+nothing else starts while it is held. Of several maintenance leases, the oldest goes first.
+
+`hold --timeout` (seconds, or `30m`, `2h`) bounds the wait for the machine to empty. Still
+waiting at the timeout, `hold` exits 75 and gives back its place, so the queue is as it was.
+Otherwise it runs the command with the machine to itself.
+
+`--until` takes `HH:MM` (the next such time in UTC) or an ISO 8601 time, and `--reason` free
+text. They become the lease's `until` (RFC 3339, UTC) and `reason` labels, and every request
+the lease holds up says so in `blocked`: `machine draining for maintenance until 07:00 UTC
+(benchmark window)` while it drains, `machine in maintenance until 07:00 UTC (benchmark
+window)` once it holds the machine. The date is added when the end is more than a day off, and
+the `name` label stands in for a missing reason. `status` has the same under `maintenance`,
+and a queued `acquire` answer carries it as `maintenance`. When `hold` or `acquire` gives up
+while a maintenance lease holds or drains the machine, it also prints a line for scripts,
+`held by benchmark-window (maintenance) until 2026-10-21T07:00:00Z` (`draining for ...` while
+the lease still waits), naming the holder by its `name` label, or else by its user.
+
+The end is advisory, and nothing ends the lease at `until`. Like any lease it lasts as long as
+its holder renews it, and `hold` releases it when the command ends. The user who took it, or
+root, can end it early with `leasehold release ID`. It shows in the ledger, `leases`, `status`
+and `top` with its labels. On a machine whose `[[standing]]` work holds every slot, it is
+refused (exit 77): there is nothing for it to take.
+
+From Python, `leasehold.lease(kind="maintenance", labels={"until": "2026-10-21T07:00:00Z",
+"reason": "benchmark window"}, timeout=1800)` takes the same lease.
+
 ## Installing
 
 leasehold runs on Linux with Python 3.12 or later. PSI (`/proc/pressure`, kernel 4.20 and later)
@@ -540,7 +585,7 @@ an example machine. An unknown key is an error.
 | `admin_group` | none | members may switch lending and change pool limits, as root and the daemon's own user always may |
 | `tick_s`, `lease_ttl_s` | `2`, `15` | the tick period and the lease TTL |
 | `[pools.<name>]` | the default split | `reserved`, `max`, `priority`, `queue_timeout_s`, `headroom` (`"auto"`, see [Ranges](#ranges-min-max-slots)), and per-user limits: `per_user_max_running`, `per_user_max_queued`, `create_rate_per_min` |
-| `[kinds]` | each kind to its namesake | the pool each kind goes to |
+| `[kinds]` | each kind to its namesake; `maintenance` to the `work` kind's pool | the pool each kind goes to |
 | `[lend]` | see [Lending](#lending) | `pools`, `quiet_s` (600), `cpu_pressure_max` (10), `memory_pressure_max` (5), `load_per_cpu_max` (0.25), `window` (as `"22:00-07:00"`), `revoke_grace_s` (30), `pressure_cgroups` |
 | `[load] slices` | none | the cgroups (systemd slices) whose CPU and memory `status` reports |
 | `[jobs] per_slot` | `1` | jobs per slot, for [sizing](#sizing-the-command-to-its-lease) |
@@ -584,7 +629,9 @@ instead (default: its rule's `memory_per_slot`). `--threads N` sets the parallel
 of its processes (default: its rule's `threads`, else the job count; see
 [sizing](#sizing-the-command-to-its-lease)). A PATH shim inside the command may still lower it.
 `hold` reads the rules when no `--weight` is given, or for the threads when the job variables
-are on; with `--weight` and `--no-job-env` it does not ask the daemon for them.
+are on; with `--weight` and `--no-job-env` it does not ask the daemon for them. `--timeout`
+takes seconds, or minutes and hours as `30m` and `2h`. `--kind maintenance` takes the
+[whole machine](#maintenance), with `--until` and `--reason` saying when it is back and why.
 
 `hold` waits for a lease, runs the command in its own process group, renews while it runs
 (every TTL/3, or every `[elastic] settle_s` for an elastic lease when that is sooner, each
@@ -844,7 +891,7 @@ job-count variables. `--if-unavailable fail` (or `LEASEHOLD_IF_UNAVAILABLE=fail`
 
 | Code | Meaning |
 |---|---|
-| 75 | still waiting at `--timeout`: busy, not failed. The place in line is given back |
+| 75 | still waiting at `--timeout`: busy, not failed. The place in line is given back. While a [maintenance lease](#maintenance) holds or drains the machine, a line `held by NAME (maintenance) until TIME` (or `draining for ...`) follows |
 | 76 | the lease was revoked (or, for `lend`, lost): the group got SIGTERM, then SIGKILL after `--grace` (30 s) |
 | 77 | refused: the request could never be granted (heavier than its pool or the ceiling, or a pool that does not exist), or the daemon answered it with an error (such as 500 `internal` or 503 `ledger_unavailable`). The command does not run |
 | 69 | no daemon answered (`hold` only with `--if-unavailable fail`) |
@@ -1298,7 +1345,7 @@ client for it.
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
 | `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, and `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it); a rule no lease could ever be granted for carries `never`, the reason |
-| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic` | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings; the lease has `max_jobs`, the job count of its `max_weight`), `queued` (with `position`, `blocked`, and the `min_weight` and `max_weight` it waits with, as admission would cut them now) or `refused` (with `reason`) |
+| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic` | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings; the lease has `max_jobs`, the job count of its `max_weight`), `queued` (with `position`, `blocked`, the `min_weight` and `max_weight` it waits with, as admission would cut them now, and, while a maintenance lease holds or drains the machine, `maintenance` as in [status](#the-status-object)) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs` |
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
 | `POST /v1/elastic` | `lease_id` | `elastic`, with the lease's `weight`, `jobs`, `target` and `target_jobs`: a held range is elastic from now on; 409 `conflict` when it is not held, 400 for a lease with no range |
@@ -1387,6 +1434,10 @@ when a field is removed or changes meaning:
   without it these are null;
 - `contain`: the daemon's `[contain]` settings, `mode` and `hard_cpu` (whether a given caller
   is contained is that caller's own `leasehold doctor`);
+- `maintenance`: the [maintenance lease](#maintenance) that holds the machine, or else the
+  oldest one draining it, or null: `lease_id`, `state` (`held` or `draining`), `user`, `name`
+  (its `name` label, or else its user), `reason`, `until` (its `until` label, or null) and
+  `message`, the words a request it holds up gives as `blocked`;
 - `standing`, `leases`, and `queue`, each queued item with its `position` and why it waits
   (`blocked`). Each lease and queued item has `memory_bytes` (what it declared, or null; a
   lease declaring memory per slot gives the total it was granted, its weight times the size),
@@ -1427,7 +1478,7 @@ leasehold run [--session SESSION] [--leave-running] [--quiet] [--no-contain] ...
 run a command under a lease:
 
 ```
-leasehold hold [--kind {work,external,lend}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--grace GRACE] [--jobserver] [--elastic | --no-elastic] [--no-job-env] [--threads N|jobs] [--if-unavailable run|fail] ...
+leasehold hold [--kind {work,external,lend,maintenance}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout S|Nm|Nh] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--until HH:MM|ISO] [--reason REASON] [--grace GRACE] [--jobserver] [--elastic | --no-elastic] [--no-job-env] [--threads N|jobs] [--if-unavailable run|fail] ...
 ```
 
 the machine live: slots, pressure, pools, leases, the queue and events:
@@ -1487,7 +1538,7 @@ leasehold observe [--json]
 wait for a lease another process will release:
 
 ```
-leasehold acquire --lease-id LEASE_ID [--kind {work,external,lend}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout TIMEOUT] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--keep] [--max-hold MAX_HOLD] [--watch-pid WATCH_PID]
+leasehold acquire --lease-id LEASE_ID [--kind {work,external,lend,maintenance}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout S|Nm|Nh] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--until HH:MM|ISO] [--reason REASON] [--keep] [--max-hold MAX_HOLD] [--watch-pid WATCH_PID]
 ```
 
 renew a lease until it is released or a limit is hit:

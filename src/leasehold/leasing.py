@@ -574,12 +574,12 @@ def lease(
     client=None,
 ) -> Lease:
     """Take a lease of `weight` slots, or of `(least, most)` slots granted as many as fit, of
-    `kind` (`work`, `external` or `lend`), waiting in line up to `timeout` seconds (None: until
-    granted); the granted `Lease`, renewed until it is released. `memory` (a size such as `4g`)
-    is the memory the work declares in all, `memory_per_slot` for each slot granted; `ttl` the
-    lease's TTL in seconds (None: the daemon's). The daemon is the one at `socket`, else the
-    one `find_daemon` finds; `client` replaces it with any object that has the methods
-    `acquire`, `renew` and `release` of `leasehold.client.Client`. With no daemon,
+    `kind` (`work`, `external`, `lend` or `maintenance`), waiting in line up to `timeout`
+    seconds (None: until granted); the granted `Lease`, renewed until it is released. `memory`
+    (a size such as `4g`) is the memory the work declares in all, `memory_per_slot` for each
+    slot granted; `ttl` the lease's TTL in seconds (None: the daemon's). The daemon is the one
+    at `socket`, else the one `find_daemon` finds; `client` replaces it with any object that has
+    the methods `acquire`, `renew` and `release` of `leasehold.client.Client`. With no daemon,
     `if_unavailable` `run` gives an unleased `Lease`, `fail` raises `Unavailable`. Raises
     `Busy`, `Refused`, `DaemonError` or `Cancelled` as `wait` does."""
     if if_unavailable not in ("run", "fail"):

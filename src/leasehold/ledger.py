@@ -56,6 +56,7 @@ from leasehold.admission import (
     positions,
 )
 from leasehold.elastic import DEFAULT_HEADROOM, Elastic, Headroom, targets
+from leasehold.kinds import WHOLE
 from leasehold.process import pid_namespace, process_birth, process_matches
 from leasehold.units import MEMORY_MAX
 
@@ -249,21 +250,22 @@ class Holder:
 
 @dataclass(frozen=True)
 class LedgerItem:
-    """One thing that takes capacity: `weight` slots in `pool`. `scope` keeps different
-    clients' `item_id`s apart, and `kind` is a free label (the machine agent writes `work`,
-    `external`, `lend` and `observed`); both are stored as given. `session` is the user's
-    session the item belongs to, for taking turns between one user's sessions (None: the
+    """One thing that takes capacity: `weight` slots in `pool`. `scope` keeps different clients'
+    `item_id`s apart, and `kind` is a label (the machine agent writes `work`, `external`,
+    `lend`, `maintenance` and `observed`); both are stored as given. An item of a kind in
+    `leasehold.kinds.WHOLE` takes its host to itself (admission's whole items). `session` is the
+    user's session the item belongs to, for taking turns between one user's sessions (None: the
     user's shared session). `labels` are free-form (key, value) pairs, stored and listed but
-    never read by admission. `memory` is the memory, in bytes, the item declares in all
-    (None: none), and `memory_per_slot` what it declares for each slot it is granted (None:
-    none); each from 0 to `leasehold.units.MEMORY_MAX`, and never both (a ValueError);
-    admission counts them only where the policy sets a memory budget. `weight` is the least
-    the item can be admitted with and `max_weight` the most it asks for (None: `weight`; less
-    than `weight`, a ValueError), kept as asked while it waits: it is granted a size between
-    `weight` and that most as admission cuts it then (`leasehold.admission.grants`,
-    `AdmissionPolicy.most`), its lease's weight from then on, and the lease keeps the range so
-    cut. With `elastic` (only for a range), the lease's size may move between that least and
-    most after it is granted (`leasehold.elastic`, `Ledger.resize`)."""
+    never read by admission. `memory` is the memory, in bytes, the item declares in all (None:
+    none), and `memory_per_slot` what it declares for each slot it is granted (None: none); each
+    from 0 to `leasehold.units.MEMORY_MAX`, and never both (a ValueError); admission counts them
+    only where the policy sets a memory budget. `weight` is the least the item can be admitted
+    with and `max_weight` the most it asks for (None: `weight`; less than `weight`, a
+    ValueError), kept as asked while it waits: it is granted a size between `weight` and that
+    most as admission cuts it then (`leasehold.admission.grants`, `AdmissionPolicy.most`), its
+    lease's weight from then on, and the lease keeps the range so cut. With `elastic` (only for
+    a range), the lease's size may move between that least and most after it is granted
+    (`leasehold.elastic`, `Ledger.resize`)."""
 
     scope: str
     item_id: str
@@ -472,9 +474,11 @@ class Ledger:
                 session=r["session"],
                 memory=r["memory"],
                 memory_per_slot=r["memory_per_slot"],
+                whole=r["kind"] in WHOLE,
             )
             for r in conn.execute(
-                "SELECT pool, host, user, session, weight, memory, memory_per_slot FROM leases"
+                "SELECT kind, pool, host, user, session, weight, memory, memory_per_slot "
+                "FROM leases"
             )
         )
         waiting = tuple(
@@ -488,6 +492,7 @@ class Ledger:
                 memory=r["memory"],
                 max_weight=r["max_weight"],
                 memory_per_slot=r["memory_per_slot"],
+                whole=r["kind"] in WHOLE,
             )
             for r in conn.execute("SELECT * FROM queue")
         )
@@ -584,8 +589,11 @@ class Ledger:
                     row["memory"]
                     if row["memory_per_slot"] is None
                     else weight * row["memory_per_slot"],
-                    row["weight"],
-                    policy.most(
+                    # A whole item is granted its host, not a size from its range.
+                    weight if row["kind"] in WHOLE else row["weight"],
+                    weight
+                    if row["kind"] in WHOLE
+                    else policy.most(
                         row["pool"],
                         row["weight"],
                         row["max_weight"],
@@ -743,7 +751,9 @@ class Ledger:
                 return Refused(f"{item.key[1]} is another user's lease")
             if self._leased(conn, item.key):
                 return Admitted()
-            reason = policy.refusal(item.pool, item.weight, item.memory, item.memory_per_slot)
+            reason = policy.refusal(
+                item.pool, item.weight, item.memory, item.memory_per_slot, whole=item.kind in WHOLE
+            )
             if reason is not None:
                 conn.execute("DELETE FROM queue WHERE scope = ? AND item_id = ?", item.key)
                 return Refused(reason)

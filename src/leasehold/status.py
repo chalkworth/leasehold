@@ -198,10 +198,12 @@ def report(
     budget: MemoryBudget | None = None,
     memory_limit: dict | None = None,
     queue: list[dict],
+    maintenance: dict | None = None,
     now: float,
     version: str,
 ) -> dict:
-    """The whole status object. `leases` and `queue` are already `public`."""
+    """The whole status object. `leases` and `queue` are already `public`; `maintenance` is
+    the maintenance lease waiters are told about (`leasehold.maintenance.describe`), or None."""
     leases = with_counted(policy, leases)
     queue = with_counted(policy, queue)
     by_pool = pools(config, policy, leases, queue)
@@ -240,4 +242,5 @@ def report(
         "observe": observing(config, leases),
         "leases": leases,
         "queue": queue,
+        "maintenance": maintenance,
     }

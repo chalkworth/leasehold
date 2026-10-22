@@ -19,14 +19,14 @@ sized exactly as `leasehold.admission.grants` says. After that, per host:
   memory allowance (`memory_free`) lowers nothing, since smaller leases do not make memory
   free any sooner;
 * a lease grows only in an open pool that is not capped, with nothing waiting in it, on a host
-  with memory neither short nor pressing, and only when it is in `eligible` (the caller's
-  hold-down: those whose size last changed long enough ago). It may grow one slot per
-  decision, up to its most, into real slack: the slot rules hold with room kept for every
-  stopped item, and the memory it counts fits the budget beside theirs, as for an extra slot
-  of a range (`admission._extra_fits`). The `headroom` setting says how much of the pool's and
-  the host's `headroom` it leaves free: all of it ("keep", the default, as for that slot), one
-  slot of each ("leave-one"), or none ("use"), since it gives the slots back when an item
-  arrives for them. Leases take turns by user, then session, then lease, the least extra
+  with memory neither short nor pressing and not draining for a whole item, and only when it is
+  in `eligible` (the caller's hold-down: those whose size last changed long enough ago). It may
+  grow one slot per decision, up to its most, into real slack: the slot rules hold with room
+  kept for every stopped item, and the memory it counts fits the budget beside theirs, as for an
+  extra slot of a range (`admission._extra_fits`). The `headroom` setting says how much of the
+  pool's and the host's `headroom` it leaves free: all of it ("keep", the default, as for that
+  slot), one slot of each ("leave-one"), or none ("use"), since it gives the slots back when an
+  item arrives for them. Leases take turns by user, then session, then lease, the least extra
   first.
 
 A lease never goes below its least or above its most. Growth never fills a pool past its top,
@@ -50,6 +50,7 @@ from leasehold.admission import (
     _Kept,
     _pools_in_order,
     _Tally,
+    draining,
     fits,
 )
 
@@ -250,6 +251,7 @@ def _grow(
 ) -> None:
     """Grow each eligible lease by at most one slot into real slack (the module docstring)."""
     waiting = {w.pool for w in state.waiting}
+    drains = draining(state, policy)
     turns = _Turns()
     for e in leases:
         turns.add(e, target[e.key] - e.min_weight)
@@ -264,6 +266,7 @@ def _grow(
         and e.pool not in policy.capped
         and e.host not in policy.memory_pressing
         and e.host not in policy.memory_free
+        and e.host not in drains
     ]
     while growing:
         e = min(growing, key=lambda x: turns.order(x, target[x.key] - x.min_weight))

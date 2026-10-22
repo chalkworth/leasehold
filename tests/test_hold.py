@@ -20,6 +20,13 @@ CASES = {
     "granted": ([], True, 3, ""),
     "busy": (["--kind", "external", "--timeout", "0.3"], True, 75, "gave up after 0.3s in line"),
     "refused": (["--pool", "nope"], True, 77, "refused: there is no pool 'nope'"),
+    "maintenance drains": (
+        ["--kind", "maintenance", "--timeout", "0.3"],
+        True,
+        75,
+        "whole machine (maintenance): place 1; draining: waiting for the 1 lease running to end",
+    ),
+    "until without maintenance": (["--until", "07:00"], True, 1, "are for --kind maintenance"),
     "no daemon": ([], False, 0, "running without a lease"),
     "no daemon, fail": (["--if-unavailable", "fail"], False, 69, "is a daemon running?"),
 }
@@ -32,6 +39,34 @@ def test_how_a_wait_ends(daemon, sock_dir, options, there, code, says):
         done = cli(sock, "hold", *options, "--", "sh", "-c", f"exit {code if code == 3 else 0}")
     assert done.returncode == code
     assert says in done.stderr
+
+
+def test_maintenance_drains_the_machine_and_tells_waiters_until_when(daemon):
+    client = Client(daemon.path)
+    running = client.acquire(kind="external", ttl_s=30, wait_s=0)["lease"]["lease_id"]
+    window = ["--label", "name=benchmark-window", "--reason", "benchmark window"]
+    taking = hold(daemon.path, "--kind", "maintenance", "--until", "07:00", *window,
+                  "--", "sh", "-c", "echo in; read line", stdin=subprocess.PIPE)  # fmt: skip
+    until(lambda: (client.status()["maintenance"] or {}).get("state") == "draining")
+    # Work that would fit waits behind the drain, the owner's own included.
+    after = client.acquire(kind="work", ttl_s=30, wait_s=0)
+    assert after["status"] == "queued"
+    assert after["blocked"] == "machine draining for maintenance until 07:00 UTC (benchmark window)"
+    client.release(running)
+    assert taking.stdout.readline() == "in\n"
+    st = client.status()
+    assert st["maintenance"]["state"] == "held"
+    assert [(x["kind"], x["weight"]) for x in st["leases"]] == [("maintenance", st["slots"])]
+    assert st["queue"][0]["blocked"].startswith("machine in maintenance until 07:00 UTC")
+    refused = cli(daemon.path, "hold", "--timeout", "0.3", "--", "true")
+    assert refused.returncode == 75
+    until_at = st["maintenance"]["until"]
+    assert f"held by benchmark-window (maintenance) until {until_at}" in refused.stderr
+    taking.stdin.write("\n")
+    taking.stdin.close()
+    assert taking.wait(timeout=10) == 0
+    until(lambda: [x["kind"] for x in client.leases()["leases"]] == ["work"])
+    assert client.status()["maintenance"] is None
 
 
 def hold(sock, *args, **kw) -> subprocess.Popen:
