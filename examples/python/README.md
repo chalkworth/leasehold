@@ -8,9 +8,16 @@ Start a daemon of your own on this directory's `machine.toml`, then run the scri
 
 ```sh
 export LEASEHOLD_CONFIG=$PWD/machine.toml
+uv tool install leasehold             # for the `leasehold` command
 leasehold serve &
-python3 take.py
+uv run --with leasehold python take.py
 ```
+
+`take.py` imports the `leasehold` package, so it must be installed in the Python 3.12+
+interpreter that runs it. `uv run --with leasehold` installs it for the script; `uv tool install`
+alone provides only the `leasehold` command. In a virtual environment instead, run
+`python3 -m venv .venv && .venv/bin/pip install leasehold`, then use that environment's command
+and interpreter (`.venv/bin/leasehold serve` and `.venv/bin/python take.py`).
 
 `LEASEHOLD_CONFIG` names the config for `serve` and tells the clients, `take.py` included, to use
 its daemon's socket. `serve` refuses to start if a daemon of yours already answers on that
