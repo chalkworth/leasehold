@@ -144,11 +144,13 @@ def vmstat() -> dict[str, int]:
     return {k: int(v) for k, v in pairs}
 
 
-def psi(resource: str) -> dict[str, float]:
-    """`some_avg10`, `full_avg10` of /proc/pressure/RESOURCE (missing: empty)."""
+def psi(resource: str, cgroup: Path | None = None) -> dict[str, float]:
+    """`some_avg10`, `full_avg10` of /proc/pressure/RESOURCE, or of `cgroup`'s
+    RESOURCE.pressure (missing: empty)."""
     out = {}
+    path = cgroup / f"{resource}.pressure" if cgroup else Path(f"/proc/pressure/{resource}")
     try:
-        for line in Path(f"/proc/pressure/{resource}").read_text().splitlines():
+        for line in path.read_text().splitlines():
             kind, *fields = line.split()
             values = dict(f.split("=") for f in fields)
             out[f"{kind}_avg10"] = float(values["avg10"])
@@ -575,9 +577,11 @@ class Run:
                 )
 
     def sampler(self) -> None:
-        """Once a second: the machine's CPU, memory, swap and pressure, and the benchmark's own
-        memory; stops everything if the machine itself runs short of memory, and kills a job
-        that has run far past any reasonable length."""
+        """Once a second: the machine's CPU, memory, swap and pressure, the benchmark's own
+        memory, and the memory pressure inside its cap (`cap_mem_*`, from the cgroup that
+        carries `MemoryMax`: the jobs' slice, else the harness's scope). Stops everything if
+        the machine itself runs short of memory, and kills a job that has run far past any
+        reasonable length."""
         busy0, total0, steal0 = cpu_times()
         mine, jobs = own_cgroup(), self.setup.job_cgroup()
         floor = self.spec["abort_available_bytes"]
@@ -586,6 +590,7 @@ class Run:
         while not self.stop.wait(1.0):
             busy, total, steal = cpu_times()
             mem, vm, pm, pc = meminfo(), vmstat(), psi("memory"), psi("cpu")
+            capped = psi("memory", jobs or mine)
             row = {
                 "t": time.time(),
                 "cpu_busy": 100 * (busy - busy0) / max(1, total - total0),
@@ -599,6 +604,8 @@ class Run:
                 "mem_some": pm.get("some_avg10"),
                 "mem_full": pm.get("full_avg10"),
                 "cpu_some": pc.get("some_avg10"),
+                "cap_mem_some": capped.get("some_avg10"),
+                "cap_mem_full": capped.get("full_avg10"),
                 "bench_mem": (read_int(mine / "memory.current") or 0)
                 + ((read_int(jobs / "memory.current") or 0) if jobs else 0),
             }
@@ -920,8 +927,8 @@ def mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
-def _num(v: str) -> float | None:
-    return None if v in ("", "None") else float(v)
+def _num(v: str | None) -> float | None:
+    return None if v in (None, "", "None") else float(v)
 
 
 def _read_rows(path: Path) -> list[dict]:
@@ -949,6 +956,9 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
     git = [float(r["ms"]) for r in _read_rows(workdir / "git_same.csv.gz")]
     some = [v for r in samples if (v := _num(r["mem_some"])) is not None]
     full = [v for r in samples if (v := _num(r["mem_full"])) is not None]
+    # Absent from runs sampled before the cap's own pressure was.
+    cap_some = [v for r in samples if (v := _num(r.get("cap_mem_some"))) is not None]
+    cap_full = [v for r in samples if (v := _num(r.get("cap_mem_full"))) is not None]
     busy = [float(r["cpu_busy"]) for r in samples]
     steal = [float(r.get("cpu_steal") or 0) for r in samples]
     contained = sum("/lease-" in (j.get("cgroup") or "") for j in jobs)
@@ -981,6 +991,9 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
         "mem_some_max": r(max(some) if some else None),
         "mem_some_mean": r(mean(some)),
         "mem_full_max": r(max(full) if full else None),
+        "cap_mem_some_max": r(max(cap_some) if cap_some else None),
+        "cap_mem_some_mean": r(mean(cap_some)),
+        "cap_mem_full_max": r(max(cap_full) if cap_full else None),
         "bench_mem_peak_gib": r(peak / GIB if peak else None, 2),
         "cpu_busy_mean": r(mean(busy), 0),
         "cpu_steal_mean": r(mean(steal)),
@@ -1008,6 +1021,9 @@ COLUMNS = [
     ("mem_some_max", "mem PSI some max"),
     ("mem_some_mean", "mem PSI some mean"),
     ("mem_full_max", "mem PSI full max"),
+    ("cap_mem_some_max", "mem PSI some max in MemoryMax cgroup"),
+    ("cap_mem_some_mean", "mem PSI some mean in MemoryMax cgroup"),
+    ("cap_mem_full_max", "mem PSI full max in MemoryMax cgroup"),
     ("cpu_busy_mean", "CPU busy %"),
     ("jobs_in_lease_scope", "in lease scope"),
 ]
