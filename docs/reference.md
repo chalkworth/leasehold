@@ -890,14 +890,15 @@ the wait starts, whenever its place or what blocks it changes, and every 20 s.
 ```python
 import threading
 
-stopping = threading.Event()   # set from elsewhere to give up the wait
+stopping = threading.Event()  # set from elsewhere to give up the wait
 try:
-    lease = leasehold.lease((2, 4), timeout=300, cancel=stopping,
-                            on_wait=lambda w: print("waiting, place", w.position))
+    lease = leasehold.lease(
+        (2, 4), timeout=300, cancel=stopping, on_wait=lambda w: print("waiting, place", w.position)
+    )
 except leasehold.Busy:
-    ...   # try again later
+    ...  # try again later
 except leasehold.Cancelled:
-    ...   # stopping was set
+    ...  # stopping was set
 with lease:
     ...
 ```
@@ -944,8 +945,14 @@ class FakeDaemon:
     def acquire(self, *, lease_id, kind, weight, wait_s=0.0, **_):
         if self.status != "granted":
             return {"status": self.status, "position": 1, "blocked": None, "reason": "test"}
-        lease = {"lease_id": lease_id, "kind": kind, "pool": "default", "weight": weight,
-                 "grant": 1, "ttl_s": 60}
+        lease = {
+            "lease_id": lease_id,
+            "kind": kind,
+            "pool": "default",
+            "weight": weight,
+            "grant": 1,
+            "ttl_s": 60,
+        }
         return {"status": "granted", "lease": lease}
 
     def renew(self, lease_id):
