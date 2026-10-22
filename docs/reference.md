@@ -6,7 +6,7 @@ command line, the HTTP API, and the integrations.
 - [Leases](#leases): kinds, pools, turns, memory, lending, observed programs
 - [Installing](#installing): your own daemon, the machine's daemon
 - [The config file](#the-config-file)
-- [Running work under a lease](#running-work-under-a-lease): `hold`, sizing, exit codes, `acquire`
+- [Running work under a lease](#running-work-under-a-lease): `hold`, sizing, exit codes, `acquire`, [from Python](#from-python)
 - [GitHub Actions runner hooks](#github-actions-runner-hooks)
 - [Coding agents](#coding-agents): `[commands]`, the Claude Code plugin, shims, MCP
 - [Seeing the machine](#seeing-the-machine): `top`, `ui`, `metrics`, `report`, `doctor`
@@ -846,6 +846,125 @@ after `--max-hold` (6 h by default) whatever happens; the lease then ends one TT
 killed renewer ends it the same way. A renewer rides out a daemon that does not answer, so a
 restart within the TTL loses nothing. Only the user who acquired a lease, or root, may release
 it.
+
+### From Python
+
+A Python program can take a lease itself instead of running `leasehold hold`. The API is
+synchronous, installs no signal handlers, and is provisional until 1.0: its names are those in
+`leasehold.__all__`, and the [CHANGELOG](../CHANGELOG.md) lists every change to them.
+
+```python
+import leasehold
+
+with leasehold.lease(4, kind="external", labels={"job": "nightly"}, timeout=600) as lease:
+    print(lease.weight, lease.lease_id)
+    run_the_work(jobs=lease.jobs)
+```
+
+`leasehold.lease()` waits in line, then returns a `Lease` that a thread of its own renews
+(every TTL/3, as `hold` does) until it is released. Leaving the `with` block releases it,
+whether the block ends normally or by an exception; `lease.release()` does the same outside a
+`with`. `weight` is a number of slots, or `(least, most)` for a [range](#ranges-min-max-slots),
+in which case `lease.weight` is what was granted and may change as the lease renews.
+`kind`, `pool`, `labels`, `session`, `memory`, `memory_per_slot` and `ttl` are `hold`'s
+options of the same names. The daemon is found as the command line finds it (`find_daemon()`
+says which socket that is); `socket=` names one.
+
+How a wait ends:
+
+| Outcome | Raised | The place in line |
+|---|---|---|
+| granted | (returns the `Lease`) | |
+| still waiting at `timeout` | `Busy`, with `position`, `blocked` and `waited_s` | given back |
+| `cancel` (a `threading.Event`) is set | `Cancelled` | given back |
+| refused, or a 4xx answer | `Refused`, with `reason`, `code` and `status` | none was held |
+| the daemon answered 5xx | `DaemonError` | given back |
+| no daemon, with `if_unavailable="fail"` | `Unavailable` | none was held |
+
+All of these subclass `LeaseError`. With no daemon and the default `if_unavailable="run"`, the
+`Lease` is unleased: `lease.held` is false and the work runs as it would without leasehold,
+which is what `hold` does. To fail open on every error instead, catch `LeaseError` and run
+without a lease. `on_wait` is called with a `Waiting` (`position`, `blocked`, `waited_s`) as
+the wait starts, whenever its place or what blocks it changes, and every 20 s.
+
+```python
+import threading
+
+stopping = threading.Event()   # set from elsewhere to give up the wait
+try:
+    lease = leasehold.lease((2, 4), timeout=300, cancel=stopping,
+                            on_wait=lambda w: print("waiting, place", w.position))
+except leasehold.Busy:
+    ...   # try again later
+except leasehold.Cancelled:
+    ...   # stopping was set
+with lease:
+    ...
+```
+
+A revoked `lend` lease, or a `lend` lease whose renewals go unanswered past its TTL, sets
+`lease.lost` to the reason and calls `on_lost(reason)` on the renewal thread. `lease.check()`
+raises `LeaseLost` once that has happened, for code that would rather check between steps. A
+`work` or `external` lease is never revoked; one the daemon forgot (say, after its ledger was
+reset) is asked for again with the same id, and `lost` is set only if that is refused.
+
+#### Running a command under the lease
+
+`lease.run(argv)` runs a command as `hold` would and returns its exit status; `lease.popen(argv)`
+starts it and returns a `Command`, whose `wait()` gives the status, and which is a context
+manager that stops the command if it still runs on leaving. The command:
+
+- leads a process group of its own and gets the lease's environment: the `LEASEHOLD_*`
+  variables and, unless `job_env=False`, the [job and thread counts](#sizing-the-command-to-its-lease)
+  for the weight granted (`threads` sets the thread count as `--threads` does);
+- runs in the lease's systemd scope where the daemon and this process allow one, as under
+  `hold` ([containment](#containment)); `contain=False` runs it as is;
+- with `jobserver=True`, gets a make jobserver, and a range is [elastic](#elastic-leases)
+  unless `elastic=False`;
+- is stopped with its group, SIGTERM then SIGKILL after `grace` seconds (30), when a `lend`
+  lease is lost, whether or not anything waits for it; `Command.stopped_for` says why.
+
+Whatever the command leaves in its group is stopped when it ends. Other keyword arguments go to
+`subprocess.Popen`. A command that cannot be started raises `NotStarted`.
+
+For work that is not a separate command, or a command started some other way, `lease.env()`
+gives the variables alone: `subprocess.run(argv, env=lease.env())` sizes the command to the
+lease but leaves its process group, containment and revocation to the caller.
+
+#### Testing code that takes leases
+
+`client=` replaces the daemon with any object that has `acquire`, `renew` and `release`, so tests
+need no daemon:
+
+```python
+class FakeDaemon:
+    def __init__(self, status="granted"):
+        self.status, self.released = status, []
+
+    def acquire(self, *, lease_id, kind, weight, wait_s=0.0, **_):
+        if self.status != "granted":
+            return {"status": self.status, "position": 1, "blocked": None, "reason": "test"}
+        lease = {"lease_id": lease_id, "kind": kind, "pool": "default", "weight": weight,
+                 "grant": 1, "ttl_s": 60}
+        return {"status": "granted", "lease": lease}
+
+    def renew(self, lease_id):
+        return {"status": "ok"}
+
+    def release(self, lease_id):
+        self.released.append(lease_id)
+
+
+daemon = FakeDaemon()
+with leasehold.lease(2, client=daemon) as lease:
+    assert lease.weight == 2
+assert daemon.released == [lease.lease_id]
+
+try:
+    leasehold.lease(2, timeout=0, client=FakeDaemon("queued"))
+except leasehold.Busy:
+    pass
+```
 
 ## GitHub Actions runner hooks
 

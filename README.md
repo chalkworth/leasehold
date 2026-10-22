@@ -118,6 +118,18 @@ browser view. [`docs/reference.md`](docs/reference.md) has the system setup, eve
 the command line, the HTTP API and the exit codes; [`examples/`](examples/) has a runnable
 example of each.
 
+A Python tool can take leases itself, without running `hold`:
+
+```python
+import leasehold
+
+with leasehold.lease(4, kind="external", timeout=600) as lease:
+    lease.run(["make", "-j", str(lease.jobs)])
+```
+
+The reference's [From Python](docs/reference.md#from-python) section covers the errors,
+cancelling a wait, running commands under a lease, and a fake daemon for tests.
+
 ## What it is not
 
 - It is not a scheduler: it never runs, places or retries your jobs.
