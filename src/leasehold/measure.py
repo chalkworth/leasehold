@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
@@ -82,8 +83,9 @@ def read(group: Path, last: Usage) -> Usage:
 
 class Meter:
     """Reads the cgroup of process `pid` every `PERIOD_S`, from a thread of its own, while that
-    cgroup is the scope `unit`, until `stop`. `usage` is what it has read so far. `started` is
-    when, on the `time.monotonic` clock, the command was started (default now)."""
+    cgroup is the scope `unit`, until `stop`, or until `running` (when given) says the command
+    has ended. `usage` is what it has read so far. `started` is when, on the `time.monotonic`
+    clock, the command was started (default now)."""
 
     def __init__(
         self,
@@ -93,9 +95,13 @@ class Meter:
         cgroup_root: Path = Path("/sys/fs/cgroup"),
         proc: Path = Path("/proc"),
         started: float | None = None,
+        running: Callable[[], bool] | None = None,
     ) -> None:
         self.usage = Usage()
         self._started = time.monotonic() if started is None else started
+        self._running = running
+        #: When the thread saw the command had ended; None: it has not.
+        self._ended: float | None = None
         self._group: Path | None = None
         path = cgroup.own_cgroup(proc, str(pid))
         if path is not None and PurePosixPath(path).name == unit:
@@ -109,6 +115,9 @@ class Meter:
     def _run(self) -> None:
         while True:
             self._sample()
+            if self._running is not None and not self._running():
+                self._ended = time.monotonic()
+                return
             if self._stop.wait(PERIOD_S):
                 return
 
@@ -117,11 +126,13 @@ class Meter:
             self.usage = read(self._group, self.usage)
 
     def stop(self) -> float:
-        """Stop reading, after one last read: the seconds since the command was started."""
+        """Stop reading, after one last read: the seconds from the command's start to its end,
+        as `running` showed it, or else to now. A command waited for late is counted to within
+        `PERIOD_S` of its end."""
         self._stop.set()
         self._thread.join()
         self._sample()
-        return time.monotonic() - self._started
+        return (self._ended or time.monotonic()) - self._started
 
 
 def repository(cwd: str | os.PathLike | None = None) -> str | None:

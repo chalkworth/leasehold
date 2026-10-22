@@ -206,7 +206,8 @@ class Command:
         if prefix and not self.uncontained:
             self._repo = measure.repository(popen.get("cwd"))
             unit = contain.lease_unit(lease.lease_id)
-            self._meter = measure.Meter(self.pid, unit, started=started)
+            running = lambda: self.process.poll() is None  # noqa: E731
+            self._meter = measure.Meter(self.pid, unit, started=started, running=running)
             self._stack.callback(self._meter.stop)
         if lease.held and lease.kind in PREEMPTIBLE:
             watcher = threading.Thread(

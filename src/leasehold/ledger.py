@@ -1049,10 +1049,10 @@ class Ledger:
 
     def record_outcome(self, item: ItemKey, outcome: dict) -> bool:
         """Keep `outcome` (`leasehold.outcomes.Outcome`'s fields) for the lease `item`, with its
-        kind, user, pool, size, range and declared memory now; then drop what is past
-        `OUTCOMES_KEPT` for its user, rule and repository, and anything older than
-        `OUTCOME_AGE_S`. Whether it was kept: an outcome for a lease the ledger does not hold
-        is not."""
+        kind, user, pool, size, range and declared memory now, in place of any outcome kept for
+        it before (a release sent again keeps one); then drop what is past `OUTCOMES_KEPT` for
+        its user, rule and repository, and anything older than `OUTCOME_AGE_S`. Whether it was
+        kept: an outcome for a lease the ledger does not hold is not."""
         now = self._now()
         with self._tx() as conn:
             row = conn.execute(
@@ -1067,6 +1067,9 @@ class Ledger:
                 "memory": row["memory"], "memory_per_slot": row["memory_per_slot"],
                 **{k: outcome.get(k) for k in _OUTCOME_FIELDS}, "ended_at": now,
             }  # fmt: skip
+            conn.execute(
+                "DELETE FROM outcomes WHERE lease_id = ? AND user IS ?", (item[1], row["user"])
+            )
             conn.execute(
                 f"INSERT INTO outcomes ({', '.join(values)}) "
                 f"VALUES ({', '.join('?' * len(values))})",

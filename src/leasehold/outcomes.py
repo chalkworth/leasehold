@@ -72,7 +72,7 @@ def summarize(rows: Iterable[Mapping]) -> list[dict]:
                 "anon_max_bytes": max(anons) if anons else None,
                 "oom_runs": sum(1 for r in runs if r["oom_kills"]),
                 "high_runs": sum(1 for r in runs if r["high_events"]),
-                "parallelism": round(sum(shares) / len(shares), 2) if shares else None,
+                "parallelism": sum(shares) / len(shares) if shares else None,
                 "last_ended_at": max(r["ended_at"] for r in runs),
             }
         )

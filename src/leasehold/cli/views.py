@@ -111,12 +111,19 @@ def _print_outcomes(groups: list[dict]) -> None:
                 _size(g["anon_max_bytes"]),
                 str(g["oom_runs"]),
                 str(g["high_runs"]),
-                "-" if g["parallelism"] is None else f"{g['parallelism']:.2f}",
+                _cpus(g["parallelism"]),
             )
         )
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         print("  ".join(c.ljust(w) for c, w in zip(r, widths, strict=True)).rstrip())
+
+
+def _cpus(p: float | None) -> str:
+    """A mean number of CPUs to two places; `<0.01` for less, but more than none."""
+    if p is None:
+        return "-"
+    return "<0.01" if 0 < p < 0.005 else f"{p:.2f}"
 
 
 def _size(n: int | None) -> str:
