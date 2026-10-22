@@ -31,14 +31,17 @@ from leasehold.leasing import (
     find_daemon,
     lease,
 )
+from leasehold.supervise import Command, NotStarted
 
 __all__ = [
     "Busy",
     "Cancelled",
+    "Command",
     "DaemonError",
     "Lease",
     "LeaseError",
     "LeaseLost",
+    "NotStarted",
     "Refused",
     "Unavailable",
     "Waiting",

@@ -42,6 +42,7 @@ source_modules =
     leasehold.follow
     leasehold.hold
     leasehold.leasing
+    leasehold.supervise
     leasehold.handoff
     leasehold.report
     leasehold.webui

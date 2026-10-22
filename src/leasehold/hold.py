@@ -47,15 +47,12 @@ import dataclasses
 import os
 import re
 import shlex
-import shutil
 import signal
-import subprocess
 import sys
-import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, follow, jobs, leasing, shell, terminal, weights
+from leasehold import contain, follow, jobs, leasing, shell, supervise, terminal, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -65,6 +62,7 @@ from leasehold.exits import (
     EXIT_UNAVAILABLE,
     end_by,
 )
+from leasehold.kinds import PREEMPTIBLE
 from leasehold.leasing import child_env, lease_request, own_env
 from leasehold.units import memory_to_bytes
 
@@ -89,21 +87,6 @@ _INTERRUPTS = (signal.SIGINT, signal.SIGQUIT)
 def _say(message: str) -> None:
     sys.stderr.write(f"leasehold hold: {message}\n")
     sys.stderr.flush()
-
-
-def _group_alive(pgid: int) -> bool:
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _signal_group(pgid: int, sig: int) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pgid, sig)
 
 
 def wait_for_grant(
@@ -160,68 +143,6 @@ def waiting_line(request: dict, answer: dict) -> str:
     line = f"waiting for {slots}{where} ({request['kind']}): place {answer.get('position')}"
     blocked = answer.get("blocked")
     return f"{line}; {blocked}" if blocked else line
-
-
-class _Lease:
-    """A granted lease and its renewals: one due every TTL/3, or `every` when that is sooner
-    (`due_in`), counted from the start of the last, each waiting at most that long for its
-    answer."""
-
-    def __init__(
-        self, client: Client, lease_id: str, kind: str, ttl: float, every: float | None = None
-    ) -> None:
-        self.client = client
-        self.lease_id = lease_id
-        self.kind = kind
-        self.ttl = ttl
-        self.interval = max(0.05, ttl / 3 if every is None else min(ttl / 3, every))
-        #: The client for calls that must not hold the next renewal up: each waits at most
-        #: one interval for its answer.
-        self.quick = Client(client.path, timeout=min(client.timeout, self.interval))
-        self.last_ok = time.monotonic()
-        self._next = self.last_ok + self.interval
-
-    def due_in(self) -> float:
-        """Seconds until the next renewal is due (0 once it is)."""
-        return max(0.0, self._next - time.monotonic())
-
-    def renew(self) -> dict | None:
-        self._next = time.monotonic() + self.interval
-        try:
-            answer = self.quick.renew(self.lease_id)
-        except (Unavailable, ApiError):
-            return None
-        if answer["status"] in ("ok", "revoked"):
-            self.last_ok = time.monotonic()
-        return answer
-
-    def ask_again(self, request: dict) -> dict | None:
-        """Ask once more, without waiting, for the lease `request` describes: the answer, or
-        None when none came in time."""
-        try:
-            return self.quick.acquire(**request, wait_s=0)
-        except (Unavailable, ApiError):
-            return None
-
-    def release(self) -> None:
-        with contextlib.suppress(Unavailable, ApiError):
-            self.client.release(self.lease_id)
-
-
-def _stop_group(child: subprocess.Popen, grace_s: float, lease: _Lease | None) -> int:
-    """SIGTERM the group, wait up to `grace_s` (renewing any lease when due, so the weight stays
-    held while it stops), then SIGKILL whatever is left. The leader's exit status."""
-    pgid = child.pid
-    _signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + grace_s
-    while time.monotonic() < deadline:
-        if child.poll() is not None and not _group_alive(pgid):
-            break
-        time.sleep(0.1)
-        if lease is not None and lease.due_in() == 0:
-            lease.renew()
-    _signal_group(pgid, signal.SIGKILL)
-    return child.wait()
 
 
 class _Interrupted(BaseException):
@@ -370,7 +291,6 @@ def hold(
                 jobserver=jobserver,
                 memory=memory,
                 threads=threads,
-                socket=getattr(client, "path", None),
                 memory_per_slot=memory_per_slot,
                 elastic=elastic,
             )
@@ -432,113 +352,81 @@ def run_leased(
     jobserver: bool = False,
     memory: str | None = None,
     threads: jobs.Threads = "jobs",
-    socket: str | None = None,
     memory_per_slot: str | None = None,
     elastic: bool = False,
 ) -> int:
-    """`hold` once `request` is granted (`answer`): run `argv` sized to the weight granted (its
-    thread pools to `threads`, `jobs.thread_count`; `child_env`; when contained, held to
-    `memory`, or to `memory_per_slot` for each slot granted), renewing the lease, and release
-    it when the command ends; the command's exit code (`_ended`). With `elastic` and
-    `jobserver`, a range follows its target once the command takes jobserver tokens
-    (`leasehold.follow`). SIGINT, SIGTERM or SIGHUP before the command runs gives the lease
-    back and stops what was started of it."""
-    lease_id, kind = request["lease_id"], request["kind"]
-    granted = answer["lease"]
-    if memory is None and memory_per_slot is not None:
-        memory = f"{int(granted['weight']) * memory_to_bytes(memory_per_slot)}b"
-    count = int(granted.get("jobs") or granted["weight"])
-    elastic = (
-        elastic
-        and jobserver
-        and int(granted.get("max_weight") or 0) > int(granted.get("min_weight") or 0)
+    """`hold` once `request` is granted (`answer`): run `argv` under the lease
+    (`supervise.Command`: sized to the weight granted, its thread pools to `threads`, held to
+    `memory` or `memory_per_slot` when contained, a jobserver with `jobserver`, elastic with
+    `elastic`), renewing the lease, and release it when the command ends; the command's exit
+    code (`_ended`), or `EXIT_REVOKED`. SIGINT, SIGTERM or SIGHUP before the command runs gives
+    the lease back and stops what was started of it."""
+
+    def lost(reason: str) -> None:
+        if request["kind"] not in PREEMPTIBLE:
+            _say(f"{reason}; the command runs on without a lease")
+
+    lease = leasing.Lease(client, request, answer, on_lost=lost, _say=_say)
+    return _run(
+        lease,
+        argv,
+        grace_s=grace_s,
+        job_env=job_env,
+        jobserver=jobserver,
+        memory=memory,
+        threads=threads,
+        memory_per_slot=memory_per_slot,
+        elastic=elastic,
     )
-    settle_s = (answer.get("elastic") or {}).get("settle_s") if elastic else None
-    lease = _Lease(client, lease_id, kind, float(granted["ttl_s"]), settle_s)
-    most = int(granted.get("max_jobs") or count) if elastic else None
-    server = None
+
+
+def run_unleased(argv: Sequence[str], *, grace_s: float = 30.0) -> int:
+    """Run `argv` as `hold` runs a leased command, but with no lease, scope or job variables
+    (its environment is `leasing.own_env`): its own process group (with the terminal, when
+    this process has it), signals forwarded, and what it leaves in the group stopped when it
+    ends. The command's exit code (`_ended`)."""
+    return _run(leasing.Lease(), argv, grace_s=grace_s)
+
+
+def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
+    """Run `argv` under `lease` (`supervise.Command`), its group given the terminal when this
+    process has it and sent the signals this process gets; release the lease when it ends."""
     tty = terminal.owned()
-    with contextlib.ExitStack() as stack:
-        relay = stack.enter_context(_relayed())
-        env = child_env(
-            lease_id,
-            granted,
-            count,
-            job_env=job_env,
-            threads=threads,
-            socket=socket,
-            elastic_jobs=most,
-        )
-        if jobserver:
+    command = interrupted = None
+    try:
+        with contextlib.ExitStack() as stack:
+            relay = stack.enter_context(_relayed())
             try:
-                server = stack.enter_context(jobs.Jobserver(count))
-            except OSError as exc:
-                lease.release()
-                _say(f"cannot make a jobserver: {exc}")
-                return EXIT_NOT_STARTED
-            env |= jobserver_env(os.environ, count, server.fifo)
-        prefix = scope_prefix(request, answer, memory)
-        if prefix and shutil.which(argv[0], path=env.get("PATH")) is None:
-            # Said here: under systemd-run a missing program would be its error, not ours.
-            lease.release()
-            _say(f"cannot run {argv[0]}: not found or not executable")
-            return EXIT_NOT_STARTED
-        try:
-            child, uncontained = spawn(argv, prefix, env, tty=tty, cancel_fd=relay.wake_fd)
-        except contain.Cancelled:
-            child, uncontained = None, None
-        except OSError as exc:
-            lease.release()
-            _say(f"cannot run {argv[0]}: {exc}")
-            return EXIT_NOT_STARTED
-        interrupted = relay.received if child is None else relay.forward_to(child.pid)
-        if interrupted is not None:
-            if child is not None:
-                _stop_group(child, grace_s, lease)
-            lease.release()
-        else:
-            if uncontained:
-                _say(uncontained)
-            if tty:
-                stack.enter_context(foreground(child.pid))
-            follower = None
-            if elastic and server is not None:
-                follower = follow.Follower(
-                    lease.quick,
-                    lease_id,
-                    granted,
-                    server=server,
-                    scope=contain.lease_unit(lease_id) if prefix and not uncontained else None,
-                    memory_per_slot=memory_per_slot,
-                    hard_cpu=bool((answer.get("contain") or {}).get("hard_cpu")),
-                    say=_say,
+                command = stack.enter_context(
+                    supervise.Command(
+                        lease, argv, tty=tty, cancel_fd=relay.wake_fd, say=_say, **options
+                    )
                 )
-            code = _supervise(child, lease, request, grace_s, follower)
+            except contain.Cancelled:
+                interrupted = relay.received
+            except supervise.NotStarted as exc:
+                _say(str(exc))
+                return EXIT_NOT_STARTED
+            if command is not None:
+                interrupted = relay.forward_to(command.pid)
+                if interrupted is None:
+                    if command.uncontained:
+                        _say(command.uncontained)
+                    if tty:
+                        stack.enter_context(foreground(command.pid))
+                    code = command.wait()
+    finally:
+        lease.release()
     if interrupted is not None:
         return _interrupted(interrupted)
+    if command.stopped_for is not None:
+        return EXIT_REVOKED
     return _ended(code, tty)
-
-
-def spawn(
-    argv: Sequence[str],
-    prefix: Sequence[str] | None,
-    env: Mapping[str, str],
-    *,
-    tty: bool,
-    cancel_fd: int | None = None,
-) -> tuple[subprocess.Popen, str | None]:
-    """Start `argv` (in the scope `prefix` makes, when there is one: `contain.spawn`, which
-    `cancel_fd` cancels) as the leader of a process group of its own: in this terminal's session
-    with `tty` (this process has the terminal: `terminal.owned`), else in a session of its own.
-    The process, and why it is not contained when a scope was asked for and could not be
-    made."""
-    group = {"process_group": 0} if tty else {"start_new_session": True}
-    return contain.spawn(argv, prefix, env=env, cancel_fd=cancel_fd, **group)
 
 
 @contextlib.contextmanager
 def foreground(pgid: int) -> Iterator[None]:
-    """While inside, the group `pgid` (started by `spawn` with `tty`) has the terminal; the
+    """While inside, the group `pgid` (started with the terminal) has the terminal; the
     terminal comes back when it is stopped (`leasehold.terminal`) and on leaving."""
     with terminal.follow_stops(pgid):
         terminal.hand_to(pgid)
@@ -546,33 +434,6 @@ def foreground(pgid: int) -> Iterator[None]:
             yield
         finally:
             terminal.take_back(pgid)
-
-
-def run_unleased(argv: Sequence[str], *, grace_s: float = 30.0) -> int:
-    """Run `argv` as `hold` runs a leased command, but with no lease, scope or job variables
-    (its environment is `own_env`): its own process group (with the terminal, when this
-    process has it), signals forwarded, and what it leaves in the group stopped when it ends.
-    The command's exit code (`_ended`)."""
-    tty = terminal.owned()
-    with contextlib.ExitStack() as stack:
-        relay = stack.enter_context(_relayed())
-        try:
-            child, _ = spawn(argv, None, own_env(), tty=tty)
-        except OSError as exc:
-            _say(f"cannot run {argv[0]}: {exc}")
-            return EXIT_NOT_STARTED
-        interrupted = relay.forward_to(child.pid)
-        if interrupted is not None:
-            _stop_group(child, grace_s, None)
-        else:
-            if tty:
-                stack.enter_context(foreground(child.pid))
-            code = child.wait()
-            if _group_alive(child.pid):
-                _stop_group(child, grace_s, None)
-    if interrupted is not None:
-        return _interrupted(interrupted)
-    return _ended(code, tty)
 
 
 class _Relay:
@@ -588,7 +449,7 @@ class _Relay:
 
     def __call__(self, sig, _frame) -> None:
         if self._pgid is not None:
-            _signal_group(self._pgid, sig)
+            supervise.signal_group(self._pgid, sig)
             return
         if self.received is None:
             self.received = sig

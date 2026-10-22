@@ -298,8 +298,10 @@ def spawn(
         return subprocess.Popen(list(argv), **popen), None
     read_end, write_end = os.pipe()
     trampoline = [sys.executable, "-I", "-S", "-c", _TRAMPOLINE, str(write_end), *argv]
+    original_pass_fds = popen.pop("pass_fds", ())
     try:
-        child = subprocess.Popen([*prefix, *trampoline], pass_fds=(write_end,), **popen)
+        passed = (*original_pass_fds, write_end)
+        child = subprocess.Popen([*prefix, *trampoline], pass_fds=passed, **popen)
     finally:
         os.close(write_end)
     waited = [read_end] if cancel_fd is None else [read_end, cancel_fd]
@@ -316,4 +318,4 @@ def spawn(
     if cancel_fd is not None and cancel_fd in ready:
         raise Cancelled
     why = f"no systemd scope (systemd-run exited {code}); running uncontained"
-    return subprocess.Popen(list(argv), **popen), why
+    return subprocess.Popen(list(argv), pass_fds=original_pass_fds, **popen), why

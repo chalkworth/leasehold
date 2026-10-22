@@ -4,10 +4,13 @@ ends without one, and what a lease the daemon takes back or forgets tells its ho
 from __future__ import annotations
 
 import inspect
+import os
+import signal
+import subprocess
 import threading
 
 import pytest
-from support import until
+from support import gone, until
 
 import leasehold
 from leasehold.client import Client
@@ -23,8 +26,8 @@ def queued(sock) -> list:
 
 def test_the_supported_names():
     assert sorted(leasehold.__all__) == [
-        "Busy", "Cancelled", "DaemonError", "Lease", "LeaseError", "LeaseLost", "Refused",
-        "Unavailable", "Waiting", "__version__", "find_daemon", "lease",
+        "Busy", "Cancelled", "Command", "DaemonError", "Lease", "LeaseError", "LeaseLost",
+        "NotStarted", "Refused", "Unavailable", "Waiting", "__version__", "find_daemon", "lease",
     ]  # fmt: skip
     # Callers pass these by keyword, so their names are part of the API.
     assert list(inspect.signature(leasehold.lease).parameters) == [
@@ -106,7 +109,7 @@ def test_a_revoked_lend_lease_is_lost(daemon):
 
 
 def test_a_work_lease_the_daemon_forgot_is_asked_for_again(daemon):
-    with leasehold.lease(ttl=0.3, socket=daemon.path) as lease:
+    with leasehold.lease(ttl=3, socket=daemon.path) as lease:
         Client(daemon.path).release(lease.lease_id)
         until(lambda: lease.lease_id in held(daemon.path))
         (now,) = [
@@ -130,3 +133,37 @@ def test_a_work_lease_the_daemon_forgot_is_asked_for_again(daemon):
         assert str(now["grant"]) != previous["LEASEHOLD_GRANT"]
         until(lambda: lease.env({})["LEASEHOLD_GRANT"] == str(now["grant"]))
         assert lease.lost is None
+
+
+def test_a_command_runs_in_the_lease_and_its_leftovers_stop_with_it(daemon):
+    with leasehold.lease(socket=daemon.path) as lease:
+        mine = ["sh", "-c", f'test "$LEASEHOLD_LEASE_ID" = {lease.lease_id} && exit 4']
+        assert lease.run(mine, contain=False) == 4
+        flags = [
+            "sh",
+            "-c",
+            'case "$MAKEFLAGS" in *--keep-going*--jobserver-auth*) exit 0;; esac; exit 1',
+        ]
+        assert (
+            lease.run(
+                flags,
+                jobserver=True,
+                contain=False,
+                env={**os.environ, "MAKEFLAGS": "--keep-going"},
+            )
+            == 0
+        )
+        with lease.popen(["sh", "-c", "sleep 30 & echo $!; exec sleep 30"], contain=False,
+                         grace=1, stdout=subprocess.PIPE, text=True) as command:  # fmt: skip
+            left = int(command.process.stdout.readline())
+    until(lambda: gone(left))
+
+
+def test_a_revoked_lend_lease_stops_its_command(daemon):
+    until(lambda: Client(daemon.path).status()["lend"]["eligible"])
+    with leasehold.lease(kind="lend", ttl=0.3, socket=daemon.path) as lease:
+        command = lease.popen(["sleep", "30"], contain=False, grace=1)
+        daemon.agent.set_lend(False)
+        until(lambda: gone(command.pid))  # stopped with no one waiting for it
+        assert command.stopped_for == lease.lost
+        assert command.wait(timeout=10) == -signal.SIGTERM

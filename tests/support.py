@@ -79,6 +79,18 @@ class Clock:
         return self.now
 
 
+def gone(pid: int) -> bool:
+    """Whether process `pid` has ended (a zombie counts)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
 def until(predicate, timeout: float = 10.0) -> None:
     """Wait until `predicate()` is true, failing the test after `timeout` seconds."""
     deadline = time.monotonic() + timeout
