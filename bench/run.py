@@ -1104,7 +1104,7 @@ def _read_rows_jsonl(path: Path) -> list[dict]:
 
 def parse_weights(text: str, init: str) -> dict[str, int]:
     """`cpu=N,mem=M`; a kind left out keeps the built-in weight of a test run (`heavy_weight`
-    in the config `init` writes)."""
+    in the config `init` writes, less the two-at-once weights `conditions.neutral` drops)."""
     heavy = heavy_weight(init)
     out = {"cpu": heavy, "mem": heavy}
     for part in filter(None, text.split(",")):
@@ -1180,7 +1180,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--weights",
         default="",
         help="hold --weight per job kind, as cpu=N,mem=M (default: the built-in weight of a "
-        "test run in the config init writes, its heavy_weight)",
+        "test run, 4; the bench leaves out the weights init writes to run two at once)",
     )
     parser.add_argument(
         "--memory-budget",

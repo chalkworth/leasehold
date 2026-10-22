@@ -287,6 +287,15 @@ here.
 
 ### Changed
 
+- On 4 to 7 slots, the config `init` and `setup` write for your own daemon sets
+  `[commands] heavy_weight` and `light_weight` to run two builds or test runs at once (3 and 2
+  on 6 slots), where the built-in weight 4 runs one at a time. The pre-registered `defaults-h1`
+  bench gate passed this setting against weight 4 on both of its workloads; its verdict is in
+  `bench/results/8cpu-16g/defaults-h1/`. The built-in weights stay 4 and 2, so a config
+  written before 0.4 runs as it did. `setup --upgrade-config` rewriting a config exactly as 0.2
+  wrote it offers the two lines as comments and keeps weight 4.
+- `bench/run.py` resuming a run, and `compare` pooling runs, accept a machine whose memory
+  differs by up to 1%: a guest booted afresh reports a few KiB more or less.
 - Your own daemon's `"auto"` memory budget follows the cgroup memory limit its work runs
   under: the lowest `memory.max` or `memory.high` on the daemon's cgroup and the cgroups above
   it (cgroup v2). When that limit is below the machine's memory, the budget is the limit less

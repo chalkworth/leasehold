@@ -239,7 +239,8 @@ def parse_list(text: str) -> list[Condition]:
 
 def neutral(text: str) -> str:
     """The config `init` wrote, named `bench` instead of after the machine, so that nothing the
-    benchmark writes names its host."""
+    benchmark writes names its host, without the weight lines `init` writes to run two heavy
+    commands at once: the arm alone sets the weights."""
     name = tomllib.loads(text).get("name")
     lines = text.splitlines(keepends=True)
     out = []
@@ -248,6 +249,8 @@ def neutral(text: str) -> str:
             line = 'name = "bench"\n'
         elif name and line.startswith("# leasehold config for your own daemon on "):
             line = line.replace(str(name), "bench")
+        elif line.startswith(("heavy_weight = ", "light_weight = ")):
+            continue
         out.append(line)
     return "".join(out)
 
@@ -293,6 +296,7 @@ def config(
             slots=slots,
             cpus=slots,
             memory=raw["ceiling"]["memory"],
+            two_at_once=False,
             about=f"Sized for {cpus} CPUs: one slot per CPU; {condition.kept} CPUs are kept "
             "back by the benchmark.",
         )

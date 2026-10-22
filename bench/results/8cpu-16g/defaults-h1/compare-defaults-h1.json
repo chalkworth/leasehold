@@ -1,0 +1,345 @@
+{
+ "gate": {
+  "name": "defaults-h1",
+  "kind": "confirmatory",
+  "intent": "Decide whether a hold --weight range, with its pool settings (kept CPUs, headroom), can replace fixed weight 4 as what leasehold recommends for test runs.",
+  "objective": "Per candidate against fixed weight 4: one-sided 95% upper bounds on the geometric-mean ratios of makespan, mean job time, wake p99 and git status p95, on both workloads.",
+  "stop": "The frozen plan's rounds, a whole number of Williams cycles (8, 10 or 12 for two arms; 12 for three). After 4 rounds, a look blind to which arm leads may add whole cycles, up to 12, and is fixed once taken. The verdict uses exactly that many valid rounds; no early stop for success or failure.",
+  "decision": "If the candidate passes every metric on both workloads, with no hard rule broken, it becomes the recommended range and pool settings. If not, leasehold keeps fixed weight 4 as what it recommends."
+ },
+ "arms": {
+  "control": "lh-enforced@w=4",
+  "candidates": [
+   "lh-enforced@w=3,h=1"
+  ]
+ },
+ "kind": "confirmatory",
+ "rounds_needed": 8,
+ "blind": {
+  "look_after": 4,
+  "ready": true,
+  "frozen": true,
+  "pooled_sd": {
+   "makespan_s": 0.024160799489302096,
+   "job_mean_s": 0.012189430467941067,
+   "wake_same_p99_ms": 0.0,
+   "git_p95_ms": 0.06183904272786736
+  },
+  "rounds_needed": 8,
+  "plan": {
+   "rounds": 8,
+   "cycle": 2,
+   "counts": [
+    8,
+    10,
+    12
+   ],
+   "target": 0.8,
+   "reached": true,
+   "joint_power": 0.9994031616401851,
+   "workloads": 2,
+   "metrics": [
+    {
+     "metric": "makespan_s",
+     "sd": 0.024160799489302096,
+     "margin": 1.05,
+     "widened": false,
+     "power": 0.999701536279801
+    },
+    {
+     "metric": "job_mean_s",
+     "sd": 0.012189430467941067,
+     "margin": 1.05,
+     "widened": false,
+     "power": 0.9999999999999977
+    },
+    {
+     "metric": "wake_same_p99_ms",
+     "sd": 0.0,
+     "margin": 1.5,
+     "widened": false,
+     "power": 1.0
+    },
+    {
+     "metric": "git_p95_ms",
+     "sd": 0.06183904272786736,
+     "margin": 1.5,
+     "widened": false,
+     "power": 0.9999999999999978
+    }
+   ],
+   "missing": []
+  }
+ },
+ "joint_power": 0.9999999999999911,
+ "plan_file": "defaults-h1.plan.toml",
+ "aa_check": "The A/A provenance was checked: e0-aa match the plan's SHA-256 and SDs.",
+ "results": [
+  {
+   "candidate": "lh-enforced@w=3,h=1",
+   "verdict": "pass",
+   "why": [],
+   "workloads": [
+    {
+     "workload": "full",
+     "metrics": [
+      {
+       "metric": "makespan_s",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.05,
+       "mean_log": -0.1548012597922288,
+       "sd_log": 0.03455332418217903,
+       "ratio": 0.8565853985282477,
+       "upper_ratio": 0.8766422937992039,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      },
+      {
+       "metric": "job_mean_s",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.05,
+       "mean_log": -0.2300182910942713,
+       "sd_log": 0.01810135372017857,
+       "ratio": 0.7945190697472193,
+       "upper_ratio": 0.8042111849514845,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      },
+      {
+       "metric": "wake_same_p99_ms",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.5,
+       "mean_log": 0.11778303565638346,
+       "sd_log": 0.0,
+       "ratio": 1.125,
+       "upper_ratio": 1.125,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      },
+      {
+       "metric": "git_p95_ms",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.5,
+       "mean_log": 0.15115025564080464,
+       "sd_log": 0.03066270998455252,
+       "ratio": 1.1631714180189383,
+       "upper_ratio": 1.1873087632267707,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      }
+     ],
+     "rounds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+     ],
+     "needed": 8,
+     "complete": true,
+     "invalid": [],
+     "extra": [],
+     "hard": [],
+     "psi": [
+      {
+       "round": 1,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 2,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 3,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 4,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 5,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 6,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 7,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 8,
+       "control": 0.0,
+       "candidate": 0.0
+      }
+     ],
+     "superseded": []
+    },
+    {
+     "workload": "memheavy",
+     "metrics": [
+      {
+       "metric": "makespan_s",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.05,
+       "mean_log": -0.15382881834614157,
+       "sd_log": 0.03679220692509889,
+       "ratio": 0.8574187828149265,
+       "upper_ratio": 0.8788121421383239,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      },
+      {
+       "metric": "job_mean_s",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.05,
+       "mean_log": -0.22927656986013148,
+       "sd_log": 0.018456475408143713,
+       "ratio": 0.7951086000187126,
+       "upper_ratio": 0.8049993714394268,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      },
+      {
+       "metric": "wake_same_p99_ms",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.5,
+       "mean_log": 0.11778303565638346,
+       "sd_log": 0.0,
+       "ratio": 1.125,
+       "upper_ratio": 1.125,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      },
+      {
+       "metric": "git_p95_ms",
+       "missing_rounds": [],
+       "n": 8,
+       "margin": 1.5,
+       "mean_log": 0.13061196916457363,
+       "sd_log": 0.06430596536142585,
+       "ratio": 1.1395255244716433,
+       "upper_ratio": 1.189682346184497,
+       "t": 1.8945786050902598,
+       "pass": true,
+       "permutation_p": 0.00390625,
+       "permutation_exact": true,
+       "permutation_pass": true,
+       "permutation_min_p": 0.00390625
+      }
+     ],
+     "rounds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+     ],
+     "needed": 8,
+     "complete": true,
+     "invalid": [],
+     "extra": [],
+     "hard": [],
+     "psi": [
+      {
+       "round": 1,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 2,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 3,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 4,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 5,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 6,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 7,
+       "control": 0.0,
+       "candidate": 0.0
+      },
+      {
+       "round": 8,
+       "control": 0.0,
+       "candidate": 0.0
+      }
+     ],
+     "superseded": []
+    }
+   ]
+  }
+ ],
+ "notes": [],
+ "code": {
+  "git_sha": "43ee384f612241dcea4903af8da40725edd90a42",
+  "leasehold": "0.3.0"
+ }
+}

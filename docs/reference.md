@@ -432,19 +432,21 @@ and says so; `leasehold init` writes a commented config sized for the machine to
 3 to 7 CPUs), two pools (`work` for your agents and commands, `background` for `--kind
 external`, which never takes work's reserved half), no lending, memory counted against
 three quarters of the machine's (`[memory]`), the memory guard on, and the built-in build and
-test rules at their weight of 4, so on 8 CPUs (6 slots) one build or test run runs at a time.
+test rules with weights that run two at once on 8 CPUs (6 slots).
 
 The two kept CPUs are kept only from commands that run as many jobs as their lease gives them
 (`MAKEFLAGS`, `CARGO_BUILD_JOBS` and the others under [Containment](#containment)); a tool that
 ignores the job count can still fill every CPU. `[contain] hard_cpu = true` caps each contained
 command at its weight in CPUs; it is off by default, and `leasehold doctor` warns while it is.
 
-Running two builds or test runs at once is opt-in: `[commands] heavy_weight = 3` and
-`light_weight = 2` (on 6 slots; the generated config shows the values for its slots, commented
-out) let two run at once, each with fewer jobs. A command that declares no memory is then counted at its
-weight times the budget over the slots, which may be less than it uses: declare memory for
-memory-heavy work (a rule's `memory`, or `hold --memory`), or two large builds can overlap.
-[Measured](bench.md#two-heavy-jobs-at-once-opt-in).
+On 4 to 7 slots, where the built-in weight 4 runs one build or test run at a time, the config
+`init` writes runs two at once, each with fewer jobs: `[commands] heavy_weight = 3` and
+`light_weight = 2` on 6 slots (half the slots, and half that again, rounded up). Delete the two
+lines for one at a time at weight 4. A config written before 0.4 keeps weight 4, and the lines
+can be added to it by hand. A command that declares no memory is counted at its weight times
+the budget over the slots, which may be less than it uses: declare memory for memory-heavy work
+(a rule's `memory`, or `hold --memory`), or two large builds can overlap.
+[Measured](bench.md#two-heavy-jobs-at-once).
 
 #### Upgrading a 0.2 config
 
@@ -1075,7 +1077,7 @@ pytest and py.test (with xdist workers, and without), tox and nox; cargo build, 
 bazel; `cmake --build`; go build and test; mvn and gradle; docker and podman build; npm, pnpm,
 yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. The
 builds and test runs weigh `heavy_weight` (4), the JavaScript tooling `light_weight` (2); lower
-them to run more at once ([two at once](#your-own-daemon), opt-in).
+them to run more at once (a new config on 4 to 7 slots does: [two at once](#your-own-daemon)).
 A weight is both what a command costs in slots and the job count it is given. It is a
 count (`weight = 4`) or a [range](#ranges-min-max-slots) (`weight = "2-4"`), whose command is
 granted a size between the two when admitted and run sized to it. A rule's
