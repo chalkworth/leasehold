@@ -52,7 +52,7 @@ import sys
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, follow, jobs, leasing, shell, supervise, terminal, weights
+from leasehold import contain, jobs, leasing, shell, supervise, terminal, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -63,8 +63,7 @@ from leasehold.exits import (
     end_by,
 )
 from leasehold.kinds import PREEMPTIBLE
-from leasehold.leasing import child_env, lease_request, own_env
-from leasehold.units import memory_to_bytes
+from leasehold.leasing import child_env, lease_request
 
 __all__ = [
     "EXIT_BUSY",
@@ -477,96 +476,3 @@ def _relayed() -> Iterator[_Relay]:
         for s, handler in previous.items():
             signal.signal(s, handler)
         relay.close()
-
-
-def scope_prefix(request: dict, answer: dict, memory: str | None) -> list[str] | None:
-    """The `systemd-run` prefix for a granted lease's command, or None where it runs as is: the
-    daemon turned containment off (`[contain] mode`), or `contain.probe` finds no user scope
-    this caller may use."""
-    settings = answer.get("contain") or {}
-    if settings.get("mode", "auto") == "off" or not contain.probe().enforced:
-        return None
-    return contain.lease_argv(
-        request["lease_id"],
-        weight=int(answer["lease"]["weight"]),
-        memory=memory,
-        hard_cpu=bool(settings.get("hard_cpu")),
-    )
-
-
-def jobserver_env(env: Mapping[str, str], count: int, fifo: Path) -> dict[str, str]:
-    """`MAKEFLAGS` naming the jobserver, and the same in `CARGO_MAKEFLAGS` and `MFLAGS` where
-    they are set (cargo reads those first, so an outer build's would win)."""
-    flags = jobs.makeflags(env.get("MAKEFLAGS"), count, fifo)
-    out = {"MAKEFLAGS": flags}
-    for name in ("CARGO_MAKEFLAGS", "MFLAGS"):
-        if env.get(name):
-            out[name] = jobs.makeflags(env[name], count, fifo)
-    return out
-
-
-#: How often a follower waiting on jobs to give tokens back looks again.
-_FOLLOW_S = 0.2
-
-
-def _supervise(child, lease, request, grace_s, follower: follow.Follower | None = None) -> int:
-    """Renew the lease while `child` runs; stop its process group when the lease is revoked or
-    lost; release the lease once it is done. The child's return code (negative: the signal that
-    killed it), or `EXIT_REVOKED`. A `work` or `external` lease the daemon no longer knows is
-    asked for again; refused, the command runs on without a lease, which is not asked for
-    again. An elastic lease's `follower` hears each renewal and moves toward its target."""
-    revoked: str | None = None
-    unleased = queued = False
-    try:
-        while True:
-            wait = None if unleased else lease.due_in()
-            if wait is not None and follower is not None and follower.busy():
-                wait = min(wait, _FOLLOW_S)
-            try:
-                code = child.wait(timeout=wait)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if follower is not None and lease.due_in() > 0:
-                follower.step()
-                continue
-            renewal = lease.renew()
-            verdict = leasing.judge(
-                lease.kind, renewal, time.monotonic() - lease.last_ok, lease.ttl
-            )
-            if verdict == "ok":
-                queued = False
-                if follower is not None:
-                    follower.heard(renewal)
-                    follower.step()
-            if verdict == "revoked":
-                revoked = renewal.get("reason") or "revoked"
-            elif verdict == "lost":
-                revoked = "the lease was lost"
-            elif verdict == "ask":
-                again = lease.ask_again(request) or {}
-                if again.get("status") == "refused":
-                    _say(
-                        f"the daemon had lost the lease and now refuses it "
-                        f"({again.get('reason')}); the command runs on without a lease"
-                    )
-                    unleased = True
-                elif again.get("status") != "queued":
-                    _say("the daemon had lost the lease; asked for it again")
-                elif not queued:
-                    _say(
-                        "the daemon had lost the lease; asked for it again, and waiting in "
-                        f"line (place {again.get('position')})"
-                    )
-                    queued = True
-            if revoked is not None:
-                _say(f"lease revoked ({revoked}); stopping the command")
-                _stop_group(child, grace_s, lease)
-                break
-        if revoked is None and _group_alive(child.pid):
-            _stop_group(child, grace_s, None if unleased else lease)
-    finally:
-        lease.release()
-    if revoked is not None:
-        return EXIT_REVOKED
-    return code
