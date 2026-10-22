@@ -1021,9 +1021,9 @@ COLUMNS = [
     ("mem_some_max", "mem PSI some max"),
     ("mem_some_mean", "mem PSI some mean"),
     ("mem_full_max", "mem PSI full max"),
-    ("cap_mem_some_max", "mem PSI some max in the cap"),
-    ("cap_mem_some_mean", "mem PSI some mean in the cap"),
-    ("cap_mem_full_max", "mem PSI full max in the cap"),
+    ("cap_mem_some_max", "mem PSI some max in MemoryMax cgroup"),
+    ("cap_mem_some_mean", "mem PSI some mean in MemoryMax cgroup"),
+    ("cap_mem_full_max", "mem PSI full max in MemoryMax cgroup"),
     ("cpu_busy_mean", "CPU busy %"),
     ("jobs_in_lease_scope", "in lease scope"),
 ]
