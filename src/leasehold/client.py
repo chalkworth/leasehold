@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import socket
@@ -92,8 +93,22 @@ class Client:
         body = {"lease_id": lease_id} | ({} if ttl_s is None else {"ttl_s": ttl_s})
         return self.request("POST", "/v1/renew", body)
 
-    def release(self, lease_id: str) -> dict:
-        return self.request("POST", "/v1/release", {"lease_id": lease_id})
+    def release(self, lease_id: str, outcome: dict | None = None) -> dict:
+        """Release `lease_id` (`POST /v1/release`), sending `outcome`, what its command used
+        (`leasehold.measure`), when given. A release with an outcome that the daemon answers
+        with an error (one from before outcomes refuses the field) is sent again without it, so
+        an outcome never keeps a lease from being released."""
+        body = {"lease_id": lease_id}
+        if outcome is not None:
+            with contextlib.suppress(ApiError):
+                return self.request("POST", "/v1/release", body | {"outcome": outcome})
+        return self.request("POST", "/v1/release", body)
+
+    def outcomes(self) -> dict:
+        """What contained commands used (`GET /v1/outcomes`): {`groups`, one per rule and
+        repository, and `outcomes`, newest first}; only the asking user's, unless an
+        administrator asks."""
+        return self.request("GET", "/v1/outcomes")
 
     def resize(self, lease_id: str, weight: int) -> dict:
         """Move an elastic lease to `weight` (`POST /v1/resize`): give slots back, or take the

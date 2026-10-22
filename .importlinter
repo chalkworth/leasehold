@@ -22,7 +22,7 @@ layers =
     template
     api
     agent
-    status | lend | guard | events
+    status | lend | guard | events | outcomes
     machine
     quota | observe | commands
     shell
@@ -43,6 +43,7 @@ source_modules =
     leasehold.hold
     leasehold.leasing
     leasehold.supervise
+    leasehold.measure
     leasehold.handoff
     leasehold.report
     leasehold.webui
@@ -81,6 +82,7 @@ source_modules =
     leasehold.terminal
     leasehold.hooknotes
     leasehold.weights
+    leasehold.measure
 forbidden_modules =
     leasehold.admission
     leasehold.ledger

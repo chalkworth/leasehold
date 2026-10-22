@@ -20,9 +20,13 @@ Each grant takes the next number of a ledger-wide sequence (`grant`), a fencing 
 preemptible lease is ended by `revoke`: it keeps its weight while its holder stops (its `renew`
 says `revoked` and reaches at most `revoke_deadline`), then is released or expires.
 
-**Transient and rebuildable.** The ledger holds only leases, queue entries and recent submit
-times. Clients keep the durable truth (when each item was queued) and re-enqueue from it;
-deleting the file loses nothing but the current leases, which their live holders re-acquire.
+**Transient and rebuildable.** The ledger holds leases, queue entries and recent submit times.
+Clients keep the durable truth (when each item was queued) and re-enqueue from it; deleting the
+file loses the current leases, which their live holders re-acquire, and the outcomes.
+
+**Outcomes.** It also keeps what contained commands used, as their clients report it at release
+(`record_outcome`, `leasehold.outcomes`): the newest `OUTCOMES_KEPT` for each user, rule and
+repository, none older than `OUTCOME_AGE_S`. A ledger rebuilt for a new schema keeps them.
 
 **Fails closed.** A missing or unwritable directory, a file that cannot be opened, and any SQLite
 error after that (locked past the busy timeout, a full disk, a read-only file system) are
@@ -69,6 +73,10 @@ STALE_S = 120.0
 #: by default (a machine's `[elastic] settle_s`).
 ELASTIC_SETTLE_S = 15.0
 _BUSY_TIMEOUT_S = 30.0
+#: How many outcomes the ledger keeps for each user, rule and repository: the newest.
+OUTCOMES_KEPT = 50
+#: How old an outcome the ledger keeps, in seconds: 30 days.
+OUTCOME_AGE_S = 30 * 86400.0
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -162,6 +170,31 @@ CREATE TABLE IF NOT EXISTS submits (
     at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS submits_by_user ON submits (pool, user, at);
+-- What a contained command used, as its client reported it at release, with what the lease it
+-- ran under held then: its size, range and declared memory (bytes; NULL: none declared).
+CREATE TABLE IF NOT EXISTS outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lease_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    user TEXT,
+    rule TEXT,
+    repo TEXT,
+    pool TEXT NOT NULL,
+    weight INTEGER NOT NULL,
+    min_weight INTEGER NOT NULL,
+    max_weight INTEGER NOT NULL,
+    memory INTEGER,
+    memory_per_slot INTEGER,
+    peak_bytes INTEGER,
+    anon_bytes INTEGER,
+    oom_kills INTEGER,
+    high_events INTEGER,
+    cpu_usec INTEGER,
+    wall_s REAL NOT NULL,
+    exit_status INTEGER,
+    ended_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS outcomes_by_key ON outcomes (user, rule, repo, id);
 """
 
 
@@ -1014,6 +1047,53 @@ class Ledger:
                     args,
                 )
 
+    def record_outcome(self, item: ItemKey, outcome: dict) -> bool:
+        """Keep `outcome` (`leasehold.outcomes.Outcome`'s fields) for the lease `item`, with its
+        kind, user, pool, size, range and declared memory now; then drop what is past
+        `OUTCOMES_KEPT` for its user, rule and repository, and anything older than
+        `OUTCOME_AGE_S`. Whether it was kept: an outcome for a lease the ledger does not hold
+        is not."""
+        now = self._now()
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT * FROM leases WHERE scope = ? AND item_id = ?", item
+            ).fetchone()
+            if row is None:
+                return False
+            weight, least, most = _sizes(row)
+            values = {
+                "lease_id": item[1], "kind": row["kind"], "user": row["user"],
+                "pool": row["pool"], "weight": weight, "min_weight": least, "max_weight": most,
+                "memory": row["memory"], "memory_per_slot": row["memory_per_slot"],
+                **{k: outcome.get(k) for k in _OUTCOME_FIELDS}, "ended_at": now,
+            }  # fmt: skip
+            conn.execute(
+                f"INSERT INTO outcomes ({', '.join(values)}) "
+                f"VALUES ({', '.join('?' * len(values))})",
+                tuple(values.values()),
+            )
+            conn.execute("DELETE FROM outcomes WHERE ended_at <= ?", (now - OUTCOME_AGE_S,))
+            key = (values["user"], values["rule"], values["repo"])
+            conn.execute(
+                "DELETE FROM outcomes WHERE user IS ? AND rule IS ? AND repo IS ? AND id NOT IN "
+                "(SELECT id FROM outcomes WHERE user IS ? AND rule IS ? AND repo IS ? "
+                "ORDER BY id DESC LIMIT ?)",
+                (*key, *key, OUTCOMES_KEPT),
+            )
+        return True
+
+    def outcomes(self, *, user: str | None = None, everyone: bool = False) -> list[dict]:
+        """The outcomes kept (`record_outcome`), newest first: `user`'s, or with `everyone`
+        every user's. None older than `OUTCOME_AGE_S`."""
+        query = "SELECT * FROM outcomes WHERE ended_at > ?"
+        args: tuple = (self._now() - OUTCOME_AGE_S,)
+        if not everyone:
+            query += " AND user IS ?"
+            args += (user,)
+        with self._db() as conn:
+            rows = conn.execute(query + " ORDER BY id DESC", args).fetchall()
+        return [dict(row) for row in rows]
+
     def recent_submits(self, user: str | None, pool: str) -> int:
         """How many submits `user` made to `pool` in the last minute (`record_submit` counts
         them)."""
@@ -1100,6 +1180,12 @@ class Ledger:
             is not None
         )
 
+
+#: The fields of an outcome its client reports (`leasehold.outcomes.Outcome`).
+_OUTCOME_FIELDS = (
+    "rule", "repo", "peak_bytes", "anon_bytes", "oom_kills", "high_events", "cpu_usec", "wall_s",
+    "exit_status",
+)  # fmt: skip
 
 #: The extra `WHERE` a holder-scoped delete adds, indexed by "a holder was given".
 _BY_HOLDER = ("", " AND holder_pid = ? AND holder_birth IS ? AND holder_ns IS ?")

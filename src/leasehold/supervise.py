@@ -14,6 +14,9 @@ group.
 * A revoked `lend` lease, or one lost to its TTL, stops the group: SIGTERM, then SIGKILL after
   the grace. A `work` or `external` lease lost for good leaves the command running, unleased.
 * Once the command ends, whatever it left in its group is stopped the same way.
+* A contained command is measured while it runs (`leasehold.measure`): once it ends, what it
+  used, with the lease's rule and the git repository it ran in, is the outcome the lease sends
+  when it is released (`leasing.Lease.release`). An uncontained one is not measured.
 
 No signal handler is installed: a caller that wants signals passed on sends them to `pid`'s
 group.
@@ -22,6 +25,7 @@ group.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import shutil
 import signal
@@ -31,7 +35,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, follow, jobs
+from leasehold import contain, follow, jobs, measure
 from leasehold.kinds import PREEMPTIBLE
 from leasehold.leasing import Lease, own_env
 from leasehold.units import memory_to_bytes
@@ -148,6 +152,8 @@ class Command:
         self.uncontained: str | None = None
         self.returncode: int | None = None
         self._say = say
+        self._meter: measure.Meter | None = None
+        self._repo: str | None = None
         self._stack = contextlib.ExitStack()
         try:
             self._start(
@@ -189,6 +195,7 @@ class Command:
                 # Said here: under systemd-run a missing program would be its error, not ours.
                 raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
         group = {"process_group": 0} if tty else {"start_new_session": True}
+        started = time.monotonic()
         try:
             self.process, self.uncontained = contain.spawn(
                 argv, prefix, env=env, cancel_fd=cancel_fd, **group, **popen
@@ -196,6 +203,11 @@ class Command:
         except OSError as exc:
             raise NotStarted(f"cannot run {argv[0]}: {exc}") from exc
         self.pid = self.process.pid
+        if prefix and not self.uncontained:
+            unit = contain.lease_unit(lease.lease_id)
+            self._meter = measure.Meter(self.pid, unit, started=started)
+            self._stack.callback(self._meter.stop)
+            self._repo = measure.repository(popen.get("cwd"))
         if lease.held and lease.kind in PREEMPTIBLE:
             watcher = threading.Thread(
                 target=self._stop_when_lost, name=f"leasehold-watch-{self.pid}", daemon=True
@@ -234,6 +246,15 @@ class Command:
         return code
 
     def _end(self, code: int) -> None:
+        if self._meter is not None:
+            wall_s = self._meter.stop()
+            self.lease._outcome = {
+                "rule": self.lease._rule,
+                "repo": self._repo,
+                **dataclasses.asdict(self._meter.usage),
+                "wall_s": round(wall_s, 3),
+                "exit_status": code,
+            }
         if group_alive(self.pid):
             stop_group(self.process, self.grace_s)
         self.returncode = code

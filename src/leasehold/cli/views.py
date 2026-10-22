@@ -1,5 +1,5 @@
-"""`status`, `leases`, `facts`, `ui` and `metrics`: looking at the machine. The first three
-take `--json` for the same object the API returns."""
+"""`status`, `leases`, `outcomes`, `facts`, `ui` and `metrics`: looking at the machine. The first
+four take `--json` for the same object the API returns."""
 
 from __future__ import annotations
 
@@ -24,6 +24,10 @@ def register(sub) -> None:
     s = sub.add_parser("leases", help="the leases held and the queue")
     s.add_argument("--json", action="store_true")
     s.set_defaults(run=_leases)
+
+    s = sub.add_parser("outcomes", help="what contained commands used, by rule and repository")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(run=_outcomes)
 
     s = sub.add_parser("facts", help="this machine's facts (no daemon needed)")
     s.add_argument("--json", action="store_true")
@@ -68,6 +72,47 @@ def _leases(args, ctx) -> int:
         return ctx.unreachable(exc)
     print(json.dumps(listing, indent=2)) if args.json else _print_leases(listing, time.time())
     return 0
+
+
+def _outcomes(args, ctx) -> int:
+    try:
+        listing = ctx.client().outcomes()
+    except (Unavailable, ApiError) as exc:
+        return ctx.unreachable(exc)
+    print(json.dumps(listing, indent=2)) if args.json else _print_outcomes(listing["groups"])
+    return 0
+
+
+def _print_outcomes(groups: list[dict]) -> None:
+    if not groups:
+        print("no outcomes yet: a contained command's are kept when its lease is released")
+        return
+    home = os.path.expanduser("~")
+    rows = [("RULE", "REPO", "RUNS", "PEAK P95", "PEAK MAX", "ANON MAX", "OOM", "HIGH", "CPUS")]
+    for g in groups:
+        repo = g["repo"] or "-"
+        if home != "~" and (repo == home or repo.startswith(home + "/")):
+            repo = "~" + repo[len(home) :]
+        rows.append(
+            (
+                g["rule"] or "-",
+                repo,
+                str(g["runs"]),
+                _gib(g["peak_p95_bytes"]),
+                _gib(g["peak_max_bytes"]),
+                _gib(g["anon_max_bytes"]),
+                str(g["oom_runs"]),
+                str(g["high_runs"]),
+                "-" if g["parallelism"] is None else f"{g['parallelism']:.1f}",
+            )
+        )
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths, strict=True)).rstrip())
+
+
+def _gib(n: int | None) -> str:
+    return "-" if n is None else f"{n / 2**30:.1f} GiB"
 
 
 def _ui(args, ctx) -> int:

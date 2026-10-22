@@ -5,6 +5,26 @@ and versions follow [Semantic Versioning](https://semver.org/) as described unde
 the README: before 1.0, a minor release may break the public API, and every break is listed
 here.
 
+## [Unreleased]
+
+### Added
+
+- A contained command's resource use is now recorded. While it runs, its client reads the
+  scope's `memory.peak`, the most `anon` in `memory.stat`, `oom_kill` and `high` from
+  `memory.events`, and `usage_usec` from `cpu.stat` about once a second. At release it sends
+  these with the wall time, the exit status, the `[commands]` rule that sized the command and
+  the git repository it ran in. The daemon keeps each outcome in a new ledger table, with the
+  lease's size, range and declared memory: the newest 50 for each user, rule and repository,
+  none older than 30 days. Nothing about admission uses them yet.
+- `POST /v1/release` takes an optional `outcome`, and `leasehold.client.Client.release` an
+  `outcome` argument. A 0.4 daemon refuses the field, so the client sends the release again
+  without it whenever a release with an outcome gets an error.
+- `GET /v1/outcomes`, `Client.outcomes()` and `leasehold outcomes [--json]` list the outcomes
+  kept, summed up for each rule and repository: runs, the 95th percentile and the most of
+  `memory.peak`, the most anonymous memory, runs reached by the OOM killer or `MemoryHigh`, and
+  mean parallelism (CPU time over wall time). A user sees their own outcomes; an administrator
+  sees everyone's.
+
 ## [0.4.0]
 
 ### Added

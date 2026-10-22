@@ -31,6 +31,7 @@ from leasehold.access import Forbidden, may_administer
 from leasehold.agent import AcquireRequest, Conflict, MachineAgent
 from leasehold.events import CAPACITY
 from leasehold.ledger import LedgerUnavailable
+from leasehold.outcomes import Outcome
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,11 @@ class _LeaseRequest(BaseModel):
 
     lease_id: str = Field(min_length=1, max_length=64)
     ttl_s: float | None = Field(None, gt=0, le=3600)
+
+
+class _ReleaseRequest(_LeaseRequest):
+    #: What the lease's command used (`leasehold.outcomes`), kept with the release.
+    outcome: Outcome | None = None
 
 
 class _ResizeRequest(BaseModel):
@@ -130,8 +136,13 @@ def _renew(agent: MachineAgent, req: _LeaseRequest, peer: Peer, rest: str) -> di
     return agent.renew(req.lease_id, user=peer.user, ttl_s=req.ttl_s)
 
 
-def _release(agent: MachineAgent, req: _LeaseRequest, peer: Peer, rest: str) -> dict:
-    return agent.release(req.lease_id, user=peer.user)
+def _release(agent: MachineAgent, req: _ReleaseRequest, peer: Peer, rest: str) -> dict:
+    return agent.release(req.lease_id, user=peer.user, outcome=req.outcome)
+
+
+def _outcomes(agent: MachineAgent, req: None, peer: Peer, rest: str) -> dict:
+    everyone = may_administer(peer.uid, peer.user, admin_group=agent.config.admin_group)
+    return agent.outcomes(user=peer.user, everyone=everyone)
 
 
 def _resize(agent: MachineAgent, req: _ResizeRequest, peer: Peer, rest: str) -> dict:
@@ -158,7 +169,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v1/commands"): Route(None, lambda agent, req, peer, rest: agent.commands()),
     ("POST", "/v1/acquire"): Route(AcquireRequest, _acquire),
     ("POST", "/v1/renew"): Route(_LeaseRequest, _renew),
-    ("POST", "/v1/release"): Route(_LeaseRequest, _release),
+    ("GET", "/v1/outcomes"): Route(None, _outcomes),
+    ("POST", "/v1/release"): Route(_ReleaseRequest, _release),
     ("POST", "/v1/resize"): Route(_ResizeRequest, _resize),
     ("POST", "/v1/elastic"): Route(_ElasticRequest, _elastic),
     ("POST", "/v1/lend"): Route(_LendRequest, _lend, admin=True),
