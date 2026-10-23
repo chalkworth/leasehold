@@ -221,7 +221,7 @@ class MachineAgent:
         if self.config.for_user and self.config.contain.mode != "off":
             found.append(contain.root_slice_cgroup())
         if self.memory_limit is not None:
-            found.append(self.memory_limit["cgroup"].strip("/"))
+            found.append(self.memory_limit["cgroup"].strip("/") or ".")
         return tuple(dict.fromkeys(c for c in found if c))
 
     def _memory_pressure(self, load: dict) -> float | None:
