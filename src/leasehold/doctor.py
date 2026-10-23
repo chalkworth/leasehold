@@ -19,6 +19,7 @@ from typing import Literal
 from leasehold import contain, discovery, machine, paths, upgrade
 from leasehold.admission import alone, gib
 from leasehold.client import ApiError, Client, Unavailable
+from leasehold.commands import HEAVY_WEIGHT, default_rules
 from leasehold.facts import meminfo
 
 Level = Literal["ok", "warn", "fail"]
@@ -228,6 +229,47 @@ def check_guard_weights(config, memory_bytes: int | None) -> Check | None:
         f"a built-in build or test rule (weight {heavy}) counts {gib(counted)}, more than the "
         f"{gib(most)} the memory budget and the guard's floor ever let start",
         "lower [memory] assumed_per_slot or [commands] heavy_weight, or raise the budget",
+    )
+
+
+def check_two_at_once(config) -> Check | None:
+    """A warning when the config lowers `[commands] heavy_weight` so that two built-in build
+    or test rules run at once in the `work` pool, and some of them declare no memory (no rule
+    of the config's own, naming the program with no `args`, declares it). Such a command counts
+    its weight times the budget over the slots, so two of them always seem to fit, whatever
+    they use."""
+    if config is None or not config.commands.defaults:
+        return None
+    pool = config.kinds.get("work", "work")
+    pools = config.pool_set().pools
+    if pool not in pools:
+        return None
+    heavy = min(config.commands.heavy_weight, pools[pool].max)
+    if config.commands.heavy_weight >= HEAVY_WEIGHT or 2 * heavy > pools[pool].max:
+        return None
+    declared = {
+        program
+        for rule in config.commands.rule
+        if rule.args is None and (rule.memory or rule.memory_per_slot)
+        for program in rule.programs
+    }
+    built_in = default_rules(config.commands.heavy_weight, config.commands.light_weight)
+    bare = sorted(
+        {p for r in built_in if r.weight == config.commands.heavy_weight for p in r.programs}
+        - declared
+    )
+    if not bare:
+        return None
+    shown = ", ".join(bare[:4]) + (", ..." if len(bare) > 4 else "")
+    return Check(
+        "two_at_once",
+        "warn",
+        f"[commands] heavy_weight = {config.commands.heavy_weight} runs two heavy commands at "
+        f"once, and {shown} declare no memory: each counts its weight times the budget over the "
+        "slots, so two always seem to fit, and two that each need more than half the memory "
+        "can be OOM-killed",
+        "declare memory for memory-heavy commands (a [[commands.rule]] with `memory`, or `hold "
+        "--memory`), or remove heavy_weight and light_weight to run one at a time",
     )
 
 
@@ -481,6 +523,7 @@ def run(
         check_hard_cpu(resolved),
         check_headroom(resolved),
         check_guard_weights(resolved, memory_bytes),
+        check_two_at_once(resolved),
         check_ledger(resolved),
     ):
         if extra is not None:

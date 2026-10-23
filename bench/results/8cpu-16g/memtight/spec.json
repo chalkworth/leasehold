@@ -1,0 +1,74 @@
+{
+ "conditions": [
+  "lh-enforced@w=4",
+  "lh-enforced@w=3",
+  "lh-enforced@w=3,mem=declared"
+ ],
+ "seed_base": 3000,
+ "agents": 8,
+ "preset_name": "full",
+ "workload": "memheavy",
+ "args": {
+  "preset": "full",
+  "duration_s": 240.0,
+  "agents": 8,
+  "mem_gib": 3.75,
+  "cap_gib": 7.0,
+  "swap_gib": 2.0,
+  "weights": "",
+  "memory_budget": null,
+  "slice_weight": 20,
+  "git_repo": true
+ },
+ "harness": {
+  "no_scope": false,
+  "no_wait": false,
+  "drop_caches": true,
+  "allow_dirty": false
+ },
+ "git_sha": "6af92f3a8b803a2affeb662ff5377159337e7ada",
+ "git_dirty": false,
+ "leasehold_version": "0.4.0",
+ "git_repo": true,
+ "machine": {
+  "cpus": 8,
+  "memory_bytes": 16775364608,
+  "swap_bytes": 8589930496,
+  "kernel": "6.12.113+deb13-amd64",
+  "virt": "kvm",
+  "python": "3.13.5",
+  "class": "kvm-8cpu-16g"
+ },
+ "seed": 3001,
+ "preset": {
+  "duration_s": 240.0,
+  "think_s": 30,
+  "cpu_s": 10,
+  "mem_s": 6,
+  "p_mem": 0.35
+ },
+ "rounds": 6,
+ "nominal_s": {
+  "cpu": 10,
+  "mem": 6.370412504999997
+ },
+ "rate_bytes_per_cpu_s": 1606954322.0964315,
+ "touch_s_per_gib": 0.09877666799999929,
+ "work": {
+  "cpu": 128556345767,
+  "mem": 77133807460
+ },
+ "mem_bytes": 4026531840,
+ "cap_bytes": 7516192768,
+ "swap_bytes": 2147483648,
+ "weights": {
+  "cpu": 4,
+  "mem": 4
+ },
+ "memory_budget": null,
+ "slice_weight": 20,
+ "init_config": "# leasehold config for your own daemon on bench.\n# Sized for 8 CPUs and 16 GiB: one slot per CPU; 2 CPUs are kept for you, and at most three quarters of the memory to any one lease.\n# Made by `leasehold init` (or `leasehold setup`); `leasehold doctor` checks it. Only\n# [ceiling] slots is required; the reference (docs/reference.md) lists every key.\n\nname = \"bench\"\nmode = \"user\"            # your own daemon; `leasehold init --system` writes the machine's\n# socket and ledger_dir: by default $XDG_RUNTIME_DIR/leasehold/leasehold.sock and\n# $XDG_STATE_HOME/leasehold; the socket is yours alone (mode 0600)\n\n# Slots are what leases share, one per CPU given to leasehold's work; what is left is kept for\n# you (your editor, browser and shell). cpus and memory are the most one lease may be given.\n[ceiling]\nslots = 6\ncpus = 6\nmemory = \"11g\"\n\n# Two pools. Your agents' and your own commands go in `work`; `hold --kind external` (a CI\n# runner's job, a batch run) goes in `background`, which never takes work's reserved slots and\n# is served after it.\n[pools.work]\nreserved = 3\nmax = 6\npriority = 0\n\n[pools.background]\nreserved = 0\nmax = 3\npriority = 1\n\n[kinds]\nwork = \"work\"\nexternal = \"background\"\n\n[lend]\npools = []               # no lending on a personal machine; see docs/reference.md, Lending\n\n# Containment: commands leasehold starts run in a systemd user scope weighted to their lease\n# (CPUWeight 100 per slot) where your systemd user manager allows it.\n[contain]\nmode = \"auto\"            # \"off\": never\nhard_cpu = false         # true: also cap a command at its weight in CPUs\n\n# Memory admission: a command starts only while the memory it counts fits the budget. It\n# counts what its rule or `hold --memory` declares, or, declaring none, its weight times\n# assumed_per_slot (\"auto\": the budget over the slots, so full slots are a full budget).\n[memory]\nbudget = \"auto\"          # the machine's memory less `kept`; or a size such as \"12g\"\nkept = \"25%\"             # kept back for you: a share of the memory, or a size such as \"4g\"\nassumed_per_slot = \"auto\"\n\n# While memory is short, what runs keeps running and new work starts only within the memory\n# measured free: none while pressure is high, then a little at a time as it eases. What waits\n# says why.\n[guard]\nmemory_pressure_on = 20.0     # PSI some avg10, percent\nmemory_pressure_off = 5.0\n# min_available = \"2g\"        # default: 5% of memory, at least 512 MiB\nsettle_s = 30\n\n# An elastic lease (a range run with `hold --jobserver`) grows one slot at a time into free\n# slots and gives them back when a request waits for them.\n[elastic]\nsettle_s = 15            # after its size changes, it waits this long before it grows again\nheadroom = \"keep\"        # the pools' headroom it leaves free: \"keep\", \"leave-one\" or \"use\"\n\n# Which commands take a lease when an agent (or you, through the shims) runs them. The built-in\n# rules cover common builds and test runs; `leasehold commands` lists them.\n[commands]\nwait_s = 300             # how long a command waits in line for its lease...\nwhen_busy = \"deny\"       # ...then: \"deny\" it with the reason, or \"run\" it without a lease\n\n# The built-in rules weigh 4 slots (builds and test runs: pytest, cargo, make, ...) and 2\n# (JavaScript tooling: npm test, jest, tsc, ...), in slots and in jobs.\n# On 6 slots, the built-in weight 4 would run one of them at a time; the two lines\n# below run two at once, each with fewer jobs. Delete them for one at a time.\n# A command that declares no memory counts its weight times the budget over the slots,\n# which may be less than it uses: declare memory for memory-heavy work (a rule's\n# `memory`, or `hold --memory`).\n\n# [[commands.rule]]\n# programs = [\"pytest\"]\n# weight = 3\n# memory = \"8g\"          # counted against [memory]; held to this when contained (MemoryHigh)\n",
+ "notes": [],
+ "abort_available_bytes": 536870912,
+ "job_timeout_s": 400
+}

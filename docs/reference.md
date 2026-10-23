@@ -311,11 +311,15 @@ sets `MemoryHigh`. A 0.2 config gains the table with `leasehold setup --upgrade-
 ### Memory guard
 
 Running out of memory is what freezes a machine that runs too much at once. Your own daemon
-watches memory pressure (PSI `some avg10`) and available memory. Available memory is
+watches memory pressure (PSI `some avg10`) and available memory. Pressure is the highest of the
+machine's (`/proc/pressure/memory`) and that inside `leasehold.slice`, where contained commands
+run (unless `[contain] mode = "off"`), and inside the cgroup that sets a memory limit, when one
+does: pressure inside a limit can be high while the machine's is low. `status` lists those
+cgroups as `guard.pressure_cgroups`. Available memory is
 `MemAvailable`, or less under a cgroup memory limit (see [Memory](#memory)): that limit less
 what the cgroup that sets it uses now, its inactive file cache left out, read on every tick. The guard goes on when
-pressure passes `[guard] memory_pressure_on` (20%) or available memory drops under
-`min_available`, and off once pressure has stayed at most `memory_pressure_off` (5%), with
+pressure passes `[guard] memory_pressure_on` (10%) or available memory drops under
+`min_available`, and off once pressure has stayed at most `memory_pressure_off` (2.5%), with
 memory above the floor, for `settle_s` (30 s). While it is on, what runs keeps running, and
 what new work may start depends on whether memory is counted:
 
@@ -477,7 +481,8 @@ and says so; `leasehold init` writes a commented config sized for the machine to
 3 to 7 CPUs), two pools (`work` for your agents and commands, `background` for `--kind
 external`, which never takes work's reserved half), no lending, memory counted against
 three quarters of the machine's (`[memory]`), the memory guard on, and the built-in build and
-test rules with weights that run two at once on 8 CPUs (6 slots).
+test rules at weight 4, with weights that run two at once on 8 CPUs (6 slots) offered as
+comments.
 
 The two kept CPUs are kept only from commands that run as many jobs as their lease gives them
 (`MAKEFLAGS`, `CARGO_BUILD_JOBS` and the others under [Containment](#containment)); a tool that
@@ -485,13 +490,16 @@ ignores the job count can still fill every CPU. `[contain] hard_cpu = true` caps
 command at its weight in CPUs; it is off by default, and `leasehold doctor` warns while it is.
 
 On 4 to 7 slots, where the built-in weight 4 runs one build or test run at a time, the config
-`init` writes runs two at once, each with fewer jobs: `[commands] heavy_weight = 3` and
-`light_weight = 2` on 6 slots (half the slots, and half that again, rounded up). Delete the two
-lines for one at a time at weight 4. A config written before 0.4 keeps weight 4, and the lines
-can be added to it by hand. A command that declares no memory is counted at its weight times
-the budget over the slots, which may be less than it uses: declare memory for memory-heavy work
-(a rule's `memory`, or `hold --memory`), or two large builds can overlap.
-[Measured](bench.md#two-heavy-jobs-at-once).
+`init` writes offers two at once, each with fewer jobs, as two commented lines:
+`[commands] heavy_weight = 3` and `light_weight = 2` on 6 slots (half the slots, and half that
+again, rounded up). Uncomment them when the heavy commands declare memory (a rule's `memory`, or
+`hold --memory`), or when two of them fit in memory together. A command that declares no memory
+is counted at its weight times the budget over the slots, so two of them always seem to fit,
+whatever they use. When two that each needed more than half the memory ran together, the OOM
+killer ended 25 jobs in 6 rounds ([memtight](../bench/results/8cpu-16g/memtight/README.md));
+`leasehold doctor` warns when a config sets these weights and the heavy rules declare no
+memory. 0.4.0's `init` set them uncommented, and a config it wrote keeps them until you remove
+them. [Measured](bench.md#two-heavy-jobs-at-once).
 
 #### Upgrading a 0.2 config
 
@@ -593,7 +601,7 @@ an example machine. An unknown key is an error.
 | `[[observe]]` | none | see [Observed programs](#observed-programs): `name`, `match` (`comm`, `exe`, `cmdline`, `user`), `weight`, `pool` (`observed`), `max_count` |
 | `[commands]` | the built-in rules | see [`[commands]`](#which-commands-take-a-lease-commands): `defaults`, `[[commands.rule]]`, `heavy_weight` (4), `light_weight` (2), `wait_s`, `when_busy` |
 | `[memory]` | none: no memory counted | see [Memory](#memory): `budget` (`"auto"`), `kept` (`"25%"`), `assumed_per_slot` (`"auto"`) |
-| `[guard]` | on for your own daemon | see [Memory guard](#memory-guard): `enabled`, `memory_pressure_on` (20), `memory_pressure_off` (5), `min_available` (5% of memory, at least 512 MiB), `settle_s` (30) |
+| `[guard]` | on for your own daemon | see [Memory guard](#memory-guard): `enabled`, `memory_pressure_on` (10), `memory_pressure_off` (2.5), `min_available` (5% of memory, at least 512 MiB), `settle_s` (30) |
 | `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again; at least 1 |
 | `[elastic] headroom` | `"keep"` | how much of the pools' and the machine's headroom an [elastic lease](#elastic-leases) leaves free as it grows: `"keep"` all of it, `"leave-one"` one slot, `"use"` none |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
@@ -652,6 +660,12 @@ releases the lease and then ends by the same signal, so the shell sees the inter
 a loop or script that runs `hold` (the shell still reports 130, or 131). Run any other way, the
 command gets a session of its own, and a command killed by a signal makes `hold` exit 128 + the
 signal.
+
+When the kernel's OOM killer ends a contained command, or a process in it, `hold` says so on
+stderr: the command's peak, the memory leasehold counted for it, and a `--memory` about 15%
+above the peak. That peak is at most what the command was let use before the kill, so declare
+at least that much. `hold` knows of the kill when the command's scope counted it, or when the
+command ended by SIGKILL while the machine counted one.
 
 ### Containment
 
@@ -999,6 +1013,11 @@ manager that stops the command if it still runs on leaving. The command:
 - is stopped with its group, SIGTERM then SIGKILL after `grace` seconds (30), when a `lend`
   lease is lost, whether or not anything waits for it; `Command.stopped_for` says why.
 
+Once a contained command ends, `Command.oom_killed` says whether the kernel's OOM killer ended
+any of its processes, and `Command.peak_bytes` is the most memory its scope used (None when
+unknown). After `lease.run(argv)`, `lease.oom_killed` says the same of the command it ran. An
+uncontained command is never `oom_killed`.
+
 Whatever the command leaves in its group is stopped when it ends. Other keyword arguments go to
 `subprocess.Popen`. A command that cannot be started raises `NotStarted`.
 
@@ -1148,7 +1167,8 @@ pytest and py.test (with xdist workers, and without), tox and nox; cargo build, 
 bazel; `cmake --build`; go build and test; mvn and gradle; docker and podman build; npm, pnpm,
 yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. The
 builds and test runs weigh `heavy_weight` (4), the JavaScript tooling `light_weight` (2); lower
-them to run more at once (a new config on 4 to 7 slots does: [two at once](#your-own-daemon)).
+them to run more at once (a new config on 4 to 7 slots offers this as comments: [two at
+once](#your-own-daemon)).
 A weight is both what a command costs in slots and the job count it is given. It is a
 count (`weight = 4`) or a [range](#ranges-min-max-slots) (`weight = "2-4"`), whose command is
 granted a size between the two when admitted and run sized to it. A rule's
@@ -1326,7 +1346,9 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
   its clock, PSI, cgroup v2 and the slices the config names, `/proc` visibility, the ledger,
   and whether commands are contained (`enforced (systemd)`, or `advisory:` and why). It warns
   when your own config lacks what today's has ([upgrading](#upgrading-a-02-config)), when no
-  built-in build or test rule could start while the memory guard is on, and checks that the
+  built-in build or test rule could start while the memory guard is on, when `[commands]
+  heavy_weight` runs two heavy commands at once and some of them declare no memory
+  (`two_at_once`), and checks that the
   [memory budget](#memory) worked out for this machine lets work start, and fails a
   `[commands]` rule no lease could ever be granted for (its commands are refused). It exits 1
   on any failure and prints a fix for each problem. `--json` for scripts.
@@ -1345,7 +1367,7 @@ client for it.
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
 | `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, and `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it); a rule no lease could ever be granted for carries `never`, the reason |
-| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic` | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings; the lease has `max_jobs`, the job count of its `max_weight`), `queued` (with `position`, `blocked`, the `min_weight` and `max_weight` it waits with, as admission would cut them now, and, while a maintenance lease holds or drains the machine, `maintenance` as in [status](#the-status-object)) or `refused` (with `reason`) |
+| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic` | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings; the lease has `max_jobs`, the job count of its `max_weight`, and `memory_counted_bytes`, the memory admission counts for it at the weight granted), `queued` (with `position`, `blocked`, the `min_weight` and `max_weight` it waits with, as admission would cut them now, and, while a maintenance lease holds or drains the machine, `maintenance` as in [status](#the-status-object)) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs` |
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
 | `POST /v1/elastic` | `lease_id` | `elastic`, with the lease's `weight`, `jobs`, `target` and `target_jobs`: a held range is elastic from now on; 409 `conflict` when it is not held, 400 for a lease with no range |
@@ -1425,7 +1447,8 @@ when a field is removed or changes meaning:
 - `lend`: `eligible`, `reason`, `quiet_since`, `quiet_s`, `window`, `pools`, `switch`;
 - `guard`: `enabled`, `on`, `pressing` (whether the last reading was itself over a threshold,
   not only settling), `reason`, `since`, `memory_pressure_on`, `memory_pressure_off`,
-  `min_available_bytes`, `settle_s`;
+  `min_available_bytes`, `settle_s`, `pressure_cgroups` (the cgroups whose memory pressure it
+  reads besides the machine's, relative to the cgroup root);
 - `memory`: `counted` (whether the config has `[memory]`), `machine_bytes`, `limit_bytes` and
   `limit_cgroup` (the cgroup memory limit when the daemon started, and the cgroup that sets it,
   or null without one), and with it

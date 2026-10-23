@@ -17,6 +17,9 @@ group.
 * A contained command is measured while it runs (`leasehold.measure`): once it ends, what it
   used, with the lease's rule and the git repository it ran in, is the outcome the lease sends
   when it is released (`leasing.Lease.release`). An uncontained one is not measured.
+* Once a contained command ends, `oom_killed` says whether the kernel's OOM killer ended any
+  of its processes: its scope counted an OOM kill, or it ended by SIGKILL while the machine
+  counted one. `peak_bytes` is the most memory its scope used.
 
 No signal handler is installed: a caller that wants signals passed on sends them to `pid`'s
 group.
@@ -123,7 +126,11 @@ class Command:
     was asked for); `stopped_for` is why the lease stopped it (None: it was not). `memory` (a
     size such as `4g`), or `memory_per_slot` for each slot granted, holds its scope's memory.
     `say` hears what the follower and the stop have to tell. Raises `NotStarted`, or
-    `contain.Cancelled` when `cancel_fd` turns readable while its scope is made."""
+    `contain.Cancelled` when `cancel_fd` turns readable while its scope is made.
+
+    Once it has ended, `oom_killed` says whether the OOM killer ended any of its processes and
+    `peak_bytes` is the most memory its scope used (None: unknown). Both are known only for a
+    contained command: an uncontained one is never `oom_killed`."""
 
     def __init__(
         self,
@@ -151,6 +158,8 @@ class Command:
         self.stopped_for: str | None = None
         self.uncontained: str | None = None
         self.returncode: int | None = None
+        self.oom_killed = False
+        self.peak_bytes: int | None = None
         self._say = say
         self._meter: measure.Meter | None = None
         self._repo: str | None = None
@@ -249,13 +258,19 @@ class Command:
     def _end(self, code: int) -> None:
         if self._meter is not None:
             wall_s = self._meter.stop()
+            usage = self._meter.usage
             self.lease._outcome = {
                 "rule": self.lease._rule,
                 "repo": self._repo,
-                **dataclasses.asdict(self._meter.usage),
+                **dataclasses.asdict(usage),
                 "wall_s": round(wall_s, 3),
                 "exit_status": code,
             }
+            self.peak_bytes = usage.peak_bytes
+            self.oom_killed = (usage.oom_kills or 0) > 0 or (
+                code == -signal.SIGKILL and (self._meter.machine_oom_kills or 0) > 0
+            )
+            self.lease.oom_killed = self.oom_killed
         if group_alive(self.pid):
             stop_group(self.process, self.grace_s)
         self.returncode = code

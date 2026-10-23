@@ -291,9 +291,11 @@ class Lease:
     thread of its own until `release()`, which leaving its `with` block calls.
 
     `weight` and `jobs` are what it holds now, `min_weight` and `max_weight` its range.
-    `lost` is None, or why the lease was revoked or lost for good. A `work` or `external` lease
-    the daemon forgot and grants again holds the new grant (its `LEASEHOLD_GRANT` included);
-    while it waits in line again, it keeps its last grant, as a command under `hold` runs on."""
+    `lost` is None, or why the lease was revoked or lost for good. `oom_killed` says whether
+    the OOM killer ended a process of the last contained command run under it. A `work` or
+    `external` lease the daemon forgot and grants again holds the new grant (its
+    `LEASEHOLD_GRANT` included); while it waits in line again, it keeps its last grant, as a
+    command under `hold` runs on."""
 
     def __init__(
         self,
@@ -310,6 +312,9 @@ class Lease:
         self._rule = _rule
         #: What its last contained command used (`supervise.Command`), sent with the release.
         self._outcome: dict | None = None
+        #: Whether the OOM killer ended a process of the last contained command run under it
+        #: (`supervise.Command.oom_killed`): what `run` cannot say in its exit status.
+        self.oom_killed = False
         self._on_lost = on_lost
         self._say = _say
         self._stop = threading.Event()
@@ -530,7 +535,8 @@ class Lease:
 
     def run(self, argv: Sequence[str], **options) -> int:
         """`popen(argv, **options)` waited for: the command's exit status (negative: the signal
-        that ended it)."""
+        that ended it). `oom_killed` then says whether the OOM killer ended any of its
+        processes."""
         with self.popen(argv, **options) as command:
             return command.wait()
 
