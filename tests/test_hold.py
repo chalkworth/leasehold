@@ -155,6 +155,6 @@ def test_a_command_the_oom_killer_ends_is_named(daemon):
         subprocess.run(["systemctl", "--user", "revert", capped], check=False, capture_output=True)
     assert done.returncode == 128 + signal.SIGKILL
     assert "the kernel's OOM killer ended this command" in done.stderr
-    assert "leasehold counts no memory here ([memory] is not set)" in done.stderr
+    assert "leasehold counted no memory for it" in done.stderr
     if peak_available:
         assert "Declare at least --memory " in done.stderr

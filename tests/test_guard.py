@@ -29,7 +29,7 @@ def test_pressure_inside_the_memory_limit_turns_the_guard_on(tmp_path, sock_dir)
         assert (guard["memory_pressure_on"], guard["memory_pressure_off"]) == (10.0, 2.5)
         assert "." in guard["pressure_cgroups"]
         assert not guard["on"]
-        # The peak the memtight bench measured inside its cap, which the machine never showed.
+        # Pressure inside the limit alone turns the guard on.
         load.by_cgroup["."] = {"memory": 13.0}
         until(lambda: client.status()["guard"]["on"])
         assert client.status()["guard"]["reason"] == "memory pressure 13% over 10%"

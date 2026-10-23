@@ -473,8 +473,8 @@ def _counted(lease: leasing.Lease) -> int | None:
 
 def oom_line(peak: int | None, counted: int | None) -> str:
     """What `hold` says when the kernel's OOM killer ended a process of its command: the
-    command's peak, the memory leasehold counted for it (0: none, with no `[memory]`; None:
-    unknown), and a `--memory` above the peak (`suggested_memory`). The peak is at most what
+    command's peak, the memory leasehold counted for it (0: none, as without `[memory]`;
+    None: unknown), and a `--memory` above the peak (`suggested_memory`). The peak is at most what
     the command was let use before the kill, so that size is a least."""
     said = []
     if peak is not None:
@@ -482,7 +482,7 @@ def oom_line(peak: int | None, counted: int | None) -> str:
     if counted:
         said.append(f"leasehold counted {_gib(counted)} for it")
     elif counted == 0:
-        said.append("leasehold counts no memory here ([memory] is not set)")
+        said.append("leasehold counted no memory for it")
     line = "the kernel's OOM killer ended this command, or a process in it"
     if said:
         line += ": " + ", and ".join(said)

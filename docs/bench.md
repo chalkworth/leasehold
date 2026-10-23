@@ -644,7 +644,7 @@ The gates so far:
   and 1.14 to 1.16 for `git status` p95. On this machine's 6 slots, `w=3-3` is a fixed weight
   of 3 and `h=1` is the headroom `auto` already gives, so the setting it supports is
   `[commands] heavy_weight = 3`, which a new config offers as comments on 6 or 7 slots (2 on 4
-or 5); [`memtight`](../bench/results/8cpu-16g/memtight/README.md) is why it is not set. Memory
+  or 5); [`memtight`](../bench/results/8cpu-16g/memtight/README.md) is why it is not set. Memory
   pressure stayed at 0 in every round of both workloads, so `memheavy` did not test behaviour
   under memory pressure. The guest booted afresh before the last round reported 12 KiB more
   memory than before; `bench/run.py` and `compare` now accept a difference of up to 1%.

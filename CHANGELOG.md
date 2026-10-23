@@ -69,8 +69,8 @@ here.
 
 - A new config on 4 to 7 slots keeps the built-in heavy weight 4 again, one build or test run
   at a time. `init` and `setup` write the two-at-once lines (`heavy_weight = 3`,
-  `light_weight = 2` on 6 slots) as comments, with when they are safe: when the heavy commands
-  declare memory, or two of them fit in memory together. In the exploratory `memtight` bench
+  `light_weight = 2` on 6 slots) as comments, and say they are safe when the heavy commands
+  declare memory, or when two of them fit in memory together. In the exploratory `memtight` bench
   run (`bench/results/8cpu-16g/memtight/`), where two memory jobs did not fit under a 7 GiB
   cap, weight 3 with no memory declared lost 25 jobs to the OOM killer over 6 rounds, and
   weight 4 and weight 3 with memory declared lost none. A config 0.4.0 wrote keeps its lines.

@@ -13,8 +13,8 @@ weights on a workload where they fit.
   memory job touches 3.75 GiB, then hashes for 6 s on every CPU.
 - Everything the benchmark runs shares one 7 GiB `MemoryMax` (2 GiB of swap), so two memory
   jobs (7.5 GiB) do not fit under it.
-- leasehold at commit f41cc06. `spec.json` records 6af92f3, the head of that pull request's
-  branch, which differs from it only in the summary's column names.
+- leasehold at commit f41cc06 (#37). `spec.json` records 6af92f3, the head of #37's branch,
+  which differs from f41cc06 only in the summary's column names.
 - The config is what `leasehold init` wrote for the machine: 6 slots, `[memory] budget =
   "auto"`, which under the 7 GiB limit is 5.25 GiB, so 0.875 GiB a slot. Every job runs under
   `hold --weight W`, contained.
