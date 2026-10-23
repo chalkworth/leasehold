@@ -111,6 +111,14 @@ def probe(
     return Containment(True, "")
 
 
+def root_slice_cgroup(uid: int | None = None) -> str:
+    """Where `ROOT_SLICE` is in the cgroup tree for user `uid` (default ours), relative to the
+    cgroup root: under the user manager, where `probe` requires it. Every contained command's
+    scope is in it, a `leasehold run` session's slice included."""
+    uid = os.getuid() if uid is None else uid
+    return f"user.slice/user-{uid}.slice/user@{uid}.service/{ROOT_SLICE}"
+
+
 def _answers() -> bool:
     try:
         done = subprocess.run(

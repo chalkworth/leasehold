@@ -1,25 +1,38 @@
 """What `init` writes for a user's own daemon, and what `setup --upgrade-config` makes of a
-config 0.2 wrote: the heavy rules' weight each one gives."""
+config 0.2 wrote: the heavy rules' weight each one gives, and the two-at-once weights offered
+as comments."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
+from support import cli
 
 from leasehold import machine, template, upgrade
 
 
 @pytest.mark.parametrize(
-    ("cpus", "heavy"),
+    ("cpus", "offered"),
     [
-        (4, 4),  # 3 slots: one at a time, at full width
-        (8, 3),  # 6 slots: two at once (the defaults-h1 bench gate)
-        (12, 4),  # 10 slots: weight 4 already runs two at once
+        (4, None),  # 3 slots: one at a time, at full width
+        (8, 3),  # 6 slots: one at a time; two at once is a commented opt-in (memtight bench)
+        (12, None),  # 10 slots: weight 4 already runs two at once
     ],
 )
-def test_a_new_config_runs_two_heavy_commands_at_once(tmp_path, cpus, heavy):
+def test_a_new_config_keeps_the_built_in_heavy_weight(tmp_path, cpus, offered):
     path = tmp_path / "machine.toml"
-    path.write_text(template.sized("user", {"cpus_logical": cpus, "memory_bytes": 16 * 2**30}))
-    assert machine.load(path).commands.heavy_weight == heavy
+    text = template.sized("user", {"cpus_logical": cpus, "memory_bytes": 16 * 2**30})
+    path.write_text(text)
+    assert machine.load(path).commands.heavy_weight == 4
+    assert ("# heavy_weight = " in text) == (offered is not None)
+    if offered is not None:
+        path.write_text(text.replace(f"# heavy_weight = {offered}", f"heavy_weight = {offered}"))
+        assert machine.load(path).commands.heavy_weight == offered
+    doctor = cli(tmp_path / "none.sock", "--config", str(path), "doctor", "--json")
+    checks = json.loads(doctor.stdout)
+    warned = [c for c in checks if c["name"] == "two_at_once"]
+    assert [c["level"] for c in warned] == (["warn"] if offered is not None else [])
 
 
 def test_an_upgraded_0_2_config_keeps_the_built_in_weights(tmp_path):

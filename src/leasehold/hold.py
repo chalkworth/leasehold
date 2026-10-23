@@ -29,6 +29,9 @@ Where the daemon allows it and the caller runs in the user's own session, the co
 in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it runs as is. What a
 contained command used is sent with the release (`leasehold.measure`), filed under the
 `[commands]` rule that sized it when `hold` was given no weight.
+When the kernel's OOM killer ended a contained command, or a process in it, `hold` says so
+on stderr, with its peak, the memory leasehold counted for it and a `--memory` that would
+count more than the peak (`oom_line`).
 
 A lease asked for as a range (`--weight 2-4`) is sized to the weight it was granted: its job
 and thread counts, jobserver, `LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot,
@@ -429,6 +432,8 @@ def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
                     if tty:
                         stack.enter_context(foreground(command.pid))
                     code = command.wait()
+                    if command.oom_killed:
+                        _say(oom_line(command.peak_bytes, _counted(lease)))
     finally:
         lease.release()
     if interrupted is not None:
@@ -436,6 +441,57 @@ def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
     if command.stopped_for is not None:
         return EXIT_REVOKED
     return _ended(code, tty)
+
+
+#: The step a suggested `--memory` is rounded up to: 256 MiB.
+_MEMORY_STEP = 256 << 20
+
+
+def suggested_memory(peak: int) -> str:
+    """A `--memory` size for a command that peaked at `peak` bytes: about 15% more, rounded up
+    to `_MEMORY_STEP`, in GiB when whole, else MiB."""
+    size = -(-int(peak * 1.15) // _MEMORY_STEP) * _MEMORY_STEP
+    return f"{size >> 30}g" if size % (1 << 30) == 0 else f"{size >> 20}m"
+
+
+def _gib(size: int) -> str:
+    return f"{size / 2**30:.1f} GiB"
+
+
+def _counted(lease: leasing.Lease) -> int | None:
+    """The memory the daemon counted for `lease` at its weight now: what it counted at the grant,
+    which is the declared total, or else a size per slot times the weight. None for a daemon
+    that does not say."""
+    first = (lease._answer or {}).get("lease") or {}
+    counted = first.get("memory_counted_bytes")
+    if counted is None or not first.get("weight") or lease.weight is None:
+        return None
+    if first.get("memory_bytes") is not None and first.get("memory_per_slot_bytes") is None:
+        return counted
+    return counted * lease.weight // first["weight"]
+
+
+def oom_line(peak: int | None, counted: int | None) -> str:
+    """What `hold` says when the kernel's OOM killer ended a process of its command: the
+    command's peak, the memory leasehold counted for it (0: none, with no `[memory]`; None:
+    unknown), and a `--memory` above the peak (`suggested_memory`). The peak is at most what
+    the command was let use before the kill, so that size is a least."""
+    said = []
+    if peak is not None:
+        said.append(f"its peak was {_gib(peak)}")
+    if counted:
+        said.append(f"leasehold counted {_gib(counted)} for it")
+    elif counted == 0:
+        said.append("leasehold counts no memory here ([memory] is not set)")
+    line = "the kernel's OOM killer ended this command, or a process in it"
+    if said:
+        line += ": " + ", and ".join(said)
+    if peak is not None:
+        line += (
+            f". Declare at least --memory {suggested_memory(peak)} (or a rule's `memory`) so "
+            "that leasehold counts what it uses"
+        )
+    return line
 
 
 @contextlib.contextmanager

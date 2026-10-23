@@ -36,9 +36,9 @@ EXAMPLE = {
 def weights(slots: int) -> tuple[int, int]:
     """The (heavy, light) weights that let two builds or test runs run at once on `slots`
     slots: half the slots from 4 up, all of them below (one at a time, at full width, rather
-    than two of one job each). Light is half of heavy, rounded up. A user's new config sets
-    them (`[commands] heavy_weight`, `light_weight`) where the built-in 4 lets only one run at
-    a time."""
+    than two of one job each). Light is half of heavy, rounded up. A user's new config offers
+    them as comments (`[commands] heavy_weight`, `light_weight`) where the built-in 4 lets only
+    one run at a time."""
     heavy = slots // 2 if slots >= 4 else max(1, slots)
     return heavy, max(1, (heavy + 1) // 2)
 
@@ -52,8 +52,8 @@ def kept_for_you(cpus: int) -> int:
 def sized(mode: Mode, facts: dict) -> str:
     """The config `init` (and `setup`) writes for a machine of these `facts` (`facts.probe`):
     one slot per CPU, less `kept_for_you` for a user's own daemon, and at most three quarters of
-    the memory to any one lease. A user's own also counts memory (`[memory]`), and sets the
-    `weights` that run two builds at once."""
+    the memory to any one lease. A user's own also counts memory (`[memory]`), and offers the
+    `weights` that run two builds at once as comments."""
     cpus = facts.get("cpus_logical") or os.cpu_count() or 1
     memory = facts.get("memory_bytes") or 0
     kept = kept_for_you(cpus) if mode == "user" else 0
@@ -89,32 +89,31 @@ def two_at_once_lines(slots: int, *, set_them: bool) -> str:
     heavy, light = weights(slots)
     if heavy >= min(HEAVY_WEIGHT, slots):
         return ""
+    caution = (
+        "A command that declares no memory counts its weight times the budget over the slots,\n"
+        "# so two of them always seem to fit, whatever they use. Two heavy commands that each\n"
+        "# need more than half the memory can then be OOM-killed (docs/bench.md, memtight).\n"
+    )
     if not set_them:
         return (
-            f"# To run two at once instead, each with fewer jobs (opt-in):\n"
+            "# To run two at once instead, each with fewer jobs (opt-in), uncomment these two\n"
+            "# lines. That is safe when the heavy commands declare memory (a rule's `memory`, or\n"
+            "# `hold --memory`), or when two of them fit in memory together.\n"
             f"# heavy_weight = {heavy}\n"
             f"# light_weight = {light}\n"
-            "# A command that declares no memory then counts its weight times the budget "
-            "over the\n# slots, which may be less than it uses: declare memory for memory-heavy "
-            "work (a rule's\n# `memory`, or `hold --memory`).\n"
+            f"# {caution}"
         )
-    return (
-        f"heavy_weight = {heavy}\n"
-        f"light_weight = {light}\n"
-        "# A command that declares no memory counts its weight times the budget over the slots,\n"
-        "# which may be less than it uses: declare memory for memory-heavy work (a rule's\n"
-        "# `memory`, or `hold --memory`).\n"
-    )
+    return f"heavy_weight = {heavy}\nlight_weight = {light}\n# {caution}"
 
 
 def render(
     *, name: str, mode: Mode, slots: int, cpus: float, memory: str, about: str,
-    two_at_once: bool = True,
+    two_at_once: bool = False,
 ) -> str:  # fmt: skip
     """The config text for a machine with `slots` slots, `cpus` CPUs and `memory` to lend one
-    lease (a size such as `48g`). A user's config sets the weights that run two heavy commands
-    at once where the built-in ones run one; with `two_at_once` false it offers them as
-    comments instead and keeps the built-in weights."""
+    lease (a size such as `48g`). Where the built-in weights run one heavy command at a time,
+    a user's config offers the weights that run two at once as comments and keeps the
+    built-in ones; with `two_at_once` it sets them."""
     pools = default_pools(slots)
     if mode == "user":
         reserved = pools["work"].reserved

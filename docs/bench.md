@@ -195,8 +195,13 @@ run at once, with memory counted as above. An earlier draft of 0.3 generated thi
 default; these runs measured it then and did not show it to be better, so 0.3 left it opt-in.
 The [`defaults-h1` gate](#pre-registered-comparisons), with 8 rounds on fresh seeds, later found
 makespan and mean job time faster; wake p99 and git status p95 rose but stayed within their
-1.5 margins. Since 0.4 a new config sets it. The runs below are one run per condition,
-in sessions earlier the same day as the runs above.
+1.5 margins. 0.4.0's `init` set it in new configs. The
+[`memtight` run](../bench/results/8cpu-16g/memtight/README.md), exploratory and not a gate,
+then gave each memory job 3.75 GiB under a 7 GiB cap, so two did not fit together: undeclared,
+weight 3 lost 25 jobs to the OOM killer over 6 rounds (weight 4 lost none), and with the memory
+declared it lost none and ran 1.06 times as long as weight 4. A new config therefore offers the
+setting as commented lines again. The runs below are one run per condition, in sessions
+earlier the same day as the runs above.
 
 Like those, they are not directly comparable with the 0.2 tables at the top. Other people's work
 was using about 6 GiB of the machine's memory that day, so the benchmark's limit was lowered to
@@ -638,7 +643,8 @@ The gates so far:
   the geometric-mean ratios were 0.857 for makespan, 0.795 for job mean, 1.125 for wake p99
   and 1.14 to 1.16 for `git status` p95. On this machine's 6 slots, `w=3-3` is a fixed weight
   of 3 and `h=1` is the headroom `auto` already gives, so the setting it supports is
-  `[commands] heavy_weight = 3`, which a new config writes on 6 or 7 slots (2 on 4 or 5). Memory
+  `[commands] heavy_weight = 3`, which a new config offers as comments on 6 or 7 slots (2 on 4
+or 5); [`memtight`](../bench/results/8cpu-16g/memtight/README.md) is why it is not set. Memory
   pressure stayed at 0 in every round of both workloads, so `memheavy` did not test behaviour
   under memory pressure. The guest booted afresh before the last round reported 12 KiB more
   memory than before; `bench/run.py` and `compare` now accept a difference of up to 1%.

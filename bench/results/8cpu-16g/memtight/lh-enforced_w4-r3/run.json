@@ -1,0 +1,22 @@
+{
+ "start": 1792743923.9605842,
+ "end": 1792744636.7928963,
+ "aborted": null,
+ "seed": 3003,
+ "cgroups": {
+  "harness": {
+   "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/lhbench-lh-enforced-12c5d6.scope",
+   "oom_kill": 0,
+   "high": 0,
+   "max": 0,
+   "peak": 359354368
+  },
+  "jobs": {
+   "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/leasehold.slice/leasehold-bench_456e77.slice",
+   "oom_kill": 0,
+   "high": 0,
+   "max": 0,
+   "peak": 4075474944
+  }
+ }
+}

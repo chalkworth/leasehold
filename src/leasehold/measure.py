@@ -15,6 +15,11 @@ runs, and once more as it stops, and keeps the last value of each:
 
 A value never read is None. The meter finds the scope from the command's own cgroup
 (`/proc/<pid>/cgroup`), and reads nothing unless that is the scope it was told of.
+
+The scope is removed as soon as an OOM kill empties it, often before the next read, so the
+meter also counts the OOM kills on the whole machine (`oom_kill` in `/proc/vmstat`) from the
+command's start to its end (`machine_oom_kills`): with a command that ended by SIGKILL, one of
+them is likely its own.
 """
 
 from __future__ import annotations
@@ -65,6 +70,12 @@ def _read(path: Path) -> str | None:
         return None
 
 
+def machine_oom_kills(proc: Path = Path("/proc")) -> int | None:
+    """How many processes the OOM killer has ended on this machine since boot (`oom_kill` in
+    `vmstat`); None where it cannot be read."""
+    return _fields(_read(proc / "vmstat")).get("oom_kill")
+
+
 def read(group: Path, last: Usage) -> Usage:
     """`last` updated with what can be read in the cgroup directory `group` now: each value
     read replaces the last one (for `anon_bytes`, only when it is larger), and a value that
@@ -85,7 +96,8 @@ class Meter:
     """Reads the cgroup of process `pid` every `PERIOD_S`, from a thread of its own, while that
     cgroup is the scope `unit`, until `stop`, or until `running` (when given) says the command
     has ended. `usage` is what it has read so far. `started` is when, on the `time.monotonic`
-    clock, the command was started (default now)."""
+    clock, the command was started (default now). `machine_oom_kills` is how many OOM kills
+    the machine had from its start to `stop` (None: unknown)."""
 
     def __init__(
         self,
@@ -98,6 +110,9 @@ class Meter:
         running: Callable[[], bool] | None = None,
     ) -> None:
         self.usage = Usage()
+        self.machine_oom_kills: int | None = None
+        self._proc = proc
+        self._oom_before = machine_oom_kills(proc)
         self._started = time.monotonic() if started is None else started
         self._running = running
         #: When the thread saw the command had ended; None: it has not.
@@ -132,6 +147,9 @@ class Meter:
         self._stop.set()
         self._thread.join()
         self._sample()
+        after = machine_oom_kills(self._proc)
+        if self._oom_before is not None and after is not None:
+            self.machine_oom_kills = after - self._oom_before
         return (self._ended or time.monotonic()) - self._started
 
 

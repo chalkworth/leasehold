@@ -48,6 +48,39 @@ here.
 - `leasehold.kinds.WHOLE`, `leasehold.maintenance`, `MachineConfig.kind_pool`, and in
   `leasehold.admission` the `whole` field of `Held` and `Waiting`, `AdmissionPolicy.maintenance`,
   `refusal(..., whole=)` and `draining()`.
+- When the kernel's OOM killer ends a contained command, or a process in it, `hold` says so on
+  stderr in one line: the command's peak, the memory leasehold counted for it, and a `--memory`
+  about 15% above the peak to declare at least. It knows of the kill when the command's scope
+  counted one, or when the command ended by SIGKILL while the machine counted one.
+- `leasehold.Command.oom_killed` and `Command.peak_bytes`, known once a contained command has
+  ended, and `Lease.oom_killed`, the same for the last contained command run under the lease
+  (what `Lease.run` cannot say in its exit status).
+- A granted `POST /v1/acquire` answer's `lease` has `memory_counted_bytes`, the memory
+  admission counts for it at the weight granted.
+- The status object's `guard` has `pressure_cgroups`: the cgroups whose memory pressure the
+  guard reads besides the machine's.
+- `leasehold doctor` warns (`two_at_once`) when `[commands] heavy_weight` is lowered so that two
+  heavy commands run at once in the `work` pool and some built-in heavy rules declare no memory.
+- `leasehold.contain.root_slice_cgroup`, `leasehold.measure.machine_oom_kills`,
+  `Meter.machine_oom_kills`, `leasehold.hold.oom_line` and `suggested_memory`, and
+  `leasehold.doctor.check_two_at_once`.
+
+### Changed
+
+- A new config on 4 to 7 slots keeps the built-in heavy weight 4 again, one build or test run
+  at a time. `init` and `setup` write the two-at-once lines (`heavy_weight = 3`,
+  `light_weight = 2` on 6 slots) as comments, with when they are safe: when the heavy commands
+  declare memory, or two of them fit in memory together. In the exploratory `memtight` bench
+  run (`bench/results/8cpu-16g/memtight/`), where two memory jobs did not fit under a 7 GiB
+  cap, weight 3 with no memory declared lost 25 jobs to the OOM killer over 6 rounds, and
+  weight 4 and weight 3 with memory declared lost none. A config 0.4.0 wrote keeps its lines.
+  `leasehold.template.render` now takes `two_at_once=False` by default.
+- The memory guard reads memory pressure inside `leasehold.slice`, where contained commands run,
+  and inside the cgroup that sets the daemon's memory limit, as well as the machine's, and goes
+  by the highest. Pressure inside a cap can be high while the machine's is low.
+- `[guard] memory_pressure_on` defaults to 10 (was 20) and `memory_pressure_off` to 2.5 (was 5).
+  In `memtight`, pressure peaked at 8.5% to 13.2% in the rounds that had OOM kills, under the
+  old threshold in every round and over the new one in three.
 
 ## [0.4.0]
 

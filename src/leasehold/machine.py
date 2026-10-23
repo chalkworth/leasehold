@@ -126,10 +126,12 @@ class GuardSettings(_Strict):
 
     #: None: on for a user's own daemon, off for the machine's.
     enabled: bool | None = None
-    #: Memory PSI `some avg10` (a percentage) above which the guard goes on...
-    memory_pressure_on: float = Field(20.0, ge=0)
+    #: Memory PSI `some avg10` (a percentage) above which the guard goes on: the machine's, or
+    #: inside the cgroup contained commands run in or the one that sets the memory limit,
+    #: whichever is highest...
+    memory_pressure_on: float = Field(10.0, ge=0)
     #: ...and at most which, for `settle_s`, it goes off again.
-    memory_pressure_off: float = Field(5.0, ge=0)
+    memory_pressure_off: float = Field(2.5, ge=0)
     #: Available memory (a size such as `2g`) under which it goes on. None: 5% of the machine's
     #: memory, at least 512 MiB.
     min_available: str | None = None

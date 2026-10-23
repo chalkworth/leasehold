@@ -53,8 +53,8 @@ assumed_per_slot = "auto"
 # measured free: none while pressure is high, then a little at a time as it eases. What waits
 # says why.
 [guard]
-memory_pressure_on = 20.0     # PSI some avg10, percent
-memory_pressure_off = 5.0
+memory_pressure_on = 10.0     # PSI some avg10, percent: the machine's or your commands'
+memory_pressure_off = 2.5
 # min_available = "2g"        # default: 5% of memory, at least 512 MiB
 settle_s = 30
 

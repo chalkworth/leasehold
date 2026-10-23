@@ -1,0 +1,32 @@
+results in out/memtight (run again with the schedule it was started with)
+lh-enforced_w3-r2: round 2, seed 3002: leasehold hold, containment on: weighted scope per lease (w=3)
+  page cache dropped
+  machine before: load 0.94, cpu some 0.0%, mem some 0.0%, dirty 0 MiB
+  jobs 48, failed 5, makespan_s 612.0, job_mean_s 47.7, job_p95_s 76.2, wait_mean_s 25.7, wait_p95_s 54.9, run_mean_s 22.0, wake_same_p50_ms 0.07, wake_same_p99_ms 0.09, wake_same_max_ms 15.0, wake_out_p50_ms 0.08, wake_out_p99_ms 0.09, git_p50_ms 42.0, git_p95_ms 55.0, oom_kills 5, oom_kills_machine 5, swapin_mib 9061.0, mem_some_max 12.8, mem_some_mean 1.1, mem_full_max 12.7, cap_mem_some_max 13.2, cap_mem_some_mean 1.1, cap_mem_full_max 13.2, bench_mem_peak_gib 7.0, cpu_busy_mean 56.0, cpu_steal_mean 0.0, jobs_in_lease_scope 48, load_before 0.94, aborted 
+lh-enforced_w3_memdeclared-r2: round 2, seed 3002: leasehold hold, containment on: weighted scope per lease (w=3, mem=declared)
+  page cache dropped
+  machine before: load 0.79, cpu some 0.0%, mem some 0.0%, dirty 0 MiB
+  jobs 48, failed 0, makespan_s 690.0, job_mean_s 54.6, job_p95_s 96.6, wait_mean_s 35.1, wait_p95_s 71.6, run_mean_s 19.5, wake_same_p50_ms 0.07, wake_same_p99_ms 0.09, wake_same_max_ms 19.0, wake_out_p50_ms 0.08, wake_out_p99_ms 0.09, git_p50_ms 38.0, git_p95_ms 51.0, oom_kills 0, oom_kills_machine 0, swapin_mib 0.0, mem_some_max 0.0, mem_some_mean 0.0, mem_full_max 0.0, cap_mem_some_max 0.0, cap_mem_some_mean 0.0, cap_mem_full_max 0.0, bench_mem_peak_gib 3.79, cpu_busy_mean 50.0, cpu_steal_mean 0.0, jobs_in_lease_scope 48, load_before 0.79, aborted 
+lh-enforced_w4-r2: round 2, seed 3002: leasehold hold, containment on: weighted scope per lease (w=4)
+  page cache dropped
+  machine before: load 0.77, cpu some 0.0%, mem some 0.0%, dirty 0 MiB
+  jobs 48, failed 0, makespan_s 698.0, job_mean_s 54.3, job_p95_s 105.7, wait_mean_s 41.6, wait_p95_s 90.8, run_mean_s 12.7, wake_same_p50_ms 0.07, wake_same_p99_ms 0.08, wake_same_max_ms 14.0, wake_out_p50_ms 0.07, wake_out_p99_ms 0.08, git_p50_ms 39.0, git_p95_ms 48.0, oom_kills 0, oom_kills_machine 0, swapin_mib 0.0, mem_some_max 0.0, mem_some_mean 0.0, mem_full_max 0.0, cap_mem_some_max 0.0, cap_mem_some_mean 0.0, cap_mem_full_max 0.0, bench_mem_peak_gib 3.8, cpu_busy_mean 45.0, cpu_steal_mean 0.0, jobs_in_lease_scope 48, load_before 0.77, aborted 
+# leasehold benchmark: kvm-8cpu-16g, 8 agents
+
+- Machine: 8 CPUs, 15.6 GiB memory, 8.0 GiB swap; virtualisation: kvm; kernel 6.12.113+deb13-amd64.
+- Plan: seeds 3001 to 3006, 8 agents, planned over 240 s, mean think 30 s (seed 3001: 52 jobs, 15 mem).
+- Jobs: cpu 10 s alone on every CPU; mem 3.75 GiB touched, then 6 s of hashing alone on every CPU.
+- Memory limit on everything the benchmark runs: 7.0 GiB (swap 2.0 GiB).
+- leasehold: `leasehold init --user` config, `hold --weight` cpu 4, mem 4 unless the condition sets `w` (`lh-enforced-v020`: 0.2.0's config, weight 4); slice condition CPUWeight 20.
+
+| condition | jobs | failed | makespan s | job mean s | job p95 s | wait mean s | run mean s | wake same p50 ms | wake same p99 ms | wake outside p99 ms | git status p95 ms | OOM kills | swap-in MiB | mem PSI some max | mem PSI some mean | mem PSI full max | mem PSI some max in the cap | mem PSI some mean in the cap | mem PSI full max in the cap | CPU busy % | in lease scope |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| lh-enforced_w4-r1 | 52 | 0 | 766.0 | 62.4 | 93.9 | 49.1 | 13.3 | 0.08 | 0.08 | 0.08 | 47.0 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 46.0 | 52 |
+| lh-enforced_w3-r1 | 52 | 4 | 673.0 | 50.9 | 80.2 | 28.1 | 22.7 | 0.07 | 0.09 | 0.09 | 53.0 | 4 | 9245.0 | 8.7 | 0.8 | 8.6 | 8.5 | 0.8 | 8.5 | 59.0 | 52 |
+| lh-enforced_w3_memdeclared-r1 | 52 | 0 | 784.0 | 65.3 | 101.0 | 44.9 | 20.4 | 0.07 | 0.09 | 0.09 | 50.0 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 | 52 |
+| lh-enforced_w3-r2 | 48 | 5 | 612.0 | 47.7 | 76.2 | 25.7 | 22.0 | 0.07 | 0.09 | 0.09 | 55.0 | 5 | 9061.0 | 12.8 | 1.1 | 12.7 | 13.2 | 1.1 | 13.2 | 56.0 | 48 |
+| lh-enforced_w3_memdeclared-r2 | 48 | 0 | 690.0 | 54.6 | 96.6 | 35.1 | 19.5 | 0.07 | 0.09 | 0.09 | 51.0 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 | 48 |
+| lh-enforced_w4-r2 | 48 | 0 | 698.0 | 54.3 | 105.7 | 41.6 | 12.7 | 0.07 | 0.08 | 0.08 | 48.0 | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 45.0 | 48 |
+
+Wakeup latency is how late a 10 ms sleep wakes: `same` in the jobs' own cgroup (the harness's scope), `outside` in the session the benchmark was started from.
+

@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from leasehold import __version__, maintenance, observe, outcomes, proctable, status
+from leasehold import __version__, contain, maintenance, observe, outcomes, proctable, status
 from leasehold.access import Forbidden
 from leasehold.admission import AdmissionPolicy, alone
 from leasehold.events import EventLog, EventType, Snapshot, changes
@@ -185,6 +185,10 @@ class MachineAgent:
         self.memory_limit: dict | None = bound
         self.budget = config.memory_budget(memory, self._limit_bytes)
         self.guard = Guard(config.guard, min_available=config.guard.floor(memory))
+        #: The cgroups whose memory pressure the guard reads besides the machine's, relative to
+        #: the cgroup root: the slice contained commands run in, for a user's own daemon that
+        #: contains them, and the cgroup that sets the memory limit, when one does.
+        self.guard_cgroups: tuple[str, ...] = self._guard_cgroups()
         self.verdict = Verdict(False, None, "not measured yet", None)
         self.last_load: dict | None = None
         self.lend_pools = frozenset(config.lend.pools)
@@ -211,6 +215,23 @@ class MachineAgent:
         #: When each waiting item was first seen in line, on `_monotonic` (`_overdue`).
         self._queued_at: dict[tuple[str, str], float] = {}
         self._seen = self._snapshot()
+
+    def _guard_cgroups(self) -> tuple[str, ...]:
+        found = []
+        if self.config.for_user and self.config.contain.mode != "off":
+            found.append(contain.root_slice_cgroup())
+        if self.memory_limit is not None:
+            found.append(self.memory_limit["cgroup"].strip("/"))
+        return tuple(dict.fromkeys(c for c in found if c))
+
+    def _memory_pressure(self, load: dict) -> float | None:
+        """The memory PSI (`some avg10`) the guard goes by: the highest of the machine's and
+        each of `guard_cgroups`' that can be read; None when none can. Pressure inside a
+        cgroup's limit can be high while the machine's is low."""
+        values = [some_avg10(load["pressure"]["memory"])]
+        values += [some_avg10(self.loader.pressure(cg)["memory"]) for cg in self.guard_cgroups]
+        known = [v for v in values if v is not None]
+        return max(known) if known else None
 
     @property
     def _limit_bytes(self) -> int | None:
@@ -420,7 +441,7 @@ class MachineAgent:
                     Reading(
                         now=self._monotonic(),
                         at=self._clock(),
-                        memory_pressure=some_avg10(load["pressure"]["memory"]),
+                        memory_pressure=self._memory_pressure(load),
                         available=available(load),
                     )
                 )
@@ -630,6 +651,7 @@ class MachineAgent:
                 lease["jobs"] = self.config.jobs.for_weight(lease["weight"])
                 lease["target_jobs"] = self.config.jobs.for_weight(lease["target"])
                 lease["max_jobs"] = self.config.jobs.for_weight(lease["max_weight"])
+                lease["memory_counted_bytes"] = status.counted(self.policy(), lease)
             return {
                 "status": "granted",
                 "lease": lease,
@@ -902,7 +924,8 @@ class MachineAgent:
             facts=self.facts,
             load=self.last_load,
             lend=self._lend_status(),
-            guard=self.guard.status() | {"enabled": self.config.guarded},
+            guard=self.guard.status()
+            | {"enabled": self.config.guarded, "pressure_cgroups": list(self.guard_cgroups)},
             budget=self.budget,
             memory_limit=self.memory_limit,
             leases=listing["leases"],

@@ -4,6 +4,7 @@ or the command ends or takes jobserver tokens."""
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import pytest
 from support import CHILD_ENV, cli, gone, until
 
 import leasehold
+from leasehold import contain
 from leasehold.client import Client
 
 #: case: (hold's options, whether a daemon is there, exit code, what it says on stderr). The one
@@ -126,3 +128,28 @@ def test_a_range_whose_jobs_take_tokens_becomes_elastic(daemon):
     run.stdin.write("\n")
     run.stdin.close()
     assert run.wait(timeout=10) == 0
+
+
+#: Writes 512 MiB, killable by the OOM killer whatever `oom_score_adj` the tests run with.
+WRITE_512M = """echo 0 > /proc/self/oom_score_adj; exec "$1" -c "b = b'x' * (512 << 20)" """
+
+
+@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+def test_a_command_the_oom_killer_ends_is_named(daemon):
+    # A session slice, as `leasehold run` makes, held to 64 MiB with no swap: the command's
+    # scope goes in it, and the OOM killer ends a command that writes 512 MiB.
+    capped = contain.session_slice("oomtest", os.urandom(3).hex())
+    limits = ["--runtime", capped, "MemoryMax=64M", "MemorySwapMax=0"]
+    subprocess.run(["systemctl", "--user", "set-property", *limits], check=True)
+    try:
+        done = cli(
+            daemon.path, "hold", "--", "sh", "-c", WRITE_512M, "sh", sys.executable,
+            env={**CHILD_ENV, contain.ENV_SLICE: capped},
+        )  # fmt: skip
+    finally:
+        subprocess.run(["systemctl", "--user", "stop", capped], check=False)
+        subprocess.run(["systemctl", "--user", "revert", capped], check=False, capture_output=True)
+    assert done.returncode == 128 + signal.SIGKILL
+    assert "the kernel's OOM killer ended this command" in done.stderr
+    assert "leasehold counts no memory here ([memory] is not set)" in done.stderr
+    assert "Declare at least --memory " in done.stderr
