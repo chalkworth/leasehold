@@ -33,6 +33,10 @@ running unfrozen. A job parked for `MAX_PARK_S` is thawed whatever the memory (a
 and parked again if the trigger fires again while its peers still run. A thawed job's
 `memory.swap.max` goes back to `overflow`.
 
+With `hold=parked`, a `mem` job waits to start while any job is parked (`none_parked`), as a
+daemon would if it counted a parked job's memory as still in use and put the job first in
+line. The wait ends at the latest with a forced thaw, or with `thaw_all` when the run ends.
+
 A park is counted spurious when the job, at what it held before the park, would have fitted
 within `SPURIOUS_AT` of the limit beside the most the rest of the slice used while it was
 parked: nothing ran short after all.
@@ -162,6 +166,9 @@ class Parker:
         self.last_thaw = 0.0
         self.some = Window()
         self.wakeups = {"timer": 0, "events": 0, "psi": 0}
+        #: Set while no job is parked: what `hold=parked` waits on before a `mem` job starts.
+        self.none_parked = threading.Event()
+        self.none_parked.set()
         self.psi_trigger = False
 
     def track(self, key: int, cgroup: Path, started: float) -> None:
@@ -239,6 +246,7 @@ class Parker:
         if not _write(job.cgroup / "cgroup.freeze", "1"):
             return  # the job's scope is gone: it has just ended
         job.parked_at = now
+        self.none_parked.clear()
         job.parks += 1
         if self.overflow is not None:
             _write(job.cgroup / "memory.swap.max", "max")
@@ -284,6 +292,8 @@ class Parker:
             spurious=spurious,
         )
         job.parked_at = None
+        if not self._parked():
+            self.none_parked.set()
 
     def thaw_all(self) -> None:
         """Thaw every job this parker has parked."""

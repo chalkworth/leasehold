@@ -25,6 +25,8 @@ A condition is a name from `CONDITIONS`, optionally followed by `@` and paramete
   Only `lh-enforced` takes it, as its jobs run in lease scopes the parker can freeze.
 * `parkcap`: the most a `park` run may reclaim, a size such as `24g` (the default). Only with
   `park`.
+* `hold=parked`: a `mem` job waits to start while the parker has a job parked. Only with
+  `park=freeze`.
 * `overflow`: each running `mem` job's `memory.swap.max`, a size such as `1g`, the default
   under `park=freeze`. Without `park` it sets the swap limit and parks nothing. Not with
   `park=threshold`.
@@ -65,7 +67,19 @@ CONDITIONS = {
 #: The conditions that run by default: all but those that need a jobserver.
 DEFAULT_CONDITIONS = [c for c in CONDITIONS if c not in ("lh-jobserver", "lh-elastic")]
 #: The parameters, in their canonical order.
-KEYS = ("w", "h", "grow", "kept", "mem", "budget", "park", "parkcap", "overflow", "arm")
+KEYS = (
+    "w",
+    "h",
+    "grow",
+    "kept",
+    "mem",
+    "budget",
+    "park",
+    "parkcap",
+    "overflow",
+    "hold",
+    "arm",
+)
 _WEIGHT = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
 _SIZE = re.compile(r"^[0-9]+(\.[0-9]+)?[kmgt]?b?$", re.IGNORECASE)
 #: The choices of `grow`, the same as `leasehold.elastic.HEADROOM_MODES`.
@@ -116,6 +130,7 @@ class Condition:
     park: str | None = None
     park_cap: str | None = None
     overflow: str | None = None
+    hold: str | None = None
     arm: str | None = None
     params: dict[str, str] = field(default_factory=dict, compare=False, hash=False)
 
@@ -140,6 +155,7 @@ class Condition:
             "park": self.park,
             "parkcap": self.park_cap,
             "overflow": self.overflow,
+            "hold": self.hold,
             "arm": self.arm,
         }
         return [(k, values[k]) for k in KEYS if values[k] is not None]
@@ -231,6 +247,11 @@ def parse(text: str) -> Condition:
         raise ValueError(f"{text!r}: park=threshold takes no overflow")
     if overflow is not None and (not _SIZE.match(overflow) or size_bytes(overflow) <= 0):
         raise ValueError(f"{text!r}: overflow={overflow!r} is not a size such as 1g")
+    hold = params.get("hold")
+    if hold is not None and hold != "parked":
+        raise ValueError(f"{text!r}: hold is 'parked'")
+    if hold is not None and park != "freeze":
+        raise ValueError(f"{text!r}: hold=parked needs park=freeze")
     arm = params.get("arm")
     if arm is not None and not _TAG.match(arm):
         raise ValueError(f"{text!r}: arm={arm!r} is letters and digits only")
@@ -245,6 +266,7 @@ def parse(text: str) -> Condition:
         park=park,
         park_cap=park_cap,
         overflow=overflow,
+        hold=hold,
         arm=arm,
         params=params,
     )
