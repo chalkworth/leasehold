@@ -380,15 +380,40 @@ rules give `pytest`, `cargo test`, `make` and the other test and build runners, 
   in, or an editor that runs the agent); `outside` runs in the login session the benchmark was
   started from, a cgroup of its own. A late wakeup is what makes typing and scrolling stutter.
 - `git status` time in a 50 000-file repository every 5 s, from the jobs' cgroup;
-- OOM kills (`memory.events` of the benchmark's cgroups), swap-in (`pswpin`), memory pressure
-  (PSI `some` and `full` avg10, sampled each second), CPU busy and steal.
+- OOM kills (`memory.events` of the benchmark's cgroups), swap-in (`pswpin`), swap-out
+  (`pswpout`, in GiB), memory pressure (PSI `some` and `full` avg10, sampled each second), CPU
+  busy and steal.
 
 **Safety.** Everything the benchmark runs is held to one memory limit, `MemoryMax` of
-min(65% of RAM, available − 2 GiB) with `MemorySwapMax` 2 GiB: the harness's own scope for the
+min(65% of RAM, available − 2 GiB) with `MemorySwapMax` 2 GiB (`--swap-gib`, never more than
+the larger of half the free swap and all but 3 GiB of it): the harness's own scope for the
 conditions whose jobs run in it, and the jobs' slice for `slice` and the enforced conditions.
 Running out of it makes the kernel kill a job (jobs raise their OOM score), not the person's
 session. The harness also stops every job if the machine has under 512 MiB available or a
 memory `full` pressure over 60% for 10 s.
+
+**Parking, an experiment.** With `lh-enforced@park=freeze`, two memory jobs that would
+overflow the limit get paused instead of OOM-killed. The harness's parker (`bench/park.py`)
+gives each running `mem` job's lease scope a small `memory.swap.max` (`overflow`, default
+`1g`). A park is due when a running job's swap grows by 32 MiB or more within 250 ms while the
+jobs' slice spends at least 5% of that time stalled on memory (PSI `some`). Then, with two or
+more `mem` jobs running, the parker freezes the youngest one's scope (`cgroup.freeze`), lifts
+its `memory.swap.max`, and writes its usage to `memory.reclaim`, which pushes it out to swap.
+It thaws the oldest parked job once the slice's usage plus what that job held would fit under
+80% of `MemoryMax`, when no other `mem` job is running, or after 120 s whatever the memory (a
+forced thaw, parked again if the trigger fires again: a re-park). A park is spurious when the
+job would have fitted within 95% of the limit beside the most the others used while it was
+parked. The parker wakes on the slice's `memory.events` and a memory pressure trigger, with a
+250 ms poll besides. `overflow=1g` without `park` sets the swap limits and parks nothing, which
+separates the two effects; `park=threshold` parks at 85% of `MemoryMax` instead, with
+`MemoryHigh` at 92% to slow a growing job down. To limit wear on the disk, a run reclaims at
+most `parkcap` (default `24g`) and parks nothing more after that. A parked job swaps into the
+slice's own `MemorySwapMax`, so `--swap-gib` must hold a whole `mem` job plus the running
+jobs' overflow. The summary adds parks, re-parks, spurious parks, forced thaws, seconds parked,
+GiB reclaimed, whether the cap was reached, the swap the running jobs spilled, and how many
+filled their overflow before any park (one that does takes the slice to the OOM killer); each
+run's `park.csv` lists the events. Swap-in and swap-out in GiB are reported for every
+condition.
 
 **Rounds and order.** A round runs every condition once on one plan. Its seed is
 `--seed-base` plus the round number, the same for every condition in the round and new each
