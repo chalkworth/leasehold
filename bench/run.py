@@ -39,6 +39,10 @@ The leasehold conditions take parameters (`bench/conditions.py`): `lh-enforced@w
 asks for 2-4 slots with a work-pool headroom of 1; `kept=N` keeps N CPUs back from the slots,
 `grow=use` lets an `lh-elastic` lease grow into the headroom, `mem=declared` declares memory,
 `budget=7g` sets the memory budget, and `arm=b` tells two arms of one condition apart.
+`lh-enforced@park=freeze` runs the parker (`bench/park.py`), an experiment that pauses a `mem`
+job and pushes its memory to swap instead of letting the OOM killer end it (`overflow=1g`
+and `parkcap=24g` tune it, `park=threshold` is its older trigger); `overflow=1g` alone gives
+each `mem` job that swap limit and parks nothing.
 
 leasehold's conditions run a private user-mode daemon on a socket of their own, with the
 config `leasehold init --user` writes for this machine (its `[memory] budget` replaced by
@@ -61,7 +65,8 @@ also stops every job if the machine itself runs short of memory.
 What is measured, per run: makespan; each job's completion time from when its agent asked
 (and, under leasehold, the wait before it started); a 10 ms wakeup probe in the jobs' own cgroup
 (a shell in the agents' terminal, an editor running the agent) and one in the session the
-benchmark was started from; optionally `git status` time; OOM kills; swap-in; memory pressure.
+benchmark was started from; optionally `git status` time; OOM kills; swap-in and swap-out;
+memory pressure; and under `park` or `overflow`, what the parker did (`park.csv`).
 Raw rows go to CSV files beside a summary table, and each run's `manifest.json` says what ran
 (`bench/manifest.py`). `compare` judges the runs by a gate file written before they ran
 (`bench/gate.py`, `bench/gates/`).
@@ -92,6 +97,7 @@ from pathlib import Path
 
 import conditions as conds
 import manifest
+import park
 import schedule
 import washout
 from conditions import DECLARED_EXTRA, DEFAULT_CONDITIONS
@@ -101,6 +107,8 @@ JOB = HERE / "job.py"
 PROBE = HERE / "probe.py"
 GIB = 1 << 30
 MIB = 1 << 20
+#: The size of a page, which /proc/vmstat counts swap in.
+PAGE = os.sysconf("SC_PAGE_SIZE")
 
 #: The built-in weight of a test run or build in leasehold 0.2.0.
 WEIGHT_V020 = 4
@@ -342,7 +350,11 @@ class Setup:
         elif self.cond.contained:
             # A session slice as `leasehold run` makes, under leasehold.slice; it carries the
             # benchmark's memory limit, as the harness's scope does for the other conditions.
+            # Under `park=threshold`, MemoryHigh throttles growth near the limit so the parker
+            # can act first; `stop` reverts it with the rest.
             self.slice = f"leasehold-bench_{self.token}.slice"
+            if self.cond.park == "threshold":
+                caps.append(f"MemoryHigh={int(park.HIGH_AT * self.spec['cap_bytes'])}")
             self._set_property(self.slice, *caps)
             self.env["LEASEHOLD_SLICE"] = self.slice
         if self.condition.startswith("lh-advisory"):
@@ -529,6 +541,19 @@ class Run:
         self.live: dict[int, tuple[subprocess.Popen, float]] = {}
         self.samples: list[dict] = []
         self.stderr = (workdir / "jobs.stderr").open("w")
+        self.parker: park.Parker | None = None
+        cap_cgroup = setup.job_cgroup()
+        mode = setup.cond.parker
+        if mode and cap_cgroup is not None:
+            cap, overflow = setup.cond.park_cap, setup.cond.overflow
+            swap_max = park.DEFAULT_OVERFLOW_BYTES if mode == "freeze" else None
+            self.parker = park.Parker(
+                cap_cgroup,
+                spec["cap_bytes"],
+                conds.size_bytes(cap) if cap else park.DEFAULT_CAP_BYTES,
+                mode,
+                conds.size_bytes(overflow) if overflow else swap_max,
+            )
 
     def agent(self, index: int, steps: list) -> None:
         for seq, (think, kind) in enumerate(steps):
@@ -555,10 +580,14 @@ class Run:
                 if parts[:2] == ["BENCH", "start"]:
                     started, workers = float(parts[2]), int(parts[3])
                     cgroup = parts[4] if len(parts) > 4 else ""
+                    if self.parker and kind == "mem" and cgroup.startswith("/"):
+                        self.parker.track(proc.pid, Path("/sys/fs/cgroup" + cgroup), started)
                 elif parts[:2] == ["BENCH", "end"]:
                     ended = float(parts[2])
             code = proc.wait()
             done = time.time()
+            if self.parker:
+                self.parker.untrack(proc.pid)
             with self.lock:
                 self.live.pop(proc.pid, None)
                 self.jobs.append(
@@ -625,6 +654,8 @@ class Run:
             return
         self.aborted = why
         self.stop.set()
+        if self.parker:
+            self.parker.thaw_all()  # a frozen job acts on no signal but SIGKILL
         with self.lock:
             procs = [p for p, _ in self.live.values()]
         for proc in procs:
@@ -647,6 +678,12 @@ class Run:
         start = time.time()
         sampler = threading.Thread(target=self.guarded, args=("sampler", self.sampler), daemon=True)
         sampler.start()
+        parker = None
+        if self.parker:
+            parker = threading.Thread(
+                target=self.guarded, args=("parker", self.parker.run, self.stop), daemon=True
+            )
+            parker.start()
         agents = [
             threading.Thread(
                 target=self.guarded, args=(f"agent {i}", self.agent, i, steps), daemon=True
@@ -660,7 +697,12 @@ class Run:
         end = time.time()
         self.stop.set()
         sampler.join()
-        return {"start": start, "end": end, "aborted": self.aborted}
+        if parker:
+            parker.join()
+        out = {"start": start, "end": end, "aborted": self.aborted}
+        if self.parker:
+            out["park"] = self.parker.summary()
+        return out
 
 
 def _kill_group(proc: subprocess.Popen, sig: int) -> None:
@@ -677,6 +719,10 @@ def run_condition(
     spec = json.loads(spec_path.read_text())
     setup = Setup(condition, spec, workdir)
     probes: list[subprocess.Popen] = []
+    run: Run | None = None
+    if setup.cond.parker:
+        # So that a stopped run still reaches the `finally` that thaws its parked jobs.
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         setup.start()
         probes.append(_probe("wakeup", workdir / "wakeup_same.csv.gz"))
@@ -704,6 +750,9 @@ def run_condition(
             }
         _write_csv(workdir / "jobs.csv", run.jobs)
         _write_csv(workdir / "samples.csv", run.samples)
+        if run.parker and run.parker.events:
+            keys = list(dict.fromkeys(k for e in run.parker.events for k in e))
+            _write_csv(workdir / "park.csv", [dict.fromkeys(keys) | e for e in run.parker.events])
         (workdir / "run.json").write_text(json.dumps(result, indent=1))
     finally:
         for proc in probes:
@@ -711,6 +760,8 @@ def run_condition(
                 proc.send_signal(signal.SIGTERM)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(30)
+        if run is not None and run.parker:
+            run.parker.thaw_all()
         setup.stop()
     return 0
 
@@ -796,6 +847,9 @@ def run_one(args, spec: dict, outdir: Path, workdir: Path, slot: schedule.Slot, 
         outside.wait(30)
         if not args.no_scope:
             systemctl("kill", "--signal=KILL", unit)
+        if conds.parse(slot.condition).parker:
+            for cg in park.thaw_leftovers(slice_cgroup("leasehold.slice")):
+                print(f"thawed {cg.name}, left frozen by its run", flush=True)
     vm1 = vmstat()
     extra = {
         "before": before,
@@ -963,6 +1017,9 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
     steal = [float(r.get("cpu_steal") or 0) for r in samples]
     contained = sum("/lease-" in (j.get("cgroup") or "") for j in jobs)
     ooms = sum(c.get("oom_kill", 0) for c in run.get("cgroups", {}).values())
+    # Absent from runs without `park`, and from runs made before it existed.
+    parked = run.get("park") or {}
+    swapout = outer.get("pswpout")
     peak = max((c.get("peak") or 0 for c in run.get("cgroups", {}).values()), default=0)
 
     def r(v, nd=1):
@@ -987,7 +1044,18 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
         "git_p95_ms": r(pct(git, 95), 0),
         "oom_kills": ooms,
         "oom_kills_machine": outer.get("oom_kill_machine"),
-        "swapin_mib": r(outer.get("pswpin", 0) * 4096 / MIB, 0),
+        "swapin_mib": r(outer.get("pswpin", 0) * PAGE / MIB, 0),
+        "swapin_gib": r(outer["pswpin"] * PAGE / GIB if "pswpin" in outer else None, 2),
+        "swapout_gib": r(swapout * PAGE / GIB if swapout is not None else None, 2),
+        "parks": parked.get("parks"),
+        "reparks": parked.get("reparks"),
+        "spurious_parks": parked.get("spurious"),
+        "forced_thaws": parked.get("forced_thaws"),
+        "park_s": parked.get("park_s"),
+        "reclaimed_gib": r(parked["reclaimed_bytes"] / GIB, 2) if parked else None,
+        "park_cap_reached": ("yes" if parked["cap_reached"] else "no") if parked else None,
+        "overflow_gib": r(parked["overflowed_bytes"] / GIB, 2) if parked else None,
+        "overflow_full": parked.get("swap_max_hits"),
         "mem_some_max": r(max(some) if some else None),
         "mem_some_mean": r(mean(some)),
         "mem_full_max": r(max(full) if full else None),
@@ -1018,6 +1086,17 @@ COLUMNS = [
     ("git_p95_ms", "git status p95 ms"),
     ("oom_kills", "OOM kills"),
     ("swapin_mib", "swap-in MiB"),
+    ("swapin_gib", "swap-in GiB"),
+    ("swapout_gib", "swap-out GiB"),
+    ("parks", "parks"),
+    ("reparks", "re-parks"),
+    ("spurious_parks", "spurious parks"),
+    ("forced_thaws", "forced thaws"),
+    ("park_s", "parked s"),
+    ("reclaimed_gib", "reclaimed GiB"),
+    ("park_cap_reached", "park cap reached"),
+    ("overflow_gib", "overflow swap GiB"),
+    ("overflow_full", "jobs that filled their overflow"),
     ("mem_some_max", "mem PSI some max"),
     ("mem_some_mean", "mem PSI some mean"),
     ("mem_full_max", "mem PSI full max"),
@@ -1428,7 +1507,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.cap_gib
         else int(min(0.65 * m["memory_bytes"], mem["MemAvailable"] - 2 * GIB))
     )
-    swap = int(min(args.swap_gib * GIB, mem.get("SwapFree", 0) / 2))
+    # Swap the benchmark may use: what was asked, leaving the session at least half the free
+    # swap or 3 GiB of it, whichever is less.
+    free_swap = mem.get("SwapFree", 0)
+    swap = int(min(args.swap_gib * GIB, max(free_swap / 2, free_swap - 3 * GIB)))
+    if swap < args.swap_gib * GIB:
+        print(
+            f"--swap-gib {args.swap_gib:g}: only {swap / GIB:.2f} GiB of swap is free to use",
+            file=sys.stderr,
+        )
     for c in conditions:
         try:
             condition_config(

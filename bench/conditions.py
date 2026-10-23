@@ -19,6 +19,15 @@ A condition is a name from `CONDITIONS`, optionally followed by `@` and paramete
   sets the ceiling, the pools' `max` and the work pool's reservation as `init` would.
 * `mem=declared`: each `mem` job declares its size plus 512 MiB (`hold --memory`).
 * `budget`: `[memory] budget`, a size such as `7g` (otherwise `--memory-budget`, else auto).
+* `park`: run the harness's parker (`bench/park.py`), an experiment that pauses a `mem` job and
+  pushes its memory to swap when memory inside the limit runs out. `freeze` parks once a job
+  spills past its own small swap allowance (`overflow`); `threshold` parks at 85% of the limit.
+  Only `lh-enforced` takes it, as its jobs run in lease scopes the parker can freeze.
+* `parkcap`: the most a `park` run may reclaim, a size such as `24g` (the default). Only with
+  `park`.
+* `overflow`: each running `mem` job's `memory.swap.max`, a size such as `1g`, the default
+  under `park=freeze`. Without `park` it sets the swap limit and parks nothing. Not with
+  `park=threshold`.
 * `arm`: a tag that changes nothing, so that one condition can run as two arms (an A/A run).
 
 Only the leasehold conditions (`lh-...`, except `lh-enforced-v020`) take parameters. In a
@@ -56,7 +65,7 @@ CONDITIONS = {
 #: The conditions that run by default: all but those that need a jobserver.
 DEFAULT_CONDITIONS = [c for c in CONDITIONS if c not in ("lh-jobserver", "lh-elastic")]
 #: The parameters, in their canonical order.
-KEYS = ("w", "h", "grow", "kept", "mem", "budget", "arm")
+KEYS = ("w", "h", "grow", "kept", "mem", "budget", "park", "parkcap", "overflow", "arm")
 _WEIGHT = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
 _SIZE = re.compile(r"^[0-9]+(\.[0-9]+)?[kmgt]?b?$", re.IGNORECASE)
 #: The choices of `grow`, the same as `leasehold.elastic.HEADROOM_MODES`.
@@ -64,6 +73,16 @@ GROW_MODES = ("keep", "leave-one", "use")
 _TAG = re.compile(r"^[A-Za-z0-9]+$")
 #: What `mem=declared` declares for a mem job beyond the block it touches.
 DECLARED_EXTRA = 512 * (1 << 20)
+#: The choices of `park`.
+PARK_MODES = ("freeze", "threshold")
+_UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
+
+
+def size_bytes(text: str) -> int:
+    """A size such as `24g` (binary units, an optional `b`) in bytes."""
+    text = text.strip().lower().removesuffix("b")
+    unit = text[-1] if text and text[-1] in _UNITS else ""
+    return int(float(text.removesuffix(unit) if unit else text) * _UNITS[unit])
 
 
 def parse_weight(text: str) -> tuple[int, int]:
@@ -94,6 +113,9 @@ class Condition:
     kept: int | None = None
     declared: bool = False
     budget: str | None = None
+    park: str | None = None
+    park_cap: str | None = None
+    overflow: str | None = None
     arm: str | None = None
     params: dict[str, str] = field(default_factory=dict, compare=False, hash=False)
 
@@ -115,9 +137,17 @@ class Condition:
             "kept": None if self.kept is None else str(self.kept),
             "mem": "declared" if self.declared and self.base != "lh-enforced-declared" else None,
             "budget": self.budget,
+            "park": self.park,
+            "parkcap": self.park_cap,
+            "overflow": self.overflow,
             "arm": self.arm,
         }
         return [(k, values[k]) for k in KEYS if values[k] is not None]
+
+    @property
+    def parker(self) -> str | None:
+        """The mode the harness's parker runs in (`bench/park.py`), or None for no parker."""
+        return self.park or ("off" if self.overflow else None)
 
     @property
     def leasehold(self) -> bool:
@@ -184,6 +214,23 @@ def parse(text: str) -> Condition:
     budget = params.get("budget")
     if budget is not None and not _SIZE.match(budget):
         raise ValueError(f"{text!r}: budget={budget!r} is not a size such as 7g")
+    park = params.get("park")
+    if park is not None and base != "lh-enforced":
+        raise ValueError(f"{text!r}: only lh-enforced takes park")
+    if park is not None and park not in PARK_MODES:
+        raise ValueError(f"{text!r}: park is one of {', '.join(PARK_MODES)}")
+    park_cap = params.get("parkcap")
+    if park_cap is not None and park is None:
+        raise ValueError(f"{text!r}: parkcap needs park")
+    if park_cap is not None and (not _SIZE.match(park_cap) or size_bytes(park_cap) <= 0):
+        raise ValueError(f"{text!r}: parkcap={park_cap!r} is not a size such as 24g")
+    overflow = params.get("overflow")
+    if overflow is not None and base != "lh-enforced":
+        raise ValueError(f"{text!r}: only lh-enforced takes overflow")
+    if overflow is not None and park == "threshold":
+        raise ValueError(f"{text!r}: park=threshold takes no overflow")
+    if overflow is not None and (not _SIZE.match(overflow) or size_bytes(overflow) <= 0):
+        raise ValueError(f"{text!r}: overflow={overflow!r} is not a size such as 1g")
     arm = params.get("arm")
     if arm is not None and not _TAG.match(arm):
         raise ValueError(f"{text!r}: arm={arm!r} is letters and digits only")
@@ -195,6 +242,9 @@ def parse(text: str) -> Condition:
         kept=kept,
         declared=mem == "declared" or base == "lh-enforced-declared",
         budget=budget,
+        park=park,
+        park_cap=park_cap,
+        overflow=overflow,
         arm=arm,
         params=params,
     )
