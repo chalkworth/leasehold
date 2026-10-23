@@ -42,7 +42,8 @@ asks for 2-4 slots with a work-pool headroom of 1; `kept=N` keeps N CPUs back fr
 `lh-enforced@park=freeze` runs the parker (`bench/park.py`), an experiment that pauses a `mem`
 job and pushes its memory to swap instead of letting the OOM killer end it (`overflow=1g`
 and `parkcap=24g` tune it, `park=threshold` is its older trigger); `overflow=1g` alone gives
-each `mem` job that swap limit and parks nothing.
+each `mem` job that swap limit and parks nothing; `hold=parked` holds back a `mem` job's start
+while a job is parked.
 
 leasehold's conditions run a private user-mode daemon on a socket of their own, with the
 config `leasehold init --user` writes for this machine (its `[memory] budget` replaced by
@@ -542,6 +543,8 @@ class Run:
         self.samples: list[dict] = []
         self.stderr = (workdir / "jobs.stderr").open("w")
         self.parker: park.Parker | None = None
+        self.starts_held = 0
+        self.start_hold_s = 0.0
         cap_cgroup = setup.job_cgroup()
         mode = setup.cond.parker
         if mode and cap_cgroup is not None:
@@ -561,6 +564,8 @@ class Run:
                 return
             argv = self.setup.argv(index, kind)
             issued = time.time()
+            if kind == "mem" and not self.hold_start(issued):
+                return
             proc = subprocess.Popen(
                 argv,
                 env=self.setup.env_for(kind),
@@ -604,6 +609,20 @@ class Run:
                         "cgroup": cgroup,
                     }
                 )
+
+    def hold_start(self, issued: float) -> bool:
+        """Under `hold=parked`, wait while the parker has a job parked; False if the run
+        stopped first. The forced thaw and the thaw at the run's end bound the wait."""
+        parker = self.parker
+        if not parker or self.setup.cond.hold != "parked" or parker.none_parked.is_set():
+            return True
+        while not parker.none_parked.wait(0.25):
+            if self.stop.is_set():
+                return False
+        with self.lock:
+            self.starts_held += 1
+            self.start_hold_s += time.time() - issued
+        return True
 
     def sampler(self) -> None:
         """Once a second: the machine's CPU, memory, swap and pressure, the benchmark's own
@@ -702,6 +721,8 @@ class Run:
         out = {"start": start, "end": end, "aborted": self.aborted}
         if self.parker:
             out["park"] = self.parker.summary()
+        if self.setup.cond.hold:
+            out["start_hold"] = {"held": self.starts_held, "s": round(self.start_hold_s, 1)}
         return out
 
 
@@ -1019,6 +1040,7 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
     ooms = sum(c.get("oom_kill", 0) for c in run.get("cgroups", {}).values())
     # Absent from runs without `park`, and from runs made before it existed.
     parked = run.get("park") or {}
+    held = run.get("start_hold") or {}
     swapout = outer.get("pswpout")
     peak = max((c.get("peak") or 0 for c in run.get("cgroups", {}).values()), default=0)
 
@@ -1056,6 +1078,8 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
         "park_cap_reached": ("yes" if parked["cap_reached"] else "no") if parked else None,
         "overflow_gib": r(parked["overflowed_bytes"] / GIB, 2) if parked else None,
         "overflow_full": parked.get("swap_max_hits"),
+        "starts_held": held.get("held"),
+        "start_hold_s": held.get("s"),
         "mem_some_max": r(max(some) if some else None),
         "mem_some_mean": r(mean(some)),
         "mem_full_max": r(max(full) if full else None),
@@ -1097,6 +1121,8 @@ COLUMNS = [
     ("park_cap_reached", "park cap reached"),
     ("overflow_gib", "overflow swap GiB"),
     ("overflow_full", "jobs that filled their overflow"),
+    ("starts_held", "starts held"),
+    ("start_hold_s", "start hold s"),
     ("mem_some_max", "mem PSI some max"),
     ("mem_some_mean", "mem PSI some mean"),
     ("mem_full_max", "mem PSI full max"),
