@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from support import CHILD_ENV, cli, gone, until
@@ -146,10 +147,14 @@ def test_a_command_the_oom_killer_ends_is_named(daemon):
             daemon.path, "hold", "--", "sh", "-c", WRITE_512M, "sh", sys.executable,
             env={**CHILD_ENV, contain.ENV_SLICE: capped},
         )  # fmt: skip
+        peak_available = (
+            Path("/sys/fs/cgroup") / contain.root_slice_cgroup() / "memory.peak"
+        ).is_file()
     finally:
         subprocess.run(["systemctl", "--user", "stop", capped], check=False)
         subprocess.run(["systemctl", "--user", "revert", capped], check=False, capture_output=True)
     assert done.returncode == 128 + signal.SIGKILL
     assert "the kernel's OOM killer ended this command" in done.stderr
     assert "leasehold counts no memory here ([memory] is not set)" in done.stderr
-    assert "Declare at least --memory " in done.stderr
+    if peak_available:
+        assert "Declare at least --memory " in done.stderr

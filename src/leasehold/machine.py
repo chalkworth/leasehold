@@ -142,7 +142,12 @@ class GuardSettings(_Strict):
     @model_validator(mode="after")
     def _ordered(self) -> GuardSettings:
         if self.memory_pressure_off > self.memory_pressure_on:
-            raise ValueError("guard: memory_pressure_off is above memory_pressure_on")
+            if "memory_pressure_on" not in self.model_fields_set:
+                self.memory_pressure_on = self.memory_pressure_off
+            elif "memory_pressure_off" not in self.model_fields_set:
+                self.memory_pressure_off = self.memory_pressure_on
+            else:
+                raise ValueError("guard: memory_pressure_off is above memory_pressure_on")
         return self
 
     def floor(self, memory_bytes: int) -> int:
