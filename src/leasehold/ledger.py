@@ -179,7 +179,8 @@ CREATE TABLE IF NOT EXISTS submits (
 );
 CREATE INDEX IF NOT EXISTS submits_by_user ON submits (pool, user, at);
 -- What a contained command used, as its client reported it at release, with what the lease it
--- ran under held then: its size, range and declared memory (bytes; NULL: none declared).
+-- ran under held then: its size, range and declared memory (bytes; NULL: none declared), and
+-- how often the memory net parked it and for how long (NULL: no net watched it).
 CREATE TABLE IF NOT EXISTS outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     lease_id TEXT NOT NULL,
@@ -200,7 +201,9 @@ CREATE TABLE IF NOT EXISTS outcomes (
     cpu_usec INTEGER,
     wall_s REAL NOT NULL,
     exit_status INTEGER,
-    ended_at REAL NOT NULL
+    ended_at REAL NOT NULL,
+    parks INTEGER,
+    parked_s REAL
 );
 CREATE INDEX IF NOT EXISTS outcomes_by_key ON outcomes (user, rule, repo, id);
 """
@@ -1229,10 +1232,11 @@ class Ledger:
         )
 
 
-#: The fields of an outcome its client reports (`leasehold.outcomes.Outcome`).
+#: The fields of an outcome its client reports (`leasehold.outcomes.Outcome`), and what the
+#: memory net adds to it (`parks`, `parked_s`).
 _OUTCOME_FIELDS = (
     "rule", "repo", "peak_bytes", "anon_bytes", "oom_kills", "high_events", "cpu_usec", "wall_s",
-    "exit_status",
+    "exit_status", "parks", "parked_s",
 )  # fmt: skip
 
 #: The extra `WHERE` a holder-scoped delete adds, indexed by "a holder was given".
@@ -1276,7 +1280,7 @@ def _sizes(row: sqlite3.Row) -> tuple[int, int, int]:
 
 #: The columns added to each table since the schema version was last bumped, with their types,
 #: NULL for a row written before them: `memory` (leasehold 0.3), the ranges, `memory_per_slot`,
-#: elastic leases' and learned memory's.
+#: elastic leases' and the memory net's parks (0.6).
 _ADDED_COLUMNS = {
     "leases": (
         ("memory", "INTEGER"),
@@ -1296,6 +1300,10 @@ _ADDED_COLUMNS = {
         ("elastic", "INTEGER"),
         ("learned", "INTEGER"),
         ("learned_runs", "INTEGER"),
+    ),
+    "outcomes": (
+        ("parks", "INTEGER"),
+        ("parked_s", "REAL"),
     ),
 }
 

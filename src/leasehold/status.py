@@ -219,11 +219,14 @@ def report(
     memory_limit: dict | None = None,
     queue: list[dict],
     maintenance: dict | None = None,
+    memory_net: dict | None = None,
     now: float,
     version: str,
 ) -> dict:
     """The whole status object. `leases` and `queue` are already `public`; `maintenance` is
-    the maintenance lease waiters are told about (`leasehold.maintenance.describe`), or None."""
+    the maintenance lease waiters are told about (`leasehold.maintenance.describe`), or None;
+    `memory_net` the memory net's own status (`leasehold.net.MemoryNet.status`), or None when
+    it is off."""
     leases = with_counted(policy, leases)
     queue = with_counted(policy, queue)
     by_pool = pools(config, policy, leases, queue)
@@ -264,4 +267,5 @@ def report(
         "leases": leases,
         "queue": queue,
         "maintenance": maintenance,
+        "memory_net": memory_net,
     }

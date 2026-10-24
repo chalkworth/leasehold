@@ -22,7 +22,7 @@ layers =
     template
     api
     agent
-    status | lend | guard | events | outcomes
+    status | lend | guard | events | outcomes | net
     machine
     quota | observe | commands
     shell

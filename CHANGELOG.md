@@ -9,6 +9,33 @@ here.
 
 ### Added
 
+- A memory net for your own daemon, off by default: `[memory_net] mode = "park"`. When the
+  contained commands under one memory limit spill into swap fast while the limit stalls on
+  memory, the daemon parks the youngest heavy command. It freezes the command's scope and asks
+  the kernel to move its memory out to swap, then lets it run again once another command under
+  that limit ends or memory frees. Each contained command's scope gets `memory.swap.max` of
+  `overflow` (`"1g"`; `"max"` for no limit), and parking writes at most `write_per_day`
+  (`"16g"`) to swap in 24 hours. See "Memory net" in docs/reference.md.
+- While a lease is parked, or settling after it runs again, no new request that counts memory
+  is granted (none at all without `[memory]`). Such a request waits with `blocked` saying `the
+  memory net holds new work: lease ID is parked until memory frees` or `... is resuming after a
+  park`. No elastic lease grows meanwhile. `AdmissionPolicy` has a `memory_held` field, and
+  `AdmissionPolicy.from_pools` and `MachineConfig.policy` take `memory_held`.
+- The status object has a `memory_net` field: null while the net is off, else its mode, whether
+  it is active and why not, its limits, the bytes it wrote to swap, the leases `parked` and
+  `settling`, and counts of `parks` and `forced_resumes`.
+- `POST /v1/renew` answers `parked` with `ok`. `Lease.parked` in the Python API says whether the
+  lease's command is parked, and `hold` tells its user when the command is paused and when it
+  runs again.
+- Events of type `parked` and `resumed`, shown by `top`.
+- An outcome records `parks` and `parked_s`, how often the net parked the command and for how
+  long. The ledger's outcomes table gains the two columns.
+- `leasehold doctor` warns when the net is on and there is no swap, and says when swap is on a
+  non-rotational disk, which parking wears.
+- A config with `[memory_net] mode = "park"` and `[contain] mode = "off"`, or for the machine's
+  daemon, is an error, and so is an `overflow` of 0.
+- The benchmark takes `net=park` (and `overflow=SIZE`) on the conditions whose jobs run in lease
+  scopes, and records the net's parks and swap writes for each run.
 - Learned memory. A request that declares no memory can count what its `[commands]` rule's
   past runs in its repository used: 115% of the weighted median of the most anonymous memory
   of its clean runs (exit 0, no OOM kill), newer runs weighing more, raised at once when the

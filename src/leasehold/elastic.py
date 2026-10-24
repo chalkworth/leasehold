@@ -19,7 +19,8 @@ sized exactly as `leasehold.admission.grants` says. After that, per host:
   memory allowance (`memory_free`) lowers nothing, since smaller leases do not make memory
   free any sooner;
 * a lease grows only in an open pool that is not capped, with nothing waiting in it, on a host
-  with memory neither short nor pressing and not draining for a whole item, and only when it is
+  with memory neither short nor pressing nor held by the memory net (`memory_held`) and not
+  draining for a whole item, and only when it is
   in `eligible` (the caller's hold-down: those whose size last changed long enough ago). It may
   grow one slot per decision, up to its most, into real slack: the slot rules hold with room
   kept for every stopped item, and the memory it counts fits the budget beside theirs, as for an
@@ -266,6 +267,7 @@ def _grow(
         and e.pool not in policy.capped
         and e.host not in policy.memory_pressing
         and e.host not in policy.memory_free
+        and e.host not in policy.memory_held
         and e.host not in drains
     ]
     while growing:

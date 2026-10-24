@@ -43,6 +43,7 @@ from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
 from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, available, some_avg10
 from leasehold.machine import MachineConfig, lease_memory_limit
+from leasehold.net import MemoryNet
 from leasehold.proctable import Proc
 from leasehold.units import declared_to_bytes, memory_to_bytes
 
@@ -166,6 +167,7 @@ class MachineAgent:
         minute: Callable[[float], int] = _minute,
         processes: Callable[[], Mapping[int, Proc]] = proctable.scan,
         user_name: Callable[[int], str] | None = None,
+        net: Callable[..., MemoryNet] = MemoryNet,
     ) -> None:
         self.config = config
         #: The process table, for `[[observe]]` rules, and the name of a process's owner (fakes
@@ -231,10 +233,17 @@ class MachineAgent:
         }
         #: When each waiting item was first seen in line, on `_monotonic` (`_overdue`).
         self._queued_at: dict[tuple[str, str], float] = {}
-        #: `[memory] learn`: `off` without a `[memory]` table.
-        self.learn = config.memory.learn if config.memory is not None else "off"
-        #: (user, rule, repo) to (when worked out on `_monotonic`, the learned figure).
-        self._learned: dict[tuple, tuple[float, estimate.Learned]] = {}
+        #: The memory net (`leasehold.net`), when `[memory_net]` turns it on; `net` makes it
+        #: (a test gives it fake roots). The server runs its loop.
+        self.net: MemoryNet | None = None
+        if config.memory_net.on and config.for_user:
+            self.net = net(
+                config.memory_net,
+                leases=self._net_leases,
+                on_change=self._net_changed,
+                clock=clock,
+                monotonic=self._monotonic,
+            )
         self._seen = self._snapshot()
 
     def _guard_cgroups(self) -> tuple[str, ...]:
@@ -277,6 +286,7 @@ class MachineAgent:
             memory_overdue=self._overdue() if free is not None else frozenset(),
             lease_memory=self.limits.memory_bytes,
             maintenance=None if (info := self.maintenance()) is None else info["message"],
+            memory_held=None if self.net is None else self.net.held(),
         )
 
     def maintenance(self) -> dict | None:
@@ -344,6 +354,35 @@ class MachineAgent:
             self._granted_at[key] = now
         for key in self._granted_at.keys() - live:
             del self._granted_at[key]
+
+    def _net_leases(self) -> list[tuple[str, float]]:
+        """The leases the memory net watches: every lease of `SCOPE`, with when it was
+        granted."""
+        return [
+            (r["item_id"], r["acquired_at"]) for r in self.ledger.leases() if r["scope"] == SCOPE
+        ]
+
+    def _net_changed(self) -> None:
+        """The memory net parked or resumed a lease, or one has settled: record it, and admit
+        what its hold no longer keeps back."""
+        assert self.net is not None
+        with self._lock:
+            rows = {r["item_id"]: r for r in self.ledger.leases() if r["scope"] == SCOPE}
+            found = []
+            for event in self.net.events():
+                row = rows.get(event["lease_id"])
+                about = {} if row is None else status.public(row)
+                found.append(
+                    {
+                        "type": EventType(event["type"]),
+                        **{k: about.get(k) for k in ("kind", "pool", "user", "weight")},
+                        "lease_id": event["lease_id"],
+                    }
+                )
+            admitted = self.ledger.settle(self.policy())
+            self._record(*found)
+        if admitted:
+            self._notify()
 
     def _memory_short(self) -> str:
         if self.guard.pressing:
@@ -784,6 +823,8 @@ class MachineAgent:
                 "target_jobs": self.config.jobs.for_weight(renewal.target or renewal.weight),
                 "elastic": renewal.elastic,
             }
+        if renewal.status == "ok":
+            answer["parked"] = self.net is not None and self.net.state(lease_id) == "parked"
         return answer
 
     def resize(self, lease_id: str, weight: int, *, user: str | None) -> dict:
@@ -840,13 +881,15 @@ class MachineAgent:
         self, lease_id: str, *, user: str | None, outcome: outcomes.Outcome | None = None
     ) -> dict:
         """Release `lease_id`, keeping `outcome`, what its command used, with what the lease
-        held (`Ledger.record_outcome`) when the lease is still held."""
+        held (`Ledger.record_outcome`) and how often the memory net parked it, when the lease
+        is still held."""
         with self._lock:
             self._check_owner(lease_id, user)
+            parks = {}
+            if self.net is not None:
+                parks = {"parks": 0, "parked_s": 0.0} | self.net.take(lease_id)
             if outcome is not None:
-                self.ledger.record_outcome((SCOPE, lease_id), outcome.model_dump())
-                for key in [k for k in self._learned if k[1:] == (outcome.rule, outcome.repo)]:
-                    self._learned.pop(key, None)
+                self.ledger.record_outcome((SCOPE, lease_id), outcome.model_dump() | parks)
             self._released.add((SCOPE, lease_id))
             self.ledger.release((SCOPE, lease_id))
             self.ledger.settle(self.policy())
@@ -1010,6 +1053,7 @@ class MachineAgent:
             leases=listing["leases"],
             queue=listing["queue"],
             maintenance=self.maintenance(),
+            memory_net=None if self.net is None else self.net.status(),
             now=self._clock(),
             version=__version__,
         )
