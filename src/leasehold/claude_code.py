@@ -49,7 +49,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from leasehold import busy, handoff, hooknotes, programs, shell, weights
+from leasehold import busy, handoff, hooknotes, measure, programs, shell, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, wait_for_grant
@@ -168,6 +168,12 @@ def _labels(event: Mapping, command: str) -> dict[str, str]:
     return labels
 
 
+def _repository(event: Mapping) -> str | None:
+    """The top of the git work tree the agent's command starts in (its `cwd`), or None."""
+    cwd = event.get("cwd")
+    return measure.repository(cwd) if isinstance(cwd, str) and cwd else None
+
+
 def pre(
     event: Mapping,
     client: Client,
@@ -230,6 +236,8 @@ def pre(
         session=session(event),
         memory=rule.memory,
         memory_per_slot=rule.memory_per_slot,
+        rule=rule.key,
+        repo=_repository(event) if rule.key is not None else None,
     ) | {"lease_id": lid}
     asked = time.monotonic()
     code, answer = wait_for_grant(client, request, settings.wait_s, reply.log.append)

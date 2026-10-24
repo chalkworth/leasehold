@@ -120,6 +120,11 @@ CREATE TABLE IF NOT EXISTS leases (
     elastic INTEGER,
     target INTEGER,
     resized_at REAL,
+    -- The memory it was expected to use, learned from past runs, in bytes, and the clean runs
+    -- behind that (`LedgerItem.learned`); NULL: none. With memory set too, memory is this
+    -- figure, counted in place of a declaration.
+    learned INTEGER,
+    learned_runs INTEGER,
     PRIMARY KEY (scope, item_id)
 );
 -- A waiting item, in its user's FIFO by (queued_at, seq).
@@ -146,6 +151,8 @@ CREATE TABLE IF NOT EXISTS queue (
     memory_per_slot INTEGER,
     -- 1: it asks for an elastic lease.
     elastic INTEGER,
+    learned INTEGER,
+    learned_runs INTEGER,
     UNIQUE (scope, item_id)
 );
 -- Whose turn was last in each pool: the round-robin's memory ('' is the item with no user).
@@ -268,7 +275,12 @@ class LedgerItem:
     most as admission cuts it then (`leasehold.admission.grants`, `AdmissionPolicy.most`), its
     lease's weight from then on, and the lease keeps the range so cut. With `elastic` (only for
     a range), the lease's size may move between that least and most after it is granted
-    (`leasehold.elastic`, `Ledger.resize`)."""
+    (`leasehold.elastic`, `Ledger.resize`). `learned` is the memory, in bytes, an item that
+    declares none was expected to use when it asked, learned from past runs
+    (`leasehold.estimate`; None: none was known or worked out), and `learned_runs` the clean runs
+    that figure rests on, or would once enough are known (None: not worked out). Such an item
+    that counts its learned figure has it as its `memory` too, which is then not a declaration;
+    one that only shows it has no `memory`."""
 
     scope: str
     item_id: str
@@ -282,9 +294,11 @@ class LedgerItem:
     max_weight: int | None = None
     memory_per_slot: int | None = None
     elastic: bool = False
+    learned: int | None = None
+    learned_runs: int | None = None
 
     def __post_init__(self) -> None:
-        for name in ("memory", "memory_per_slot"):
+        for name in ("memory", "memory_per_slot", "learned"):
             value = getattr(self, name)
             if value is not None and not 0 <= value <= MEMORY_MAX:
                 raise ValueError(f"{name} {value} is not between 0 and {MEMORY_MAX} bytes")
@@ -294,6 +308,10 @@ class LedgerItem:
             raise ValueError(f"max_weight {self.max_weight} is below weight {self.weight}")
         if self.elastic and (self.max_weight or self.weight) <= self.weight:
             raise ValueError("only a range (max_weight above weight) can be elastic")
+        if self.learned is not None and (
+            self.memory_per_slot is not None or self.memory not in (None, self.learned)
+        ):
+            raise ValueError("a learned figure is only for an item that declares no memory")
 
     @property
     def key(self) -> ItemKey:
@@ -496,6 +514,7 @@ class Ledger:
                 max_weight=r["max_weight"],
                 memory_per_slot=r["memory_per_slot"],
                 whole=r["kind"] in WHOLE,
+                learned=r["learned"] is not None and r["memory"] is not None,
             )
             for r in conn.execute("SELECT * FROM queue")
         )
@@ -529,8 +548,8 @@ class Ledger:
         conn.execute(
             "INSERT INTO queue (scope, item_id, kind, user, session, pool, weight, holder_pid, "
             "holder_birth, holder_ns, beat_at, queued_at, labels, ttl_s, expires_at, memory, "
-            "max_weight, memory_per_slot, elastic) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "max_weight, memory_per_slot, elastic, learned, learned_runs) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (scope, item_id) DO NOTHING",
             (
                 item.scope,
@@ -552,6 +571,8 @@ class Ledger:
                 item.max_weight,
                 item.memory_per_slot,
                 1 if item.elastic else None,
+                item.learned,
+                item.learned_runs,
             ),
         )
 
@@ -568,8 +589,8 @@ class Ledger:
                 "INSERT INTO leases (scope, item_id, kind, user, session, host, pool, weight, "
                 "holder_pid, holder_birth, holder_ns, beat_at, acquired_at, labels, ttl_s, "
                 "expires_at, grant_no, memory, min_weight, max_weight, memory_per_slot, "
-                "elastic, target, resized_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "elastic, target, resized_at, learned, learned_runs) "
+                f"VALUES ({', '.join('?' * 26)})",
                 (
                     scope,
                     item_id,
@@ -607,6 +628,8 @@ class Ledger:
                     row["elastic"],
                     weight,
                     now,
+                    row["learned"],
+                    row["learned_runs"],
                 ),
             )
             conn.execute("DELETE FROM queue WHERE seq = ?", (row["seq"],))
@@ -1077,7 +1100,8 @@ class Ledger:
             values = {
                 "lease_id": item[1], "kind": row["kind"], "user": row["user"],
                 "pool": row["pool"], "weight": weight, "min_weight": least, "max_weight": most,
-                "memory": row["memory"], "memory_per_slot": row["memory_per_slot"],
+                "memory": row["memory"] if row["learned"] is None else None,
+                "memory_per_slot": row["memory_per_slot"],
                 **{k: outcome.get(k) for k in _OUTCOME_FIELDS}, "ended_at": now,
             }  # fmt: skip
             conn.execute(
@@ -1108,6 +1132,17 @@ class Ledger:
             args += (user,)
         with self._db() as conn:
             rows = conn.execute(query + " ORDER BY id DESC", args).fetchall()
+        return [dict(row) for row in rows]
+
+    def outcomes_of(self, user: str | None, rule: str | None, repo: str | None) -> list[dict]:
+        """The outcomes kept for `user`, `rule` and `repo`, newest first. None older than
+        `OUTCOME_AGE_S`."""
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM outcomes WHERE user IS ? AND rule IS ? AND repo IS ? "
+                "AND ended_at > ? ORDER BY id DESC",
+                (user, rule, repo, self._now() - OUTCOME_AGE_S),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def recent_submits(self, user: str | None, pool: str) -> int:
@@ -1255,12 +1290,16 @@ _ADDED_COLUMNS = {
         ("elastic", "INTEGER"),
         ("target", "INTEGER"),
         ("resized_at", "REAL"),
+        ("learned", "INTEGER"),
+        ("learned_runs", "INTEGER"),
     ),
     "queue": (
         ("memory", "INTEGER"),
         ("max_weight", "INTEGER"),
         ("memory_per_slot", "INTEGER"),
         ("elastic", "INTEGER"),
+        ("learned", "INTEGER"),
+        ("learned_runs", "INTEGER"),
     ),
     "outcomes": (
         ("parks", "INTEGER"),

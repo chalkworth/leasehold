@@ -150,10 +150,14 @@ def lease_request(
     memory: str | None = None,
     max_weight: int | None = None,
     memory_per_slot: str | None = None,
+    rule: str | None = None,
+    repo: str | None = None,
 ) -> dict:
     """An acquire request for a new lease of its own id: `weight` to `max_weight` slots (None,
     or `weight`: no range is sent). `memory` (a size such as `4g`) is the memory the work
-    declares in all, `memory_per_slot` for each slot it is granted; None declares none. It never
+    declares in all, `memory_per_slot` for each slot it is granted; None declares none. `rule`
+    (`shell.Rule.key`) and `repo` are what the work's outcome will be filed under, so a daemon
+    can count what that rule's past runs there used (None: not sent). It never
     asks for an elastic lease: `hold` makes its lease elastic later, once the command's jobs
     show they follow the jobserver (`leasehold.follow`)."""
     if max_weight is not None and max_weight < weight:
@@ -172,6 +176,8 @@ def lease_request(
         "memory": memory,
         "max_weight": max_weight if ranged else None,
         "memory_per_slot": memory_per_slot,
+        "rule": rule,
+        "repo": repo,
     }
 
 
