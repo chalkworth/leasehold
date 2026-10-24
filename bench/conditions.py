@@ -19,6 +19,8 @@ A condition is a name from `CONDITIONS`, optionally followed by `@` and paramete
   sets the ceiling, the pools' `max` and the work pool's reservation as `init` would.
 * `mem=declared`: each `mem` job declares its size plus 512 MiB (`hold --memory`).
 * `budget`: `[memory] budget`, a size such as `7g` (otherwise `--memory-budget`, else auto).
+* `aps`: `[memory] assumed_per_slot`, a size such as `256m`: what each slot of a lease that
+  declares no memory is counted as.
 * `net=park`: the daemon's memory net on (`[memory_net] mode = "park"`, `leasehold.net`): it
   parks a job when memory inside the limit runs out, and holds new work while one is parked or
   resuming. Only the conditions whose jobs run in lease scopes take it.
@@ -60,7 +62,7 @@ CONDITIONS = {
 #: The conditions that run by default: all but those that need a jobserver.
 DEFAULT_CONDITIONS = [c for c in CONDITIONS if c not in ("lh-jobserver", "lh-elastic")]
 #: The parameters, in their canonical order.
-KEYS = ("w", "h", "grow", "kept", "mem", "budget", "net", "overflow", "arm")
+KEYS = ("w", "h", "grow", "kept", "mem", "budget", "aps", "net", "overflow", "arm")
 _WEIGHT = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
 _SIZE = re.compile(r"^[0-9]+(\.[0-9]+)?[kmgt]?b?$", re.IGNORECASE)
 #: The choices of `grow`, the same as `leasehold.elastic.HEADROOM_MODES`.
@@ -98,6 +100,7 @@ class Condition:
     kept: int | None = None
     declared: bool = False
     budget: str | None = None
+    aps: str | None = None
     net: str | None = None
     overflow: str | None = None
     arm: str | None = None
@@ -121,6 +124,7 @@ class Condition:
             "kept": None if self.kept is None else str(self.kept),
             "mem": "declared" if self.declared and self.base != "lh-enforced-declared" else None,
             "budget": self.budget,
+            "aps": self.aps,
             "net": self.net,
             "overflow": self.overflow,
             "arm": self.arm,
@@ -192,6 +196,9 @@ def parse(text: str) -> Condition:
     budget = params.get("budget")
     if budget is not None and not _SIZE.match(budget):
         raise ValueError(f"{text!r}: budget={budget!r} is not a size such as 7g")
+    aps = params.get("aps")
+    if aps is not None and not _SIZE.match(aps):
+        raise ValueError(f"{text!r}: aps={aps!r} is not a size such as 256m")
     net = params.get("net")
     if net is not None and net != "park":
         raise ValueError(f"{text!r}: net is 'park'")
@@ -216,6 +223,7 @@ def parse(text: str) -> Condition:
         kept=kept,
         declared=mem == "declared" or base == "lh-enforced-declared",
         budget=budget,
+        aps=aps,
         net=net,
         overflow=overflow,
         arm=arm,
@@ -329,6 +337,11 @@ def config(
         if line not in text:
             raise ValueError("the generated config has no [memory] budget to replace")
         text = text.replace(line, f'budget = "{budget}"', 1)
+    if condition.aps is not None:
+        line = 'assumed_per_slot = "auto"'
+        if line not in text:
+            raise ValueError("the generated config has no [memory] assumed_per_slot to replace")
+        text = text.replace(line, f'assumed_per_slot = "{condition.aps}"', 1)
     if condition.headroom is not None:
         text = _insert_after(text, "[pools.work]", f"headroom = {condition.headroom}")
     if condition.grow is not None:
