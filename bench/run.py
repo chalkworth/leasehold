@@ -545,6 +545,7 @@ class Run:
         self.parker: park.Parker | None = None
         self.starts_held = 0
         self.start_hold_s = 0.0
+        self.post_thaw_hold_s = 0.0
         cap_cgroup = setup.job_cgroup()
         mode = setup.cond.parker
         if mode and cap_cgroup is not None:
@@ -556,6 +557,7 @@ class Run:
                 conds.size_bytes(cap) if cap else park.DEFAULT_CAP_BYTES,
                 mode,
                 conds.size_bytes(overflow) if overflow else swap_max,
+                settle=setup.cond.hold == "parked",
             )
 
     def agent(self, index: int, steps: list) -> None:
@@ -611,17 +613,26 @@ class Run:
                 )
 
     def hold_start(self, issued: float) -> bool:
-        """Under `hold=parked`, wait while the parker has a job parked; False if the run
-        stopped first. The forced thaw and the thaw at the run's end bound the wait."""
+        """Under `hold=parked`, wait while the parker has a job parked or settling after a
+        thaw; False if the run stopped first. The forced thaw, the parker's settling limit and
+        the thaw at the run's end bound the wait. Time held only by a settling job counts as
+        post-thaw hold too."""
         parker = self.parker
-        if not parker or self.setup.cond.hold != "parked" or parker.none_parked.is_set():
+        if not parker or self.setup.cond.hold != "parked" or parker.starts_open.is_set():
             return True
-        while not parker.none_parked.wait(0.25):
+        post_thaw = 0.0
+        while True:
+            why, t0 = parker.blocked_by(), time.time()
+            if parker.starts_open.wait(0.1):
+                break
+            if why == "settling":
+                post_thaw += time.time() - t0
             if self.stop.is_set():
                 return False
         with self.lock:
             self.starts_held += 1
             self.start_hold_s += time.time() - issued
+            self.post_thaw_hold_s += post_thaw
         return True
 
     def sampler(self) -> None:
@@ -722,7 +733,11 @@ class Run:
         if self.parker:
             out["park"] = self.parker.summary()
         if self.setup.cond.hold:
-            out["start_hold"] = {"held": self.starts_held, "s": round(self.start_hold_s, 1)}
+            out["start_hold"] = {
+                "held": self.starts_held,
+                "s": round(self.start_hold_s, 1),
+                "post_thaw_s": round(self.post_thaw_hold_s, 1),
+            }
         return out
 
 
@@ -1080,6 +1095,8 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
         "overflow_full": parked.get("swap_max_hits"),
         "starts_held": held.get("held"),
         "start_hold_s": held.get("s"),
+        "post_thaw_hold_s": held.get("post_thaw_s"),
+        "brake_s": parked.get("brake_s"),
         "mem_some_max": r(max(some) if some else None),
         "mem_some_mean": r(mean(some)),
         "mem_full_max": r(max(full) if full else None),
@@ -1123,6 +1140,8 @@ COLUMNS = [
     ("overflow_full", "jobs that filled their overflow"),
     ("starts_held", "starts held"),
     ("start_hold_s", "start hold s"),
+    ("post_thaw_hold_s", "post-thaw hold s"),
+    ("brake_s", "brake s"),
     ("mem_some_max", "mem PSI some max"),
     ("mem_some_mean", "mem PSI some mean"),
     ("mem_full_max", "mem PSI full max"),

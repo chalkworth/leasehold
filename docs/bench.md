@@ -412,9 +412,14 @@ parked. The parker wakes on the slice's `memory.events` and a memory pressure tr
 250 ms poll besides. `overflow=1g` without `park` sets the swap limits and parks nothing, which
 separates the two effects; `park=threshold` parks at 85% of `MemoryMax` instead, with
 `MemoryHigh` at 92% to slow a growing job down. `hold=parked` (with `park=freeze`) makes a `mem` job wait to
-start, before it calls `hold`, while any job is parked, as a daemon would if it counted a
-parked job's memory as still in use and put that job first in line; `cpu` jobs start as
-usual, and the summary reports the starts held and the seconds they waited. To limit wear on the disk, a run reclaims at
+start, before it calls `hold`, while any job is parked and after a thaw until the thawed job
+has settled (its growth stays under 16 MiB/s or 1% of its usage a second for 5 s, at most 60
+s), as a daemon would if it counted a parked job's memory as still in use and put that job
+first in line; `cpu` jobs start as usual, and the summary reports the starts held, the
+seconds they waited, and the seconds held only by a settling job. While a park's reclaim
+runs, the running peers' swap limits are lifted and their `memory.high` set to their usage
+plus 256 MiB (brake seconds in the summary), and `park.csv` records each peer's usage, swap
+and memory events at the park and when the reclaim ends. To limit wear on the disk, a run reclaims at
 most `parkcap` (default `24g`) and parks nothing more after that. A parked job swaps into the
 slice's own `MemorySwapMax`, so `--swap-gib` must hold a whole `mem` job plus the running
 jobs' overflow. The summary adds parks, re-parks, spurious parks, forced thaws, seconds parked,
