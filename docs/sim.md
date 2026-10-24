@@ -21,6 +21,9 @@ simulator. The fit's search (Nelder-Mead), the study's Latin hypercube and the t
 written in the standard library ([`bench/sim/search.py`](../bench/sim/search.py)), so the group
 needs neither SciPy nor NumPy.
 
+Memory policies (what a job counts, budgets, parking) have their own model and study:
+[memsim.md](memsim.md).
+
 ## Method
 
 Agents and jobs. Each agent runs the steps [`bench/run.py`](../bench/run.py) plans for it

@@ -1,0 +1,658 @@
+{
+ "memtight": {
+  "seed_base": 3000,
+  "mem_gib": 3.75,
+  "cap_gib": 7.0,
+  "swap_gib": 2.0,
+  "preset": {
+   "duration_s": 240.0,
+   "think_s": 30,
+   "cpu_s": 10,
+   "mem_s": 6,
+   "p_mem": 0.35
+  },
+  "agents": 8,
+  "arms": {
+   "lh-enforced_w4": {
+    "1": {
+     "makespan": 766.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 698.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 713.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 818.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 630.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 650.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   },
+   "lh-enforced_w3": {
+    "1": {
+     "makespan": 673.0,
+     "kills": 4,
+     "swap_gib": 8.229999542236328
+    },
+    "2": {
+     "makespan": 612.0,
+     "kills": 5,
+     "swap_gib": 9.899547576904297
+    },
+    "3": {
+     "makespan": 637.0,
+     "kills": 3,
+     "swap_gib": 7.491302490234375
+    },
+    "4": {
+     "makespan": 691.0,
+     "kills": 3,
+     "swap_gib": 5.484321594238281
+    },
+    "5": {
+     "makespan": 527.0,
+     "kills": 2,
+     "swap_gib": 4.431575775146484
+    },
+    "6": {
+     "makespan": 557.0,
+     "kills": 8,
+     "swap_gib": 14.672004699707031
+    }
+   },
+   "lh-enforced_w3_memdeclared": {
+    "1": {
+     "makespan": 784.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 690.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 800.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 878.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 652.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 724.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   }
+  }
+ },
+ "net-memheavy": {
+  "seed_base": 3100,
+  "mem_gib": 3.75,
+  "cap_gib": 7.0,
+  "swap_gib": 4.999996185302734,
+  "preset": {
+   "duration_s": 240.0,
+   "think_s": 30,
+   "cpu_s": 10,
+   "mem_s": 6,
+   "p_mem": 0.35
+  },
+  "agents": 8,
+  "arms": {
+   "lh-enforced_w4": {
+    "1": {
+     "makespan": 821.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 967.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 763.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 892.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 690.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 841.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   },
+   "lh-enforced_w3": {
+    "1": {
+     "makespan": 746.0,
+     "kills": 0,
+     "swap_gib": 16.14
+    },
+    "2": {
+     "makespan": 839.0,
+     "kills": 0,
+     "swap_gib": 10.21
+    },
+    "3": {
+     "makespan": 674.0,
+     "kills": 0,
+     "swap_gib": 5.62
+    },
+    "4": {
+     "makespan": 807.0,
+     "kills": 0,
+     "swap_gib": 8.76
+    },
+    "5": {
+     "makespan": 634.0,
+     "kills": 0,
+     "swap_gib": 16.51
+    },
+    "6": {
+     "makespan": 719.0,
+     "kills": 0,
+     "swap_gib": 2.75
+    }
+   },
+   "lh-enforced_w3_parkfreeze": {
+    "1": {
+     "makespan": 732.0,
+     "kills": 0,
+     "swap_gib": 13.36
+    },
+    "2": {
+     "makespan": 856.0,
+     "kills": 0,
+     "swap_gib": 18.2
+    },
+    "3": {
+     "makespan": 669.0,
+     "kills": 0,
+     "swap_gib": 6.92
+    },
+    "4": {
+     "makespan": 808.0,
+     "kills": 0,
+     "swap_gib": 8.33
+    },
+    "5": {
+     "makespan": 630.0,
+     "kills": 0,
+     "swap_gib": 24.61
+    },
+    "6": {
+     "makespan": 739.0,
+     "kills": 0,
+     "swap_gib": 11.62
+    }
+   },
+   "lh-enforced_w3_overflow1g": {
+    "1": {
+     "makespan": 713.0,
+     "kills": 5,
+     "swap_gib": 9.86
+    },
+    "2": {
+     "makespan": 846.0,
+     "kills": 6,
+     "swap_gib": 11.97
+    },
+    "3": {
+     "makespan": 656.0,
+     "kills": 3,
+     "swap_gib": 6.7
+    },
+    "4": {
+     "makespan": 738.0,
+     "kills": 4,
+     "swap_gib": 6.58
+    },
+    "5": {
+     "makespan": 588.0,
+     "kills": 7,
+     "swap_gib": 14.06
+    },
+    "6": {
+     "makespan": 708.0,
+     "kills": 4,
+     "swap_gib": 6.4
+    }
+   }
+  }
+ },
+ "net-full": {
+  "seed_base": 3200,
+  "mem_gib": 2.5,
+  "cap_gib": 7.0,
+  "swap_gib": 4.994438171386719,
+  "preset": {
+   "duration_s": 240.0,
+   "think_s": 30,
+   "cpu_s": 10,
+   "mem_s": 6,
+   "p_mem": 0.35
+  },
+  "agents": 8,
+  "arms": {
+   "lh-enforced_w4": {
+    "1": {
+     "makespan": 722.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 774.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 723.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 705.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 876.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 934.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   },
+   "lh-enforced_w3": {
+    "1": {
+     "makespan": 621.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 658.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 629.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 601.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 714.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 802.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   },
+   "lh-enforced_w3_parkfreeze": {
+    "1": {
+     "makespan": 620.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 659.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 626.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 600.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 716.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 801.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   },
+   "lh-enforced_w3_overflow1g": {
+    "1": {
+     "makespan": 619.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 659.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 627.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 601.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 715.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 786.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   }
+  }
+ },
+ "net-hold": {
+  "seed_base": 3300,
+  "mem_gib": 3.75,
+  "cap_gib": 7.0,
+  "swap_gib": 4.999996185302734,
+  "preset": {
+   "duration_s": 240.0,
+   "think_s": 30,
+   "cpu_s": 10,
+   "mem_s": 6,
+   "p_mem": 0.35
+  },
+  "agents": 8,
+  "arms": {
+   "lh-enforced_w4": {
+    "1": {
+     "makespan": 774.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 657.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 840.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 841.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 780.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 723.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   },
+   "lh-enforced_w3_parkfreeze": {
+    "1": {
+     "makespan": 681.0,
+     "kills": 0,
+     "swap_gib": 14.92
+    },
+    "2": {
+     "makespan": 581.0,
+     "kills": 0,
+     "swap_gib": 11.63
+    },
+    "3": {
+     "makespan": 756.0,
+     "kills": 0,
+     "swap_gib": 8.34
+    },
+    "4": {
+     "makespan": 732.0,
+     "kills": 0,
+     "swap_gib": 6.57
+    },
+    "5": {
+     "makespan": 711.0,
+     "kills": 0,
+     "swap_gib": 11.64
+    },
+    "6": {
+     "makespan": 627.0,
+     "kills": 0,
+     "swap_gib": 9.87
+    }
+   },
+   "lh-enforced_w3_parkfreeze_holdparked": {
+    "1": {
+     "makespan": 680.0,
+     "kills": 0,
+     "swap_gib": 14.91
+    },
+    "2": {
+     "makespan": 584.0,
+     "kills": 0,
+     "swap_gib": 11.62
+    },
+    "3": {
+     "makespan": 755.0,
+     "kills": 0,
+     "swap_gib": 11.52
+    },
+    "4": {
+     "makespan": 730.0,
+     "kills": 0,
+     "swap_gib": 6.58
+    },
+    "5": {
+     "makespan": 719.0,
+     "kills": 0,
+     "swap_gib": 14.9
+    },
+    "6": {
+     "makespan": 627.0,
+     "kills": 0,
+     "swap_gib": 9.89
+    }
+   }
+  }
+ },
+ "overcommit": {
+  "seed_base": 3400,
+  "mem_gib": 4.25,
+  "cap_gib": 6.0,
+  "swap_gib": 4.999996185302734,
+  "preset": {
+   "duration_s": 240.0,
+   "think_s": 30,
+   "cpu_s": 10,
+   "mem_s": 6,
+   "p_mem": 0.35
+  },
+  "agents": 8,
+  "arms": {
+   "lh-enforced_w4": {
+    "1": {
+     "makespan": 761.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "2": {
+     "makespan": 803.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "3": {
+     "makespan": 824.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "4": {
+     "makespan": 667.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "5": {
+     "makespan": 755.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    },
+    "6": {
+     "makespan": 881.0,
+     "kills": 0,
+     "swap_gib": 0.0
+    }
+   },
+   "lh-enforced_w3": {
+    "1": {
+     "makespan": 683.0,
+     "kills": 7,
+     "swap_gib": 31.65
+    },
+    "2": {
+     "makespan": 669.0,
+     "kills": 2,
+     "swap_gib": 7.82
+    },
+    "3": {
+     "makespan": 763.0,
+     "kills": 5,
+     "swap_gib": 30.01
+    },
+    "4": {
+     "makespan": 589.0,
+     "kills": 6,
+     "swap_gib": 29.54
+    },
+    "5": {
+     "makespan": 640.0,
+     "kills": 3,
+     "swap_gib": 12.78
+    },
+    "6": {
+     "makespan": 766.0,
+     "kills": 2,
+     "swap_gib": 8.14
+    }
+   },
+   "lh-enforced_w3_parkfreeze_holdparked": {
+    "1": {
+     "makespan": 666.0,
+     "kills": 0,
+     "swap_gib": 7.11
+    },
+    "2": {
+     "makespan": 681.0,
+     "kills": 0,
+     "swap_gib": 3.56
+    },
+    "3": {
+     "makespan": 733.0,
+     "kills": 1,
+     "swap_gib": 13.68
+    },
+    "4": {
+     "makespan": 597.0,
+     "kills": 1,
+     "swap_gib": 14.35
+    },
+    "5": {
+     "makespan": 640.0,
+     "kills": 0,
+     "swap_gib": 3.55
+    },
+    "6": {
+     "makespan": 770.0,
+     "kills": 1,
+     "swap_gib": 4.56
+    }
+   },
+   "lh-enforced_w3_parkfreeze": {
+    "1": {
+     "makespan": 657.0,
+     "kills": 0,
+     "swap_gib": 3.55
+    },
+    "2": {
+     "makespan": 683.0,
+     "kills": 1,
+     "swap_gib": 2.79
+    },
+    "3": {
+     "makespan": 727.0,
+     "kills": 1,
+     "swap_gib": 8.11
+    },
+    "4": {
+     "makespan": 593.0,
+     "kills": 3,
+     "swap_gib": 14.12
+    },
+    "5": {
+     "makespan": 640.0,
+     "kills": 0,
+     "swap_gib": 3.56
+    },
+    "6": {
+     "makespan": 768.0,
+     "kills": 1,
+     "swap_gib": 4.55
+    }
+   }
+  }
+ }
+}
