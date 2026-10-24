@@ -1317,6 +1317,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--swap-gib", type=float, default=2.0)
     parser.add_argument(
+        "--p-mem", type=float, help="the share of jobs that are mem jobs (default: the preset's)"
+    )
+    parser.add_argument(
         "--weights",
         default="",
         help="hold --weight per job kind, as cpu=N,mem=M (default: the built-in weight of a "
@@ -1539,7 +1542,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--weights: {exc}")
     name = preset_name(args)
     base = PRESETS[name]
-    preset = Preset(**(asdict(base) | ({"duration_s": args.duration} if args.duration else {})))
+    preset = Preset(
+        **(
+            asdict(base)
+            | ({"duration_s": args.duration} if args.duration else {})
+            | ({"p_mem": args.p_mem} if args.p_mem is not None else {})
+        )
+    )
     seed_base = args.seed_base if args.seed_base is not None else args.seed - 1
     names = [c.text for c in conditions]
     m = machine(args.machine_class)

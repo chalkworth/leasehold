@@ -19,6 +19,8 @@ A condition is a name from `CONDITIONS`, optionally followed by `@` and paramete
   sets the ceiling, the pools' `max` and the work pool's reservation as `init` would.
 * `mem=declared`: each `mem` job declares its size plus 512 MiB (`hold --memory`).
 * `budget`: `[memory] budget`, a size such as `7g` (otherwise `--memory-budget`, else auto).
+* `aps`: `[memory] assumed_per_slot`, a size such as `256m`: what each slot of a lease that
+  declares no memory is counted as.
 * `park`: run the harness's parker (`bench/park.py`), an experiment that pauses a `mem` job and
   pushes its memory to swap when memory inside the limit runs out. `freeze` parks once a job
   spills past its own small swap allowance (`overflow`); `threshold` parks at 85% of the limit.
@@ -74,6 +76,7 @@ KEYS = (
     "kept",
     "mem",
     "budget",
+    "aps",
     "park",
     "parkcap",
     "overflow",
@@ -127,6 +130,7 @@ class Condition:
     kept: int | None = None
     declared: bool = False
     budget: str | None = None
+    aps: str | None = None
     park: str | None = None
     park_cap: str | None = None
     overflow: str | None = None
@@ -152,6 +156,7 @@ class Condition:
             "kept": None if self.kept is None else str(self.kept),
             "mem": "declared" if self.declared and self.base != "lh-enforced-declared" else None,
             "budget": self.budget,
+            "aps": self.aps,
             "park": self.park,
             "parkcap": self.park_cap,
             "overflow": self.overflow,
@@ -230,6 +235,9 @@ def parse(text: str) -> Condition:
     budget = params.get("budget")
     if budget is not None and not _SIZE.match(budget):
         raise ValueError(f"{text!r}: budget={budget!r} is not a size such as 7g")
+    aps = params.get("aps")
+    if aps is not None and not _SIZE.match(aps):
+        raise ValueError(f"{text!r}: aps={aps!r} is not a size such as 256m")
     park = params.get("park")
     if park is not None and base != "lh-enforced":
         raise ValueError(f"{text!r}: only lh-enforced takes park")
@@ -263,6 +271,7 @@ def parse(text: str) -> Condition:
         kept=kept,
         declared=mem == "declared" or base == "lh-enforced-declared",
         budget=budget,
+        aps=aps,
         park=park,
         park_cap=park_cap,
         overflow=overflow,
@@ -378,6 +387,11 @@ def config(
         if line not in text:
             raise ValueError("the generated config has no [memory] budget to replace")
         text = text.replace(line, f'budget = "{budget}"', 1)
+    if condition.aps is not None:
+        line = 'assumed_per_slot = "auto"'
+        if line not in text:
+            raise ValueError("the generated config has no [memory] assumed_per_slot to replace")
+        text = text.replace(line, f'assumed_per_slot = "{condition.aps}"', 1)
     if condition.headroom is not None:
         text = _insert_after(text, "[pools.work]", f"headroom = {condition.headroom}")
     if condition.grow is not None:
