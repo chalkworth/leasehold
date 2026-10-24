@@ -36,7 +36,7 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import busy, discovery, hooknotes, jobs, shell, weights
+from leasehold import busy, discovery, hooknotes, jobs, measure, shell, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, run_leased, wait_for_grant
@@ -196,12 +196,14 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         session=env.get("LEASEHOLD_SESSION") or None,
         memory=rule.memory,
         memory_per_slot=rule.memory_per_slot,
+        rule=rule.key,
+        repo=measure.repository() if rule.key is not None else None,
     )
     code, answer = wait_for_grant(client, request, settings.wait_s, _say)
     if code is None:
         return run_leased(
             client, argv, request, answer, memory=rule.memory, threads=threads,
-            memory_per_slot=rule.memory_per_slot,
+            memory_per_slot=rule.memory_per_slot, rule=rule.key,
         )  # fmt: skip
     if code == EXIT_BUSY and settings.when_busy == "deny":
         why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)

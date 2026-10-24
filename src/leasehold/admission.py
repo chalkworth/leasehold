@@ -31,8 +31,9 @@ never as running, so per-user limits and whose turn it is stay a matter of real 
 
 **Memory**, on a host that `AdmissionPolicy.memory` gives a budget (and only there):
 
-* every item counts memory: what it declares (`memory`, in bytes), or, when it declares none,
-  its weight times the host's `assumed_memory` per slot (0 when that is not given);
+* every item counts memory: what it declares (`memory`, in bytes, which may instead be a
+  figure learned from past runs, counted the same way), or, when it declares none, its weight
+  times the host's `assumed_memory` per slot (0 when that is not given);
 * an item enters only if the memory counted on its host (standing memory, held leases and what
   this decision admitted) plus its own stays within the budget. Like weight, it is never
   preempted to make room, and the item whose turn it is still blocks its pool;
@@ -428,6 +429,8 @@ class Waiting:
     memory_per_slot: int | None = None
     #: The item takes its host to itself (the module docstring's whole hosts).
     whole: bool = False
+    #: Its `memory` was learned from past runs, not declared: only what `blocker` says differs.
+    learned: bool = False
 
     @property
     def most(self) -> int:
@@ -620,15 +623,24 @@ def _memory_need(
     weight: int,
     memory: int | None,
     memory_per_slot: int | None = None,
+    learned: bool = False,
 ) -> str:
-    """What an item counts, and where that comes from, in words."""
+    """What an item counts, and where that comes from, in words. A `learned` `memory` came from
+    past runs, not a declaration."""
     need = policy.counted(host, weight, memory, memory_per_slot)
     if memory is not None:
-        return f"its declared {gib(need)}"
+        return f"its {'learned' if learned else 'declared'} {gib(need)}"
     if memory_per_slot is not None:
         return f"{gib(need)} (weight {weight} at its declared {gib(memory_per_slot)} a slot)"
     per_slot = policy.assumed_memory.get(host, 0)
     return f"{gib(need)} (weight {weight} at {gib(per_slot)} a slot, none declared)"
+
+
+def _item_need(policy: AdmissionPolicy, host: str, item: Waiting) -> str:
+    """`_memory_need` for a waiting item."""
+    return _memory_need(
+        policy, host, item.weight, item.memory, item.memory_per_slot, learned=item.learned
+    )
 
 
 #: A pool's line: user -> session -> that session's items, oldest first.
@@ -1097,7 +1109,7 @@ def blocker(
         why = f" ({policy.memory_short})" if policy.memory_short else ""
         return (
             f"memory is short{why}: {gib(free_now)} may start now; this counts "
-            f"{_memory_need(policy, pool.host, item.weight, item.memory, item.memory_per_slot)}"
+            f"{_item_need(policy, pool.host, item)}"
         )
     if used + item.weight > pool.max:
         return f"pool {item.pool} holds {used} of {pool.max}; this needs {_needs(policy, item)}"
@@ -1108,7 +1120,7 @@ def blocker(
         counted = tally.memory.get(pool.host, 0)
         return (
             f"the memory budget is used: {gib(counted)} of {gib(budget)} counted; this counts "
-            f"{_memory_need(policy, pool.host, item.weight, item.memory, item.memory_per_slot)}"
+            f"{_item_need(policy, pool.host, item)}"
         )
     slots = policy.slots.get(pool.host, 0)
     free = slots - tally.host_used.get(pool.host, 0)

@@ -186,7 +186,8 @@ class MemoryBudget:
 class MemorySettings(_Strict):
     """The `[memory]` table: the memory admitted work may count together (see
     `leasehold.admission`). A request counts the memory it declares (`hold --memory`, a
-    `[[commands.rule]]` `memory`), or, declaring none, its weight times `assumed_per_slot`."""
+    `[[commands.rule]]` `memory`), or, declaring none, the figure learned from its rule's past
+    runs when `learn` is `on` and one is known, or else its weight times `assumed_per_slot`."""
 
     #: `auto`: the machine's memory less `kept`; or a size such as `48g` (not 0, which would let
     #: nothing that counts memory start). Under a cgroup memory limit lower than the machine's
@@ -199,6 +200,10 @@ class MemorySettings(_Strict):
     #: budget divided by the slots, so a machine full of slots is the budget full; or a size
     #: (`0g` counts such requests as nothing).
     assumed_per_slot: str = "auto"
+    #: Whether a request that declares no memory counts what its rule's past runs in its
+    #: repository used (`leasehold.estimate`): `on` counts that learned figure once one is
+    #: known; `shadow` works it out and shows it, but counts as `off` does; `off` neither.
+    learn: Literal["off", "shadow", "on"] = "shadow"
 
     @field_validator("budget", "assumed_per_slot")
     @classmethod
@@ -522,7 +527,8 @@ class MachineConfig(_Strict):
         or when nothing does. Fails: a budget of nothing, or one `[[standing]]` memory fills
         (`never_rules` names the rules no lease could be granted for). Warns: the built-in
         heavy rules cut to a lighter weight because their
-        assumed memory does not fit beside the standing memory; `assumed_per_slot` of 0."""
+        assumed memory does not fit beside the standing memory; `assumed_per_slot` of 0; `learn`
+        on or in shadow with containment off, which leaves nothing to learn from."""
         if self.memory is None:
             return []
         gib = lambda n: f"{n / 2**30:.1f} GiB"  # noqa: E731
@@ -567,6 +573,15 @@ class MachineConfig(_Strict):
                     "so the budget limits only declared and standing memory",
                     "leave assumed_per_slot at auto, or declare memory in [[commands.rule]] "
                     "and hold --memory",
+                )
+            )
+        if self.memory.learn != "off" and self.contain.mode == "off":
+            problems.append(
+                (
+                    "warn",
+                    f'[memory] learn is "{self.memory.learn}", but with [contain] mode = "off" '
+                    "no command is measured, so nothing is learned",
+                    'set [contain] mode = "auto", or [memory] learn = "off"',
                 )
             )
         return problems

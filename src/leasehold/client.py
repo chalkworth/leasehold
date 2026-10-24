@@ -74,8 +74,9 @@ class Client:
         that does not take a newer field (`OPTIONAL`) is asked again without it: one older than
         0.3 takes no `memory`, one from before ranges no `max_weight` (it grants the `weight`) and
         no `memory_per_slot` (declared instead as `memory`, the `weight`'s worth, which is what
-        such a daemon grants), and one from before elastic leases no `elastic` (its lease then
-        keeps the size it is granted)."""
+        such a daemon grants), one from before elastic leases no `elastic` (its lease then
+        keeps the size it is granted), and one from before learned memory no `rule` or `repo`
+        (it counts what it counted before)."""
         body = {k: v for k, v in body.items() if v is not None}
         while True:
             try:
@@ -135,7 +136,7 @@ class Client:
 
 
 #: The acquire fields a daemon older than this client may not take, and so may be left out.
-OPTIONAL = frozenset({"memory", "max_weight", "memory_per_slot", "elastic"})
+OPTIONAL = frozenset({"memory", "max_weight", "memory_per_slot", "elastic", "rule", "repo"})
 
 
 def _without(body: dict, unknown: set[str]) -> dict:
