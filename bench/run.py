@@ -350,6 +350,22 @@ class Setup:
         if self.leasehold:
             self._start_daemon()
 
+    def _keep_net(self) -> None:
+        """With the memory net on, what it did (`memory_net` of the daemon's status) in
+        `net.json`, for `summarize_condition`: parks, forced resumes and bytes written."""
+        if self.cond.net is None or self.sockdir is None:
+            return
+        done = subprocess.run(
+            [*leasehold_cli(), "status", "--json", "--socket", self.sock],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+        with contextlib.suppress(ValueError):
+            net = json.loads(done.stdout).get("memory_net")
+            (self.workdir / "net.json").write_text(json.dumps(net, indent=1))
+
     def _set_property(self, unit: str, *props: str) -> None:
         done = systemctl("set-property", "--runtime", unit, *props)
         if done.returncode != 0:
@@ -461,6 +477,7 @@ class Setup:
 
     def stop(self) -> None:
         if self.daemon is not None:
+            self._keep_net()
             self.daemon.terminate()
             try:
                 self.daemon.wait(15)
@@ -963,6 +980,8 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
     steal = [float(r.get("cpu_steal") or 0) for r in samples]
     contained = sum("/lease-" in (j.get("cgroup") or "") for j in jobs)
     ooms = sum(c.get("oom_kill", 0) for c in run.get("cgroups", {}).values())
+    net_file = workdir / "net.json"
+    net = (json.loads(net_file.read_text()) or {}) if net_file.exists() else {}
     peak = max((c.get("peak") or 0 for c in run.get("cgroups", {}).values()), default=0)
 
     def r(v, nd=1):
@@ -998,6 +1017,9 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
         "cpu_busy_mean": r(mean(busy), 0),
         "cpu_steal_mean": r(mean(steal)),
         "jobs_in_lease_scope": contained,
+        "parks": net.get("parks"),
+        "forced_resumes": net.get("forced_resumes"),
+        "park_written_mib": r(net["written_bytes"] / MIB, 0) if "written_bytes" in net else None,
         "load_before": outer.get("before", {}).get("load1"),
         "aborted": run.get("aborted") or ("" if run else "no result"),
     }
@@ -1026,6 +1048,8 @@ COLUMNS = [
     ("cap_mem_full_max", "mem PSI full max in MemoryMax cgroup"),
     ("cpu_busy_mean", "CPU busy %"),
     ("jobs_in_lease_scope", "in lease scope"),
+    ("parks", "parks"),
+    ("park_written_mib", "parked to swap MiB"),
 ]
 
 

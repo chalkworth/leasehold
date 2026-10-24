@@ -17,6 +17,9 @@ lease's own keeps it renewed until it is released.
   the block ends.
 * A lease that ran a contained command (`popen`) sends what the command used with its release
   (`leasehold.measure`): the last such command's, when it ran more than one.
+* `parked` says whether the daemon's memory net (`leasehold.net`) has paused the lease's
+  command, as of the last renewal; the lease's `_say` hears when it is paused and when it runs
+  again.
 """
 
 from __future__ import annotations
@@ -315,6 +318,9 @@ class Lease:
         #: Whether the OOM killer ended a process of the last contained command run under it
         #: (`supervise.Command.oom_killed`): what `run` cannot say in its exit status.
         self.oom_killed = False
+        #: Whether the daemon's memory net has the lease's command paused, as the last renewal
+        #: said.
+        self.parked = False
         self._on_lost = on_lost
         self._say = _say
         self._stop = threading.Event()
@@ -420,6 +426,7 @@ class Lease:
                 last_ok = time.monotonic()
             if verdict == "ok" and not pending:
                 self._take(renewal)
+                self._heard_parked(bool(renewal.get("parked")))
                 if follower is not None:
                     follower.heard(renewal)
                     follower.step()
@@ -455,6 +462,18 @@ class Lease:
                         f"the daemon had lost the lease and now refuses it ({again.get('reason')})"
                     )
                     return
+
+    def _heard_parked(self, parked: bool) -> None:
+        if parked == self.parked:
+            return
+        self.parked = parked
+        if parked:
+            self._say(
+                "memory ran short, so the command is paused and its memory moved to swap; it "
+                "runs again once memory frees"
+            )
+        else:
+            self._say("the command runs again")
 
     def _ask_again(self) -> dict:
         try:
