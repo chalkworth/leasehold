@@ -24,7 +24,7 @@ scope of every running `mem` job. Its modes:
 A park needs two or more `mem` jobs running unfrozen, and it parks the youngest: it freezes
 the job's scope (`cgroup.freeze`), lifts its `memory.swap.max` to `max`, and writes the job's
 `memory.current` to its `memory.reclaim`. A reclaim that stops short or fails (`EAGAIN`) is
-fine: the job stays frozen either way. No park follows within `SETTLE_S` of a thaw. A park of a
+fine: the job stays frozen either way. No park follows within `THAW_GAP_S` of a thaw. A park of a
 job parked before in the run is a re-park.
 
 The parker thaws one job a tick, oldest parked first, when the slice's usage plus what the job
@@ -33,9 +33,15 @@ running unfrozen. A job parked for `MAX_PARK_S` is thawed whatever the memory (a
 and parked again if the trigger fires again while its peers still run. A thawed job's
 `memory.swap.max` goes back to `overflow`.
 
-With `hold=parked`, a `mem` job waits to start while any job is parked (`none_parked`), as a
-daemon would if it counted a parked job's memory as still in use and put the job first in
-line. The wait ends at the latest with a forced thaw, or with `thaw_all` when the run ends.
+From a park until its reclaim ends, each running peer's `memory.swap.max` is lifted to `max`
+and its `memory.high` set to its usage plus `BRAKE_BYTES`, so that a peer neither fills its
+`overflow` nor grows much while the parked job's memory goes out; both are put back after.
+Each peer's usage, swap and memory events are recorded at the park and when its reclaim ends.
+
+With `hold=parked` (`settle=True`), a `mem` job waits to start while any job is parked, and
+after a thaw until the thawed job has settled (`SETTLE_*`), as a daemon would if it counted a
+parked job's memory as still in use and put the job first in line (`starts_open`). The wait
+ends at the latest with a forced thaw and `SETTLE_MAX_S`, or with `thaw_all` when the run ends.
 
 A park is counted spurious when the job, at what it held before the park, would have fitted
 within `SPURIOUS_AT` of the limit beside the most the rest of the slice used while it was
@@ -57,6 +63,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import errno
+import math
 import os
 import select
 import threading
@@ -73,7 +80,17 @@ FULL_SLACK = 16 << 20
 SOME_SHARE = 0.05
 WINDOW_S = 0.25
 MAX_PARK_S = 120.0
-SETTLE_S = 2.0
+THAW_GAP_S = 2.0
+#: While a park's reclaim runs, each running peer's `memory.high` is its usage plus this.
+BRAKE_BYTES = 256 << 20
+#: A thawed job has settled once the moving average of its growth (`SETTLE_TAU_S`) stays
+#: below the larger of `SETTLE_FLOOR` bytes and `SETTLE_SHARE` of its usage a second, for
+#: `SETTLE_COOLDOWN_S`; or when it ends, or `SETTLE_MAX_S` after its thaw.
+SETTLE_FLOOR = 16 << 20
+SETTLE_SHARE = 0.01
+SETTLE_COOLDOWN_S = 5.0
+SETTLE_MAX_S = 60.0
+SETTLE_TAU_S = 1.0
 TICK_S = 0.25
 PSI_TRIGGER = b"some 50000 2000000\0"
 #: What `parkcap` and `overflow` are when a condition does not set them.
@@ -89,6 +106,12 @@ def _read_int(path: Path) -> int | None:
     except (OSError, IndexError):
         return None
     return None if text == "max" else int(text)
+
+
+def _read_kv(path: Path) -> dict[str, int]:
+    with contextlib.suppress(OSError, ValueError):
+        return {k: int(v) for k, v in (x.split() for x in path.read_text().splitlines())}
+    return {}
 
 
 def _some(cgroup: Path) -> tuple[float | None, int | None]:
@@ -139,6 +162,10 @@ class Job:
     peak_others: int = 0  # the most the rest of the slice used while this job was parked
     swap_peak: int = 0  # the most swap held while running
     swap: Window = field(default_factory=Window)
+    thawed_at: float | None = None  # set from a thaw until the job has settled
+    calm_since: float | None = None
+    rate: float = 0.0  # the moving average of its growth, bytes a second
+    last: tuple[float, int] | None = None  # (time, memory.current) the rate was last taken at
 
 
 class Parker:
@@ -146,7 +173,13 @@ class Parker:
     `track` a job once it has started and `untrack` it when it ends."""
 
     def __init__(
-        self, cap_cgroup: Path, limit: int, cap_bytes: int, mode: str, overflow: int | None
+        self,
+        cap_cgroup: Path,
+        limit: int,
+        cap_bytes: int,
+        mode: str,
+        overflow: int | None,
+        settle: bool = False,
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"park={mode!r}: one of {', '.join(MODES)}")
@@ -166,9 +199,12 @@ class Parker:
         self.last_thaw = 0.0
         self.some = Window()
         self.wakeups = {"timer": 0, "events": 0, "psi": 0}
-        #: Set while no job is parked: what `hold=parked` waits on before a `mem` job starts.
-        self.none_parked = threading.Event()
-        self.none_parked.set()
+        self.settle = settle
+        self.brake_s = 0.0
+        #: Set while no job is parked or settling: what `hold=parked` waits on before a `mem`
+        #: job starts.
+        self.starts_open = threading.Event()
+        self.starts_open.set()
         self.psi_trigger = False
 
     def track(self, key: int, cgroup: Path, started: float) -> None:
@@ -184,6 +220,8 @@ class Parker:
                 return
             if job.parked_at is not None:
                 self._unparked(job, time.time(), "ended-parked")
+            if job.thawed_at is not None:
+                self._settled(job, time.time(), "ended-settling")
             self.overflowed += job.spill
             if self.overflow is not None:
                 self.swap_max_hits += job.swap_peak >= self.overflow - FULL_SLACK
@@ -224,6 +262,8 @@ class Parker:
                 job.swap_peak = max(job.swap_peak, swap)
             rise = job.swap.rise()
             spilling = spilling or (rise is not None and rise[0] >= SPILL_RATE)
+            if job.thawed_at is not None:
+                self._settling(job, now)
         if self.mode == "off":
             return
         parked = self._parked()
@@ -233,8 +273,49 @@ class Parker:
                 self._thaw(oldest, now, "thaw")
                 return
         due = spilling and pressed if self.mode == "freeze" else current > PARK_AT * self.limit
-        if due and not self.cap_reached and len(running) >= 2 and now - self.last_thaw >= SETTLE_S:
+        if (
+            due
+            and not self.cap_reached
+            and len(running) >= 2
+            and now - self.last_thaw >= THAW_GAP_S
+        ):
             self._park(max(running, key=lambda j: j.started), now)
+
+    def blocked_by(self) -> str | None:
+        """Why `starts_open` is clear: `parked`, `settling`, or None."""
+        with self.lock:
+            if self._parked():
+                return "parked"
+            if any(j.thawed_at is not None for j in self.jobs.values()):
+                return "settling"
+            return None
+
+    def _open_starts(self) -> None:
+        busy = self._parked() or any(j.thawed_at is not None for j in self.jobs.values())
+        if not busy:
+            self.starts_open.set()
+
+    def _settling(self, job: Job, now: float) -> None:
+        current = _read_int(job.cgroup / "memory.current") or 0
+        if job.last is not None and now - job.last[0] >= WINDOW_S:
+            dt = now - job.last[0]
+            weight = 1 - math.exp(-dt / SETTLE_TAU_S)
+            job.rate += weight * ((current - job.last[1]) / dt - job.rate)
+            job.last = (now, current)
+            calm = job.rate < max(SETTLE_FLOOR, SETTLE_SHARE * current)
+            job.calm_since = (job.calm_since or now) if calm else None
+        elif job.last is None:
+            job.last = (now, current)
+        if job.calm_since is not None and now - job.calm_since >= SETTLE_COOLDOWN_S:
+            self._settled(job, now, "settled")
+        elif now - (job.thawed_at or now) >= SETTLE_MAX_S:
+            self._settled(job, now, "settle-timeout")
+
+    def _settled(self, job: Job, now: float, why: str) -> None:
+        self._event(why, job, settle_s=now - (job.thawed_at or now))
+        job.thawed_at = job.calm_since = job.last = None
+        job.rate = 0.0
+        self._open_starts()
 
     def _parked(self) -> list[Job]:
         return sorted(
@@ -246,7 +327,8 @@ class Parker:
         if not _write(job.cgroup / "cgroup.freeze", "1"):
             return  # the job's scope is gone: it has just ended
         job.parked_at = now
-        self.none_parked.clear()
+        self.starts_open.clear()
+        job.thawed_at = job.calm_since = job.last = None
         job.parks += 1
         if self.overflow is not None:
             _write(job.cgroup / "memory.swap.max", "max")
@@ -254,8 +336,15 @@ class Parker:
         job.peak_others = 0
         swap0 = _swapped(job.cgroup)
         want = min(job.pre_park, self.cap_bytes - self.reclaimed)
-        if want > 0:
-            _write(job.cgroup / "memory.reclaim", str(want))
+        peers = [j for j in self.jobs.values() if j.parked_at is None]
+        braked = self._brake(job, peers, "peer-at-park")
+        t0 = time.time()
+        try:
+            if want > 0:
+                _write(job.cgroup / "memory.reclaim", str(want))
+        finally:
+            self._release(job, braked, "peer-after-reclaim")
+            self.brake_s += time.time() - t0
         after = _read_int(job.cgroup / "memory.current")
         reclaimed = max(0, job.pre_park - after) if after is not None else 0
         self.reclaimed += reclaimed
@@ -272,10 +361,51 @@ class Parker:
             self.cap_reached = True
             self._event("cap-reached", job)
 
+    def _brake(self, parked: Job, peers: list[Job], what: str) -> list[tuple[Job, str]]:
+        """Record each running peer, lift its swap limit and brake it with `memory.high`; the
+        peers braked, with the `memory.high` each had."""
+        braked = []
+        for peer in peers:
+            self._peer_event(what, parked, peer)
+            high = (peer.cgroup / "memory.high").read_text().strip() if peer.cgroup.exists() else ""
+            usage = _read_int(peer.cgroup / "memory.current")
+            if usage is None or not high:
+                continue
+            if self.overflow is not None:
+                _write(peer.cgroup / "memory.swap.max", "max")
+            _write(peer.cgroup / "memory.high", str(usage + BRAKE_BYTES))
+            braked.append((peer, high))
+        return braked
+
+    def _release(self, parked: Job, braked: list[tuple[Job, str]], what: str) -> None:
+        for peer, high in braked:
+            _write(peer.cgroup / "memory.high", high)
+            if self.overflow is not None:
+                _write(peer.cgroup / "memory.swap.max", str(self.overflow))
+            self._peer_event(what, parked, peer)
+
+    def _peer_event(self, what: str, parked: Job, peer: Job) -> None:
+        events = _read_kv(peer.cgroup / "memory.events")
+        swap_events = _read_kv(peer.cgroup / "memory.swap.events")
+        self._event(
+            what,
+            parked,
+            peer=peer.cgroup.name,
+            peer_current=_read_int(peer.cgroup / "memory.current"),
+            peer_swap=_read_int(peer.cgroup / "memory.swap.current"),
+            peer_max=events.get("max"),
+            peer_oom=events.get("oom"),
+            peer_oom_kill=events.get("oom_kill"),
+            peer_swap_max=swap_events.get("max"),
+            peer_swap_fail=swap_events.get("fail"),
+        )
+
     def _thaw(self, job: Job, now: float, why: str) -> None:
         if self.overflow is not None:
             _write(job.cgroup / "memory.swap.max", str(self.overflow))
         _write(job.cgroup / "cgroup.freeze", "0")
+        if self.settle and why != "thaw-at-end":
+            job.thawed_at = now  # before `_unparked`, so that the starts stay held
         self._unparked(job, now, why)
         job.low = _swapped(job.cgroup)
         job.swap.clear()
@@ -292,14 +422,16 @@ class Parker:
             spurious=spurious,
         )
         job.parked_at = None
-        if not self._parked():
-            self.none_parked.set()
+        self._open_starts()
 
     def thaw_all(self) -> None:
-        """Thaw every job this parker has parked."""
+        """Thaw every job this parker has parked, and open the starts."""
         with self.lock:
             for job in self._parked():
                 self._thaw(job, time.time(), "thaw-at-end")
+            for job in self.jobs.values():
+                job.thawed_at = None
+            self.starts_open.set()
 
     def _event(self, what: str, job: Job, **extra) -> None:
         self.events.append(
@@ -334,6 +466,9 @@ class Parker:
             "overflow_bytes": self.overflow,
             "overflowed_bytes": overflowed,
             "swap_max_hits": self.swap_max_hits if self.overflow is not None else None,
+            "brake_s": round(self.brake_s, 1),
+            "settled": sum(e["event"] == "settled" for e in self.events),
+            "settle_timeouts": sum(e["event"] == "settle-timeout" for e in self.events),
             "psi_trigger": self.psi_trigger,
             "wakeups": self.wakeups,
         }
