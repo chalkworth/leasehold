@@ -11,7 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from leasehold import weights
+from leasehold import estimate, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.facts import probe
 
@@ -96,7 +96,20 @@ def _print_outcomes(groups: list[dict]) -> None:
         print("no outcomes yet: what a contained command used is kept when its lease is released")
         return
     home = os.path.expanduser("~")
-    rows = [("RULE", "REPO", "RUNS", "PEAK P95", "PEAK MAX", "ANON MAX", "OOM", "HIGH", "CPUS")]
+    rows = [
+        (
+            "RULE",
+            "REPO",
+            "RUNS",
+            "PEAK P95",
+            "PEAK MAX",
+            "ANON MAX",
+            "OOM",
+            "HIGH",
+            "CPUS",
+            "LEARNED",
+        )
+    ]
     for g in groups:
         repo = g["repo"] or "-"
         if home != "~" and (repo == home or repo.startswith(home + "/")):
@@ -112,11 +125,21 @@ def _print_outcomes(groups: list[dict]) -> None:
                 str(g["oom_runs"]),
                 str(g["high_runs"]),
                 _cpus(g["parallelism"]),
+                _learned(g),
             )
         )
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         print("  ".join(c.ljust(w) for c, w in zip(r, widths, strict=True)).rstrip())
+
+
+def _learned(group: dict) -> str:
+    """A group's learned figure; `1/3 runs` while too few clean runs are known; `-` for none (no
+    rule, or a daemon from before learned memory)."""
+    if group.get("learned_bytes") is not None:
+        return _size(group["learned_bytes"])
+    runs = group.get("learned_runs")
+    return "-" if runs is None else f"{runs}/{estimate.TRUSTED_AFTER} runs"
 
 
 def _cpus(p: float | None) -> str:
@@ -202,7 +225,7 @@ def _ago(ts: float | None, now: float) -> str:
 
 
 def _print_leases(listing: dict, now: float) -> None:
-    rows = [("LEASE", "KIND", "POOL", "W", "USER", "SESSION", "EXPIRES", "STATE")]
+    rows = [("LEASE", "KIND", "POOL", "W", "USER", "SESSION", "EXPIRES", "MEMORY", "STATE")]
     for x in listing["leases"]:
         state = f"revoked: {x['revoke_reason']}" if x["revoked"] else "held"
         rows.append(_row(x, now, state))
@@ -225,8 +248,23 @@ def _row(x: dict, now: float, state: str) -> tuple[str, ...]:
         x["user"] or "-",
         x.get("session") or "-",
         _ago(x["expires_at"], now),
+        _counted(x),
         state,
     )
+
+
+def _counted(x: dict) -> str:
+    """The memory admission counts for a lease or queued item and where it comes from
+    (`2.1 GiB learned (7 runs)`, `4.0 GiB assumed, learned 2.1 GiB`); `-` when none is counted."""
+    counted = x.get("memory_counted_bytes")
+    if not counted:
+        return "-"
+    text = f"{_size(counted)} {x.get('memory_from') or 'declared'}"
+    if x.get("memory_from") == "learned":
+        return f"{text} ({x.get('learned_runs')} runs)"
+    if x.get("learned_bytes") is not None:
+        return f"{text}, learned {_size(x['learned_bytes'])}"
+    return text
 
 
 def _weight(x: dict) -> str:

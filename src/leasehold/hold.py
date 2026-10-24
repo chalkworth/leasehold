@@ -57,7 +57,17 @@ import sys
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, jobs, leasing, maintenance, shell, supervise, terminal, weights
+from leasehold import (
+    contain,
+    jobs,
+    leasing,
+    maintenance,
+    measure,
+    shell,
+    supervise,
+    terminal,
+    weights,
+)
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import (
     EXIT_BUSY,
@@ -276,6 +286,8 @@ def hold(
                 memory=memory,
                 max_weight=max_weight,
                 memory_per_slot=memory_per_slot,
+                rule=rule_key,
+                repo=measure.repository() if rule_key is not None else None,
             )
             if client is None:
                 code, answer = EXIT_UNAVAILABLE, {}
@@ -460,13 +472,15 @@ def _gib(size: int) -> str:
 
 def _counted(lease: leasing.Lease) -> int | None:
     """The memory the daemon counted for `lease` at its weight now: what it counted at the grant,
-    which is the declared total, or else a size per slot times the weight. None for a daemon
-    that does not say."""
+    which is the declared or learned total, or else a size per slot times the weight. None for a
+    daemon that does not say."""
     first = (lease._answer or {}).get("lease") or {}
     counted = first.get("memory_counted_bytes")
     if counted is None or not first.get("weight") or lease.weight is None:
         return None
-    if first.get("memory_bytes") is not None and first.get("memory_per_slot_bytes") is None:
+    if first.get("memory_from") == "learned" or (
+        first.get("memory_bytes") is not None and first.get("memory_per_slot_bytes") is None
+    ):
         return counted
     return counted * lease.weight // first["weight"]
 

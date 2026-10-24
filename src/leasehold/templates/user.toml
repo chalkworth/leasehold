@@ -48,6 +48,9 @@ hard_cpu = false         # true: also cap a command at its weight in CPUs
 budget = "auto"          # the machine's memory less `kept`; or a size such as "12g"
 kept = "25%"             # kept back for you: a share of the memory, or a size such as "4g"
 assumed_per_slot = "auto"
+# What a rule's past runs in a repository used, plus 15%, once 3 runs passed: "on" counts it
+# in place of the assumed size, "shadow" only shows it (leasehold leases, outcomes), "off".
+learn = "shadow"
 
 # While memory is short, what runs keeps running and new work starts only within the memory
 # measured free: none while pressure is high, then a little at a time as it eases. What waits

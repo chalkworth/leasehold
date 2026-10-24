@@ -29,7 +29,7 @@ layers =
     ledger
     elastic
     admission
-    model | discovery
+    model | discovery | estimate
     paths
 containers =
     leasehold
@@ -84,6 +84,7 @@ source_modules =
     leasehold.hooknotes
     leasehold.weights
     leasehold.measure
+    leasehold.estimate
 forbidden_modules =
     leasehold.admission
     leasehold.ledger
