@@ -796,11 +796,26 @@ a loop or script that runs `hold` (the shell still reports 130, or 131). Run any
 command gets a session of its own, and a command killed by a signal makes `hold` exit 128 + the
 signal.
 
-When the kernel's OOM killer ends a contained command, or a process in it, `hold` says so on
-stderr: the command's peak, the memory leasehold counted for it, and a `--memory` about 15%
-above the peak. That peak is at most what the command was let use before the kill, so declare
-at least that much. `hold` knows of the kill when the command's scope counted it, or when the
-command ended by SIGKILL while the machine counted one.
+When memory ended the command, the last line `hold` writes on stderr is the memory verdict.
+It starts with `leasehold:`, says the command was killed for memory and that this is not a test
+failure, and says what to do next. `hold` still exits with the command's own code (137 for
+SIGKILL), so a script reads the reason from that line and the code from the exit status. The
+PATH shims print the same line.
+
+```
+leasehold: the kernel's OOM killer ended pytest (peak 13.9 GiB) when the machine ran out of memory. This is not a test failure. Run it again only after the other heavy work has finished, with fewer workers.
+```
+
+The verdict is certain when the command's scope counted the OOM kill. It then names the
+`memory.max` above the command when one was set (a session slice, say), in place of the
+machine. A command that ended by SIGKILL while the machine counted an OOM kill gets a verdict
+that says "most likely", since the kill counted may have been another process's. This works
+contained or not, on Linux only for now: other systems get no verdict.
+
+For a contained command the OOM killer reached, the line before the verdict gives the
+command's peak, the memory leasehold counted for it, and a `--memory` about 15% above the peak.
+That peak is at most what the command was let use before the kill, so declare at least that
+much.
 
 ### Containment
 
@@ -1158,6 +1173,13 @@ any of its processes, and `Command.peak_bytes` is the most memory its scope used
 unknown). After `lease.run(argv)`, `lease.oom_killed` says the same of the command it ran. An
 uncontained command is never `oom_killed`.
 
+Once any command ends, `Command.memory` is the memory verdict on it, and `lease.memory` the
+one on the last command the lease ran: None when memory did not end it, as far as leasehold can
+tell, else an object with `kind` (`kernel`, or `agent_cap` for Claude Code's own memory
+limit), `certain`, `program`, `peak_bytes`, `limit_bytes`, `person` (what happened) and `agent`
+(that, and what to do next). Both texts are the line `hold` prints, and say "not a test
+failure".
+
 Whatever the command leaves in its group is stopped when it ends. Other keyword arguments go to
 `subprocess.Popen`. A command that cannot be started raises `NotStarted`.
 
@@ -1355,6 +1377,14 @@ command, in that session's turn, and waits up to `wait_s`; a light one goes stra
 The command is never rewritten, so Claude Code's permission rules apply to what the agent
 wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the lease back.
 
+- When a leased command ends with exit code 137 (SIGKILL) and the kernel's OOM killer ended a
+  process while it ran, `post` tells the agent, as context it reads with the tool's result,
+  that the command was most likely killed for memory and is not a test failure, and what to
+  do next. The person sees the same in the transcript. With `CLAUDE_CODE_TOOL_MEMORY_LIMIT`
+  set, the message names that limit:
+  `leasehold: pytest was most likely killed by Claude Code's tool memory limit (CLAUDE_CODE_TOOL_MEMORY_LIMIT=4G, shared by every command of this session). This is not a test failure. Run it alone, or raise the limit.`
+  It counts the machine's OOM kills (`/proc/vmstat`), so it says "most likely", and says
+  nothing on systems other than Linux.
 - Sub-agents run in their parent's session, so a session's agents share its turns.
 - A renewer keeps the lease while the command runs, watches the Claude Code process, and
   stops at the Bash call's own timeout plus a minute, so an interrupted call cannot hold slots.

@@ -50,3 +50,21 @@ def pytest_sessionfinish(session, exitstatus):
     empty selection is not a failure."""
     if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED:
         session.exitstatus = pytest.ExitCode.OK
+
+
+@pytest.fixture
+def oom_kills(tmp_path, monkeypatch):
+    """The machine's count of OOM kills, as this process's `leasehold.host` reads it: a test
+    sets it (`oom_kills(3)`)."""
+    from leasehold import host
+    from leasehold.host.linux import Linux
+
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(host, "current", lambda: Linux(proc=proc))
+
+    def set_count(count: int) -> None:
+        (proc / "vmstat").write_text(f"pgfault 1\noom_kill {count}\n")
+
+    set_count(0)
+    return set_count

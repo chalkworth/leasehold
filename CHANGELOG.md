@@ -9,6 +9,24 @@ here.
 
 ### Added
 
+- The memory verdict. When memory ended a command, leasehold says so in one line that starts
+  with `leasehold:`, says "This is not a test failure" (or "most likely ... not a test
+  failure"), and says what to do next. The command keeps its own exit code. `hold` and the
+  PATH shims print the line last on stderr, for contained and uncontained commands alike. It
+  is certain when the command's scope counted the OOM kill, and then names the `memory.max`
+  above the command when there is one. It says "most likely" when the command ended by
+  SIGKILL while the machine counted an OOM kill.
+- The Claude Code hook's `post` returns the verdict for a leased command that ended with exit
+  code 137 while the machine counted an OOM kill: as `additionalContext`, which the agent
+  reads, and as a `systemMessage` for the person. With `CLAUDE_CODE_TOOL_MEMORY_LIMIT` set,
+  it names Claude Code's own memory limit. `pre` keeps the machine's OOM kill count in its
+  note for `post` to compare.
+- `Command.memory` and `Lease.memory` in the Python API: the verdict on the command (an object
+  with `kind`, `certain`, `program`, `peak_bytes`, `limit_bytes`, `person` and `agent`), or
+  None.
+- `leasehold.host`, the one place that asks the operating system how a command ended. Linux
+  reads the kernel's OOM kill count; other systems give no verdict yet. The new
+  `leasehold.verdict` holds the wording.
 - `leasehold doctor` warns when this shell has a negative `oom_score_adj`. Leased commands are
   reset to 0, but commands that are not leased keep the value, so the kernel spares them under
   memory pressure.
@@ -79,6 +97,9 @@ here.
 
 ### Changed
 
+- `hold`'s line about an OOM kill no longer opens with "the kernel's OOM killer ended this
+  command, or a process in it": it now gives only the peak, the memory counted and the
+  suggested `--memory`, and the verdict line follows it.
 - A command that `hold`, `run`, the shims or the SDK start in a scope has its `oom_score_adj`
   raised to 0 when it inherited a lower value, so a memory limit on its scope can end it. A
   value of 0 or more is left alone, and nothing is ever lowered. Where scopes are not used, the

@@ -29,9 +29,11 @@ Where the daemon allows it and the caller runs in the user's own session, the co
 in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it runs as is. What a
 contained command used is sent with the release (`leasehold.measure`), filed under the
 `[commands]` rule that sized it when `hold` was given no weight.
-When the kernel's OOM killer ended a contained command, or a process in it, `hold` says so
-on stderr, with its peak, the memory leasehold counted for it and a `--memory` that would
-count more than the peak (`oom_line`).
+When memory ended the command, `hold` says so as the last line on stderr, in the memory
+verdict's words (`leasehold.verdict`): `leasehold: ... This is not a test failure.` and what
+to do next. Its exit code stays the command's own. For a contained command the OOM killer
+reached, the line before it gives the peak, the memory leasehold counted for it and a
+`--memory` that would count more than the peak (`oom_line`).
 
 A lease asked for as a range (`--weight 2-4`) is sized to the weight it was granted: its job
 and thread counts, jobserver, `LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot,
@@ -444,8 +446,13 @@ def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
                     if tty:
                         stack.enter_context(foreground(command.pid))
                     code = command.wait()
-                    if command.oom_killed:
-                        _say(oom_line(command.peak_bytes, _counted(lease)))
+                    if command.oom_killed and (
+                        line := oom_line(command.peak_bytes, _counted(lease))
+                    ):
+                        _say(line)
+                    if command.memory is not None:
+                        sys.stderr.write(command.memory.agent + "\n")
+                        sys.stderr.flush()
     finally:
         lease.release()
     if interrupted is not None:
@@ -483,11 +490,12 @@ def _counted(lease: leasing.Lease) -> int | None:
     return counted * lease.weight // first["weight"]
 
 
-def oom_line(peak: int | None, counted: int | None) -> str:
-    """What `hold` says when the kernel's OOM killer ended a process of its command: the
-    command's peak, the memory leasehold counted for it (0: none, as without `[memory]`;
-    None: unknown), and a `--memory` above the peak (`suggested_memory`). The peak is at most what
-    the command was let use before the kill, so that size is a least."""
+def oom_line(peak: int | None, counted: int | None) -> str | None:
+    """What `hold` says, before the memory verdict, when the kernel's OOM killer ended a process
+    of its command: the command's peak, the memory leasehold counted for it (0: none, as without
+    `[memory]`; None: unknown), and a `--memory` above the peak (`suggested_memory`). The peak
+    is at most what the command was let use before the kill, so that size is a least. None
+    when there is nothing to say."""
     said = []
     if peak is not None:
         said.append(f"its peak was {_gib(peak)}")
@@ -495,9 +503,9 @@ def oom_line(peak: int | None, counted: int | None) -> str:
         said.append(f"leasehold counted {_gib(counted)} for it")
     elif counted == 0:
         said.append("leasehold counted no memory for it")
-    line = "the kernel's OOM killer ended this command, or a process in it"
-    if said:
-        line += ": " + ", and ".join(said)
+    if not said:
+        return None
+    line = ", and ".join(said)
     if peak is not None:
         line += (
             f". Declare at least --memory {suggested_memory(peak)} (or a rule's `memory`) so "
