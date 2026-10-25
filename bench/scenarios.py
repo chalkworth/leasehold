@@ -64,6 +64,7 @@ class Job:
     #: arm's `declare`, else nothing).
     declare: float | None = None
     heavy: bool = True
+    cache: float = 0.0  # MiB of a file the job keeps reading (page cache)
 
 
 @dataclass
@@ -179,6 +180,14 @@ def scenarios(seed: int = 0) -> dict[str, Scenario]:
                 restart_at=8.0,
             ),
             S(
+                "cache-spill",
+                "Two jobs whose anonymous memory fits but whose page cache does not: does the "
+                "net park for memory the kernel could drop?",
+                cap=1536, swap=1024,
+                jobs=[Job(0, 600, ramp=2, hold=20, cache=500), Job(2, 600, ramp=2, hold=20,
+                      cache=500)],
+            ),
+            S(
                 "mix",
                 "Builds and tests: heavy jobs of 0.5 to 1.1 GiB (undeclared), light ones, over 90 "
                 "s, on a 2 GiB limit.",
@@ -276,6 +285,17 @@ def _kv(path: Path) -> dict[str, int]:
 
 def _vmstat() -> dict[str, int]:
     return _kv(Path("/proc/vmstat"))
+
+
+def _cache_file(mib: float) -> Path:
+    """A file of `mib` MiB for a job to read, made once and kept for later runs."""
+    path = Path.home() / ".cache" / "lhscn" / f"cache-{round(mib)}m.bin"
+    if not path.exists() or path.stat().st_size != round(mib) * MIB:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            for _ in range(round(mib)):
+                f.write(os.urandom(MIB))
+    return path
 
 
 def _cli() -> list[str]:
@@ -427,6 +447,8 @@ class Runner:
             cmd.append("--shared")
         if job.write:
             cmd.append("--write")
+        if job.cache:
+            cmd += ["--cache-file", str(_cache_file(job.cache * s))]
         if job.late:
             cmd += ["--late", str(int(job.late * s * MIB)), "--late-at", str(job.late_at)]
         weight = int(self.arm.get("weight", job.weight))

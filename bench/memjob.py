@@ -3,7 +3,7 @@ does not compress (so RAM-backed swap such as zram holds it page for page), then
 it for a set time and exits.
 
     memjob.py --size BYTES [--ramp S] [--hold S] [--late BYTES --late-at S]
-              [--workers N] [--shared] [--write]
+              [--workers N] [--shared] [--write] [--cache-file PATH]
 
 * `--ramp S`: the memory grows evenly over S seconds (0: at once).
 * `--hold S`: after the ramp, the job passes over all its memory again and again for S seconds:
@@ -13,6 +13,9 @@ it for a set time and exits.
   the memory. With `--shared` the first process grows all of it and forks N workers that each
   touch their own part of the one mapping: the other processes' page tables keep a swapped page's
   slot, as forked test workers do.
+
+* `--cache-file PATH`: the job also reads PATH again and again once full, so the file's pages
+  sit in the page cache, charged to its cgroup, as a build's sources and objects do.
 
 It prints one JSON line when it is full and one when it ends, and exits 0; if a worker dies (the
 OOM killer), it kills the others and exits 137.
@@ -27,6 +30,7 @@ import mmap
 import os
 import signal
 import sys
+import threading
 import time
 
 PAGE = mmap.PAGESIZE
@@ -84,6 +88,14 @@ def _worker(args, size: int, mem: mmap.mmap | None, lo: int, hi: int, start: flo
         _touch(late, 0, len(late), until, args.write)
 
 
+def _read_forever(path: str) -> None:
+    """Read `path` over and over: its pages stay in the page cache, charged to this cgroup."""
+    while True:
+        with open(path, "rb") as f:
+            while f.read(CHUNK):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--size", type=int, required=True)
@@ -94,7 +106,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--shared", action="store_true")
     p.add_argument("--write", action="store_true")
+    p.add_argument("--cache-file", help="a file the first process reads again and again")
     args = p.parse_args(argv)
+    reader = None
+    if args.cache_file:
+        reader = threading.Thread(target=_read_forever, args=(args.cache_file,), daemon=True)
     with contextlib.suppress(OSError), open("/proc/self/oom_score_adj", "w") as f:
         f.write("500")
     start = time.monotonic()
@@ -127,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
         pids.append(pid)
     if mem is None:
         time.sleep(max(0.0, start + args.ramp - time.monotonic()))
+    if reader is not None:
+        reader.start()
     _say(event="full", size=size)
     code = 0
     for _ in pids:
