@@ -27,7 +27,7 @@ from support import (
 )
 
 import leasehold
-from leasehold import host
+from leasehold import claude_code, host
 from leasehold.agent import AcquireRequest, MachineAgent
 from leasehold.client import ApiError, Client
 from leasehold.host.posix import Posix
@@ -509,8 +509,14 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
             assert why is None or why in watchdog["held"], n
             if n == 1:
                 assert client.renew(lid)["paused"] is True
-                notice = tmp_path / f"leasehold-hooks-{os.getuid()}" / "notice.cc-mine"
-                assert "has been paused" in notice.read_text()
+                # The session's next hook call passes the notice on to the agent, once.
+                reply = claude_code.Reply()
+                claude_code.tell({"session_id": "mine"}, os.environ, reply, "pre")
+                told = reply.output["hookSpecificOutput"]["additionalContext"]
+                assert "has been paused" in told and "do not start it again" in told
+                again = claude_code.Reply()
+                claude_code.tell({"session_id": "mine"}, os.environ, again, "pre")
+                assert again.output is None
                 waiting = client.acquire(kind="work", weight=1, ttl_s=60, wait_s=0)
                 assert waiting["status"] == "queued"
                 blocked = waiting["blocked"]

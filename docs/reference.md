@@ -656,7 +656,7 @@ an example machine. An unknown key is an error.
 | `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again; at least 1 |
 | `[elastic] headroom` | `"keep"` | how much of the pools' and the machine's headroom an [elastic lease](#elastic-leases) leaves free as it grows: `"keep"` all of it, `"leave-one"` one slot, `"use"` none |
 | `[watchdog] agents` | `["claude", "codex", "gemini", "cursor-agent", "aider"]` | the program names your own daemon [watches as sessions](#watched-sessions) without being asked; `[]` for none |
-| `[watchdog]` | `mode = "watch"` | see [The watchdog](#the-watchdog): `mode` (`"off"` or `"watch"`), `act_at` (`"critical"`), `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`), `choose_discovered` (false), `protect` (`[]`) |
+| `[watchdog]` | `mode = "watch"` (`init` writes `"on"`) | see [The watchdog](#the-watchdog): `mode` (`"off"`, `"watch"` or `"on"`), `act_at` (`"critical"`), `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`), `max_pause_s` (900), `choose_discovered` (false), `protect` (`[]`). A `[memory_net]` table is a config error |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
 
 The ceiling clamps the pools: a pool's `max` is clamped to what the pool could ever hold, the
@@ -1468,10 +1468,12 @@ has `how` set to `none` and a `reason`, and its footprint is null, so it never l
 
 ### The watchdog
 
-Your own daemon judges how short of memory the machine is, and works out what it would do
-about it. In this release it only watches: `[watchdog] mode = "watch"` (the default) decides and
-reports, and holds, pauses or stops nothing. `mode = "off"` turns the judging off; sessions are
-still watched.
+Your own daemon judges how short of memory the machine is and acts on it, so that the machine
+never freezes. With `[watchdog] mode = "on"` it pauses the newest heavy work an agent started,
+stops it if pausing does not free enough, and tells the agent. `mode = "watch"` decides and
+reports what it would do, and holds, pauses or stops nothing. `mode = "off"` turns the judging
+off; sessions are still watched. `leasehold init` writes `mode = "on"`; a config with no
+`[watchdog]` table gets `"watch"`.
 
 Available memory counts only once swap is nearly full: when there is no swap, or less swap free
 than the larger of 1 GiB and 10% of the swap. While the kernel swaps, it keeps available memory
@@ -1485,11 +1487,12 @@ room the stall share is the signal. The level is one of three:
 - `warn`: available memory under `hold_below` (3 GiB) while it counts.
 - `ok`: anything else.
 
-At `warn` and above the watchdog would hold new heavy work and touch nothing that runs: `would`
-is `{"action": "hold"}`. At `act_at` and above (`critical` by default) it would also pause a
-tree: `would` has `action` `pause` and the tree. In watch mode it does neither, and the events
-it would send carry `would: true`: `held` once when a hold would begin, `paused` once for each
-new choice of tree, and `runaway` when a tree is first found running away.
+At `act_at` and above (`critical` by default) the watchdog acts: it holds new heavy work and
+pauses a tree. `would` says what it would do now: `action` `pause` and the tree, or
+`{"action": "hold"}` when it has no tree to choose. With `act_at = "warn"` it also holds new
+heavy work at `warn`, and pauses there. In watch mode the events it would send carry
+`would: true`: `held` once when a hold would begin, `paused` once for each new choice of tree,
+and `runaway` when a tree is first found running away.
 
 A tree is one of a session's trees (see [Watched sessions](#watched-sessions)). The choice, in
 order:
@@ -1519,21 +1522,21 @@ Some trees are never chosen:
 
 ```toml
 [watchdog]
-mode = "watch"            # "off", or "watch": decide and report, never act
-act_at = "critical"       # "warn" or "critical": the least level at which it would pause
+mode = "on"               # "off", "watch" (decide and report, never act) or "on"
+act_at = "critical"       # "warn" or "critical": the least level at which it holds and pauses
 critical_below = "2g"     # critical under this much available memory, once it counts
 hold_below = "3g"         # warn (hold new heavy work) under this much, once it counts
 min_size = "auto"         # the larger of 256 MiB and 2% of memory: smaller trees are never chosen
 choose_discovered = false
 protect = []              # regular expressions searched for in a tree's command line
+max_pause_s = 900         # a tree paused this long is stopped (at least 10)
 ```
 
 `critical_below` must be under `hold_below`. The sizes are absolute, not shares of memory: what
 decides a freeze is the file cache the machine needs to keep, plus the fall in available memory
 while the watchdog reacts, and neither grows with RAM. The defaults come from a simulation of
-the measured profiles of real builds and test runs. They are model predictions, not
-measurements, and watch mode is how they are checked on real machines before the watchdog
-acts.
+the measured profiles of real builds and test runs, and real runs in a 16 GiB VM confirmed
+that pausing at `critical` and stopping after 5 seconds keeps such a machine responsive.
 
 The daemon reads the machine's memory every 2 seconds while memory is plentiful (level `ok`,
 swap room or at least twice `hold_below` available, and under 1% of the time stalled), every
@@ -1541,7 +1544,58 @@ half second when it is nearer, and four times a second while the level is not `o
 are read every 2 seconds whatever the level; the watchdog adds no scan of its own.
 
 The machine's daemon has no watchdog. Where leasehold cannot read the machine's memory (macOS
-for now), the level is null and the reason says the watchdog cannot see memory there.
+for now), the level is null, the reason says the watchdog cannot see memory there, and it never
+acts.
+
+#### What it does when it acts
+
+With `mode = "on"`:
+
+- It pauses the tree first in line (the kernel group's freezer, or SIGSTOP to each
+  of its processes), then the next one every 2 seconds, but only while available memory is
+  still falling. A paused tree's leases are kept alive for it, and a renewal of one answers
+  `paused: true`.
+- Once the level has been `critical` for 5 seconds, counted from the start of the
+  episode or from the last stop, it kills the newest paused tree, a runaway first, with
+  SIGKILL. A paused runaway, or a paused tree over a quarter of memory, is killed 5 seconds
+  after its pause whatever the level. A tree paused longer than `max_pause_s` (900) is killed
+  too.
+- Once the level has been `ok` for 10 seconds, with room for the tree to grow
+  again, it lets the oldest paused tree run. New heavy work then waits until that tree ends.
+- While a tree is paused, or has run again and not ended, or the level is at
+  `act_at`, a new request that counts memory waits, and its `blocked` says
+  `the watchdog holds new work: <why>`.
+
+It never acts on the agent process, on a tree of only leasehold's own processes, or on anything
+outside a session. A session found by name is only reported unless `choose_discovered = true`.
+
+A command it stopped keeps its own exit code (137, or -9 from the Python API). Its memory
+verdict (`Command.memory`, the last line `hold` and the PATH shims print, and the Claude Code
+hook's `post`) has `kind` `leasehold` and a `watchdog` field: `why` (`critical`, `runaway`,
+`large` or `max_pause`), `runaway`, `rerun` and `paused_s`. The line says that leasehold's
+watchdog stopped the command to keep the machine responsive, and that this is not a test
+failure. A renewal of the command's lease answers the same object as `stopped`.
+
+When the command ran under a `[commands]` rule and was not a runaway, the next request from the
+same session under the same rule runs alone: it waits until no other lease is held on the
+machine, and its `blocked` says so. `hold` and the PATH shims run such a command again once, on
+their own, under a built-in rule. They never do for a runaway, for a rule in your config, or for
+`cargo`, `bazel`, `docker`, `podman`, `npm`, `pnpm` and `yarn`, which may leave work half done.
+The Python API does not run a command again.
+
+The agent hears of it once, in one line, at its next Bash tool call: the daemon leaves a notice
+for a session its hooks registered, and the Claude Code hook passes it on as
+`additionalContext`, and as a `systemMessage` for the person. A pause says the command continues
+on its own and is not to be started again; a stop says why and whether to run it again.
+`leasehold status` gives the reason new work waits (`watchdog.held`), and `leasehold top` shows
+`paused`, `resumed` and `stopped` events.
+
+The daemon keeps the trees it paused in `watchdog.json` beside the ledger. A daemon that stops
+lets them run first, and one that starts lets any it finds there run, so no pause outlives the
+daemon that made it. While it acts, `leasehold serve` locks the daemon's memory in RAM
+(`mlockall`) and raises its priority, where the user may, so that it still runs when memory is
+short. `leasehold doctor` warns in a `watchdog` check when the user's locked-memory limit
+(`ulimit -l`) is too low for that.
 
 ### The Claude Code plugin
 
@@ -1855,10 +1909,11 @@ program), `revoked`, `resized` (an elastic lease's size changed, from `previous_
 [watched session](#watched-sessions), with its `session`, `source`, `user`, `agent` and
 `agent_pid`; an end has a `reason`: `unregistered`, `agent ended`, or `joined` when a registered
 session took in an agent that was found by name), and from [the watchdog](#the-watchdog),
-`held` (new heavy work would begin to wait, with `level` and `reason`), `paused` (the tree it
-would pause, with `level`, `reason` and the tree's fields as in `would`) and `runaway` (a tree
-newly found running away). Each has `would`, which is true while the
-watchdog only decides and does nothing. A restarted daemon numbers them afresh. An event about a lease
+`held` (new heavy work begins to wait, with `level` and `reason`), `paused` (the tree it
+pauses, with `level`, `reason` and the tree's fields as in `would`), `resumed` (a paused tree
+runs again, with `paused_s`), `stopped` (it killed a tree, with `stopped_for`, `runaway` and
+`paused_s`) and `runaway` (a tree newly found running away). Each has `would`, which is true
+while the watchdog only decides and does nothing. A restarted daemon numbers them afresh. An event about a lease
 or a place in line carries its `weight` (a lease's size, a waiting item's least),
 `min_weight` and `max_weight`.
 
@@ -1911,17 +1966,20 @@ when a field is removed or changes meaning:
   `processes`, null until first read), `footprint_bytes` (the anonymous memory of everything
   the agent started, in RAM or swap; null when it cannot be read), `processes` (not counting
   the agent), `trees`, and `largest` (`pid`, `name` and `bytes` of the process with the most).
-  It also has [the watchdog](#the-watchdog)'s decision: `mode` (`watch` or `off`), `act_at`,
+  It also has [the watchdog](#the-watchdog)'s decision: `mode` (`on`, `watch` or `off`), `act_at`,
   `level` (`ok`, `warn`, `critical`, or null when memory cannot be read or the watchdog is off),
   `reason`, `available_bytes`, `swap_free_bytes` (null without swap), `available_counts`
   (whether available memory counts, with swap nearly full or none), `stall_recent` (the
   percentage of the last 2 seconds every task stalled on memory), `limits` (`critical_below`,
-  `hold_below`, `min_size` and `large`, a quarter of memory, in bytes), `how` (`pressure` and
+  `hold_below`, `min_size` and `large`, a quarter of memory, in bytes, and `max_pause_s`), `how` (`pressure` and
   `footprint`: how each is read, or `none`), `candidates` (the trees it could choose),
   `passed_over` (how many it may not choose, by why: `agent`, `leasehold`, `discovered`,
   `protected`, `started with its agent`, `small`), `victim` (the tree first in line whenever
-  the level is not `ok`) and `would` (what it would do now: null at `ok`, `{"action": "hold"}`,
-  or `action` `pause` with the tree). A tree has `session`, `pid`, `cmd`, `footprint_bytes`,
+  the level is not `ok`), `would` (what it would do now: null below `act_at`,
+  `{"action": "hold"}`, or `action` `pause` with the tree), `held` (why new heavy work waits
+  now, or null; always null in watch mode), `paused` (the trees it paused, or let run and that
+  have not ended, oldest first, each with `paused_s` and `resumed`) and `stopped` (the last 20
+  trees it killed, each with `stopped_for` and `paused_s`). A tree has `session`, `pid`, `cmd`, `footprint_bytes`,
   `expected_bytes` (what its leases declared or learned, or null), `growth_bytes_per_s`,
   `started`, `why` (`runaway`, `large` or `newest`), `runaway` and `spared` (the pids of
   leasehold's own processes in it);

@@ -189,6 +189,8 @@ def _hook(args, ctx) -> int:
             )
         else:
             reply = claude_code.post(event, ctx.client(), env=os.environ)
+        if args.event in ("pre", "post"):
+            claude_code.tell(event, os.environ, reply, args.event)
     except SystemExit:
         return 0  # no daemon found: the command runs as if leasehold were not installed
     except Exception as exc:  # noqa: BLE001 - a hook must never block the agent's work

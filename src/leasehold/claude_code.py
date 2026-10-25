@@ -156,6 +156,23 @@ def _message(text: str) -> dict:
     return {"systemMessage": f"leasehold: {text}"}
 
 
+def tell(event: Mapping, env: Mapping[str, str], reply: Reply, stage: str) -> None:
+    """Add what the daemon left for this session (`hooknotes.notices`) to `reply`: the agent
+    reads it as context, and the user sees it in the transcript."""
+    said = hooknotes.notices(hooknotes.state_dir(env, create=False), session(event))
+    if not said:
+        return
+    text = " ".join(said)
+    out = reply.output or {}
+    message = " ".join(x for x in (out.get("systemMessage"), text) if x)
+    specific = dict(out.get("hookSpecificOutput") or {})
+    specific["hookEventName"] = "PreToolUse" if stage == "pre" else "PostToolUse"
+    specific["additionalContext"] = " ".join(
+        x for x in (specific.get("additionalContext"), text) if x
+    )
+    reply.output = out | {"systemMessage": message, "hookSpecificOutput": specific}
+
+
 def _threads(
     settings: shell.Served, command: str, event: Mapping, env: Mapping[str, str]
 ) -> int | str | None:
