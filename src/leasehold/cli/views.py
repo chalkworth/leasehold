@@ -134,10 +134,10 @@ def _print_outcomes(groups: list[dict]) -> None:
 
 
 def _learned(group: dict) -> str:
-    """A group's learned figure; `1/3 runs` while too few clean runs are known; `-` for none (no
-    rule, or a daemon from before learned memory)."""
-    if group.get("learned_bytes") is not None:
-        return _size(group["learned_bytes"])
+    """A group's learned figure a slot; `1/3 runs` while too few clean runs are known; `-` for
+    none (no rule, or a daemon from before learned memory)."""
+    if group.get("learned_per_slot_bytes") is not None:
+        return f"{_size(group['learned_per_slot_bytes'])}/slot"
     runs = group.get("learned_runs")
     return "-" if runs is None else f"{runs}/{estimate.TRUSTED_AFTER} runs"
 
@@ -255,15 +255,16 @@ def _row(x: dict, now: float, state: str) -> tuple[str, ...]:
 
 def _counted(x: dict) -> str:
     """The memory admission counts for a lease or queued item and where it comes from
-    (`2.1 GiB learned (7 runs)`, `4.0 GiB assumed, learned 2.1 GiB`); `-` when none is counted."""
+    (`2.1 GiB learned (7 runs)`, `4.0 GiB assumed, learned 1.1 GiB/slot`); `-` when none is
+    counted."""
     counted = x.get("memory_counted_bytes")
     if not counted:
         return "-"
     text = f"{_size(counted)} {x.get('memory_from') or 'declared'}"
     if x.get("memory_from") == "learned":
         return f"{text} ({x.get('learned_runs')} runs)"
-    if x.get("learned_bytes") is not None:
-        return f"{text}, learned {_size(x['learned_bytes'])}"
+    if x.get("learned_per_slot_bytes") is not None:
+        return f"{text}, learned {_size(x['learned_per_slot_bytes'])}/slot"
     return text
 
 
