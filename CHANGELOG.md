@@ -27,6 +27,9 @@ here.
 - `leasehold.host`, the one place that asks the operating system how a command ended. Linux
   reads the kernel's OOM kill count; other systems give no verdict yet. The new
   `leasehold.verdict` holds the wording.
+- `leasehold doctor` warns when this shell has a negative `oom_score_adj`. Leased commands are
+  reset to 0, but commands that are not leased keep the value, so the kernel spares them under
+  memory pressure.
 - A memory net for your own daemon, off by default: `[memory_net] mode = "park"`. When the
   contained commands under one memory limit spill into swap while the limit is near full and
   stalls on memory, the daemon parks the youngest heavy command. It freezes the command's scope
@@ -121,11 +124,33 @@ here.
 - `hold`'s line about an OOM kill no longer opens with "the kernel's OOM killer ended this
   command, or a process in it": it now gives only the peak, the memory counted and the
   suggested `--memory`, and the verdict line follows it.
+- `hold`'s line about an OOM kill no longer opens with "the kernel's OOM killer ended this
+  command, or a process in it": it now gives only the peak, the memory counted and the
+  suggested `--memory`, and the verdict line follows it.
+- A command that `hold`, `run`, the shims or the SDK start in a scope has its `oom_score_adj`
+  raised to 0 when it inherited a lower value, so a memory limit on its scope can end it. A
+  value of 0 or more is left alone, and nothing is ever lowered. Where scopes are not used, the
+  command keeps what it inherited.
 - A lease that counts a learned figure gives `memory_bytes` and `memory_per_slot_bytes` null in
   the status object, since it declared nothing, and its outcome records no declared memory. A
   `blocked` reason names the figure as `weight 2 at its learned 1.2 GiB a slot`.
 - A command run through a shim now files its outcome under its rule, as `hold` does; before,
   its rule was null.
+
+### Fixed
+
+- A directory's empty or stray `.git` no longer counts as a repository. Outcomes, and the
+  memory learned from them, are filed under the work tree git would find: the nearest
+  directory up whose `.git` is a repository (it holds a `HEAD`) or a `gitdir:` file. Before,
+  every project under a directory with an empty `.git` shared one repository.
+- A request that could never be granted is refused with `code: "never_grantable"`. It had no
+  code, so `Refused.code` was None.
+- The pool message in a refusal and in a config error now reads `more than the max 3 of pool
+  'background'`, where it printed `pool 'background''s max 3`.
+- The GitHub runner hooks' default weight is the range `1-4`, not 4. The `external` pool of
+  the config `leasehold setup` writes on 8 CPUs refused 4, so the job ran without a lease.
+  `LEASEHOLD_RUNNER_WEIGHT` takes a number or a range, and `ephemeral.sh` has the same default.
+  `job-completed.sh` says when the job held no lease, where it said it had released one.
 
 ## [0.5.0]
 

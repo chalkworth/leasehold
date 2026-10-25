@@ -11,7 +11,8 @@
 # with a loud line in the job's log and the journal. CI never breaks because leasehold is down.
 #
 # Settings (environment, e.g. the runner's .env):
-#   LEASEHOLD_RUNNER_WEIGHT    the lease's weight in slots (default 4)
+#   LEASEHOLD_RUNNER_WEIGHT    the lease's weight in slots, or a range MIN-MAX (default 1-4: it
+#                              waits for one slot and takes up to four, so a small pool takes it)
 #   LEASEHOLD_RUNNER_MAX_HOLD  the longest the lease is renewed, seconds (default 21600)
 #   LEASEHOLD                  the leasehold command (default: leasehold on PATH)
 #   LEASEHOLD_SOCKET           the daemon's socket (default: the machine config's)
@@ -20,7 +21,7 @@ set -u
 # shellcheck source=common.sh
 . "$(dirname "$0")/common.sh"
 
-weight=${LEASEHOLD_RUNNER_WEIGHT:-4}
+weight=${LEASEHOLD_RUNNER_WEIGHT:-1-4}
 max_hold=${LEASEHOLD_RUNNER_MAX_HOLD:-21600}
 id=$(lease_id)
 
