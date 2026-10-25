@@ -332,6 +332,8 @@ class Setup:
         self.env = clean_env()
         self.leasehold = self.cond.leasehold
         self.greedy = self.cond.greedy
+        self.watching = threading.Event()
+        self.watcher: threading.Thread | None = None
 
     def start(self) -> None:
         caps = [f"MemoryMax={self.spec['cap_bytes']}", f"MemorySwapMax={self.spec['swap_bytes']}"]
@@ -403,9 +405,30 @@ class Setup:
                 check=False,
             )
             if ok.returncode == 0:
+                self.watcher = threading.Thread(target=self._watch_events, daemon=True)
+                self.watcher.start()
                 return
             time.sleep(0.2)
         raise SystemExit("the benchmark's leasehold daemon did not start; see daemon.log")
+
+    def _watch_events(self) -> None:
+        """The daemon's events (`GET /v1/events`: grants, releases, parks and resumes, each
+        with its time) as they happen, one JSON object a line in `events.jsonl`."""
+        from leasehold.client import Client
+
+        since = 0
+        with (self.workdir / "events.jsonl").open("w") as out:
+            while not self.watching.is_set():
+                try:
+                    got = Client(self.sock, timeout=2).events(since)
+                except Exception:  # noqa: BLE001 -- the daemon is stopping, or busy
+                    self.watching.wait(0.5)
+                    continue
+                for event in got.get("events", []):
+                    out.write(json.dumps(event) + "\n")
+                out.flush()
+                since = got.get("next", since)
+                self.watching.wait(0.2)
 
     @property
     def sock(self) -> str:
@@ -478,6 +501,10 @@ class Setup:
     def stop(self) -> None:
         if self.daemon is not None:
             self._keep_net()
+            time.sleep(0.5)  # the last events
+            self.watching.set()
+            if self.watcher is not None:
+                self.watcher.join(5)
             self.daemon.terminate()
             try:
                 self.daemon.wait(15)
