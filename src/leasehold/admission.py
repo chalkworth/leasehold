@@ -197,7 +197,8 @@ class AdmissionPolicy:
     #: that counts memory there starts (nothing at all on a host with no budget).
     memory_held: Mapping[str, str] = field(default_factory=dict, hash=False)
     #: Waiting items that run alone (a command the watchdog stopped, run again): admitted only
-    #: once their host holds no lease outside the observed pools.
+    #: once their host holds no lease outside the observed pools, and nothing else is admitted
+    #: on that host in the same decision.
     alone: frozenset[ItemKey] = frozenset()
 
     @classmethod
@@ -1007,6 +1008,7 @@ def _admit_least(
     admitted (the one blocking the pool, and those waiting for the memory allowance)."""
     admits: list[Waiting] = []
     stopped: dict[str, list[Waiting]] = {}
+    alone_hosts: set[str] = set()
     drains = draining(state, policy)
     taken = {h.host for h in state.held if h.whole}
     # Whole items go in once their host is empty, below; what waits behind one, or on a host one
@@ -1033,6 +1035,9 @@ def _admit_least(
                 continue
             session = _next_session(line[user], tally, pool, user)
             head = line[user][session][0]
+            host = policy.pools[pool].host
+            if host in alone_hosts:
+                break  # an alone item already admitted here this decision has its host
             if (head.key in policy.alone and _busy(state, policy, admits, pool)) or not fits(
                 tally, policy, pool, head.weight, head.memory, head.memory_per_slot
             ):
@@ -1044,13 +1049,14 @@ def _admit_least(
                     continue
                 break  # no backfill around the item whose turn it is
             line[user][session].pop(0)
-            host = policy.pools[pool].host
             counted = policy.counted(host, head.weight, head.memory, head.memory_per_slot)
             tally.add(pool, host, user, session, head.weight, counted)
             if counted:
                 tally.fresh_memory[host] = tally.fresh_memory.get(host, 0) + counted
             tally.serve(pool, user, session)
             admits.append(head)
+            if head.key in policy.alone:
+                alone_hosts.add(host)
     for host, first in drains.items():
         busy = any(h.host == host for h in state.held) or any(
             policy.pools[a.pool].host == host for a in admits

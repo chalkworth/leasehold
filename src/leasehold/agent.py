@@ -509,6 +509,9 @@ class MachineAgent:
     # --- decisions -----------------------------------------------------------------------------
 
     def policy(self) -> AdmissionPolicy:
+        with self._watchdog_lock:
+            held = self._held
+            alone = frozenset(self._alone_items)
         closed = frozenset() if self.verdict.eligible and not self._lend_off else self.lend_pools
         guarding = self.config.guarded and self.guard.on
         counting = self.budget is not None
@@ -525,9 +528,9 @@ class MachineAgent:
             memory_overdue=self._overdue() if free is not None else frozenset(),
             lease_memory=self.limits.memory_bytes,
             maintenance=None if (info := self.maintenance()) is None else info["message"],
-            memory_held=self._held,
+            memory_held=held,
         )
-        return dataclasses.replace(policy, alone=frozenset(self._alone_items))
+        return dataclasses.replace(policy, alone=alone)
 
     def maintenance(self) -> dict | None:
         """The maintenance lease waiters are told about (`leasehold.maintenance.describe`):
@@ -705,6 +708,8 @@ class MachineAgent:
     def tick(self) -> dict:
         """Measure, decide on lending, revoke what must stop, admit what fits."""
         load = self.loader.read()
+        with self._watchdog_lock:
+            paused = self._paused_ids()
         with self._lock:
             self.last_load = load
             if self.config.guarded:
@@ -721,7 +726,7 @@ class MachineAgent:
             reason = _LENDING_OFF if self._lend_off else self.verdict.revoke
             revoked = self._revoke(reason) if reason else []
             self._watch_processes()
-            for lid in self._paused_ids():
+            for lid in paused:
                 # A paused holder cannot renew: its lease is kept while its tree is paused.
                 self.ledger.renew((SCOPE, lid))
             admitted = self.ledger.settle(self.policy())
@@ -749,8 +754,8 @@ class MachineAgent:
         if events:
             self.events.emit(events, now=self._clock())
         if self.watchdog is not None:
-            trees = self._watched_work()
             with self._watchdog_lock:
+                trees = self._watched_work()
                 ended = self.watchdog.work(trees, now=mono)
                 for paused in ended:
                     self._close_pauses(self._paused_leases.pop(paused.key, set()))
@@ -863,9 +868,10 @@ class MachineAgent:
                 events += self._act(act)
             wait = self.watchdog.interval()
             held, self._held = self._held, self.watchdog.held()
+            changed = held != self._held
         if events:
             self.events.emit(events, now=self._clock())
-        if held != self._held:
+        if changed:
             with self._lock:
                 admitted = self.ledger.settle(self.policy())
                 self._record()
@@ -1009,34 +1015,37 @@ class MachineAgent:
     def _ticket(self, ticket: tuple) -> bool:
         """Whether `ticket` (user, session, rule) still runs its next request alone: for
         `TICKET_S` after the stop."""
-        when = self._tickets.get(ticket)
-        if when is not None and self._monotonic() - when > TICKET_S:
-            del self._tickets[ticket]
-            return False
-        return when is not None
+        with self._watchdog_lock:
+            when = self._tickets.get(ticket)
+            if when is not None and self._monotonic() - when > TICKET_S:
+                del self._tickets[ticket]
+                return False
+            return when is not None
 
     def _forget_ended(self) -> None:
         """Forget what the watchdog noted of leases that ended without a release (expired, or
         their holder died)."""
         held = {r["item_id"] for r in self.ledger.leases() if r["scope"] == SCOPE}
-        for noted in (self._pauses, self._stops):
-            for lid in set(noted) - held:
-                del noted[lid]
-        self._alone_leases &= held
+        with self._watchdog_lock:
+            for noted in (self._pauses, self._stops):
+                for lid in set(noted) - held:
+                    del noted[lid]
+            self._alone_leases &= held
 
     def _note_alone(self) -> None:
         """A waiting item that runs alone and is now granted uses up its ticket, and its tree
         is the last the watchdog pauses; one no longer waiting is forgotten."""
-        if not self._alone_items:
-            return
         held = {(r["scope"], r["item_id"]) for r in self.ledger.leases()}
         waiting = {(r["scope"], r["item_id"]) for r in self.ledger.queued()}
-        for key, ticket in list(self._alone_items.items()):
-            if key in held:
-                self._tickets.pop(ticket, None)
-                self._alone_leases.add(key[1])
-            if key in held or key not in waiting:
-                del self._alone_items[key]
+        with self._watchdog_lock:
+            if not self._alone_items:
+                return
+            for key, ticket in list(self._alone_items.items()):
+                if key in held:
+                    self._tickets.pop(ticket, None)
+                    self._alone_leases.add(key[1])
+                if key in held or key not in waiting:
+                    del self._alone_items[key]
 
     def _monotonic_paused(self, paused) -> float:
         """How long a tree the watchdog paused was paused, in seconds."""
@@ -1340,7 +1349,8 @@ class MachineAgent:
                 return {"status": "refused", "lease_id": lease_id, "reason": reason}
             ticket = (user, item.session, req.rule)
             if req.rule is not None and self._ticket(ticket):
-                self._alone_items[(SCOPE, lease_id)] = ticket
+                with self._watchdog_lock:
+                    self._alone_items[(SCOPE, lease_id)] = ticket
             limits = self.config.pool_set().pools[pool]
             rate = limits.create_rate_per_min
             if not known and rate is not None and self.ledger.recent_submits(user, pool) >= rate:
@@ -1556,9 +1566,10 @@ class MachineAgent:
         held (`Ledger.record_outcome`), when the lease is still held."""
         with self._lock:
             self._check_owner(lease_id, user)
-            counts = self._pauses.pop(lease_id, None)
-            self._stops.pop(lease_id, None)
-            self._alone_leases.discard(lease_id)
+            with self._watchdog_lock:
+                counts = self._pauses.pop(lease_id, None)
+                self._stops.pop(lease_id, None)
+                self._alone_leases.discard(lease_id)
             if outcome is not None:
                 paused = {}
                 if self.watchdog is not None:

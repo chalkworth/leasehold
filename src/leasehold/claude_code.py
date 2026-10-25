@@ -108,6 +108,8 @@ class Reply:
 
     output: dict | None = None
     log: list[str] = field(default_factory=list)
+    #: Whether `post` found that the watchdog stopped the command.
+    stopped: bool = False
 
     def text(self) -> str:
         return json.dumps(self.output) if self.output is not None else ""
@@ -160,13 +162,24 @@ def tell(event: Mapping, env: Mapping[str, str], reply: Reply, stage: str) -> No
     """Add what the daemon left for this session (`hooknotes.notices`) to `reply`: the agent
     reads it as context, and the user sees it in the transcript."""
     said = hooknotes.notices(hooknotes.state_dir(env, create=False), session(event))
+    if reply.stopped:
+        # The command was stopped, so a pause it was told of before is no longer true.
+        paused = [line for line in said if "has been paused" in line]
+        command = (event.get("tool_input") or {}).get("command")
+        needle = " ".join(command.split())[:120] if isinstance(command, str) else ""
+        matches = [line for line in paused if needle and needle in line]
+        stale = set(matches or paused)
+        said = [line for line in said if line not in stale]
     if not said:
         return
     text = " ".join(said)
     out = reply.output or {}
     message = " ".join(x for x in (out.get("systemMessage"), text) if x)
     specific = dict(out.get("hookSpecificOutput") or {})
-    specific["hookEventName"] = "PreToolUse" if stage == "pre" else "PostToolUse"
+    specific.setdefault(
+        "hookEventName",
+        "PreToolUse" if stage == "pre" else event.get("hook_event_name") or "PostToolUse",
+    )
     specific["additionalContext"] = " ".join(
         x for x in (specific.get("additionalContext"), text) if x
     )
@@ -474,6 +487,7 @@ def post(event: Mapping, client: Client, *, env: Mapping[str, str]) -> Reply:
         # One never taken, or already gone, is no error.
         client.release(lid, _outcome(event, collected))
     program = noted[0] if noted else "the command"
+    reply.stopped = stopped is not None
     if stopped is not None:
         found = verdict.describe(
             host.Ending("leasehold", "certain", how="exact"), program,

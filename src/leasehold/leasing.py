@@ -489,12 +489,14 @@ class Lease:
             self._paused_at = time.monotonic()
             chosen = _PAUSED_FOR.get(why or "", "")
             self._say(
-                f"memory is short: the command is paused{chosen} until memory frees. Nothing "
-                "is lost; it continues where it stopped"
+                f"memory is short: the command is paused{chosen} and may be stopped if memory "
+                "stays short"
             )
         else:
             took = time.monotonic() - getattr(self, "_paused_at", time.monotonic())
-            self._say(f"the command runs again after {took:.0f}s paused")
+            self._say(
+                f"the command runs again after {took:.0f}s paused; it continues where it stopped"
+            )
 
     def stopped_by_watchdog(self) -> dict | None:
         """Whether the daemon's watchdog stopped the lease's command, asked now: what it says of
