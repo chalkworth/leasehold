@@ -32,6 +32,8 @@ class Outcome(BaseModel):
     peak_bytes: int | None = _Bytes
     #: The most anonymous memory (`memory.stat` `anon`) its scope was seen to use.
     anon_bytes: int | None = _Bytes
+    #: The most swap its scope used (`memory.swap.peak`, or the most `memory.swap.current` seen).
+    swap_bytes: int | None = _Bytes
     #: `memory.events` `oom_kill` and `high`.
     oom_kills: int | None = _Count
     high_events: int | None = _Count
