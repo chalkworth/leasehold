@@ -190,6 +190,29 @@ def test_the_youngest_heavy_lease_is_parked_and_new_work_waits_until_it_settles(
     assert [(r["parks"], r["parked_s"] >= 300) for r in rows] == [(1, True)]
 
 
+def test_work_the_net_could_not_park_waits_until_swap_has_room(parking):
+    client, tree, clock = parking
+    (tree.slice / "memory.swap.max").write_text(f"{GIB}\n")
+    (tree.slice / "memory.swap.current").write_text("0\n")
+    first = granted(client, clock)
+    tree.scope(first)
+    until(lambda: net_status(client)["watched"] == 1)
+    time.sleep(2 * net.TICK_S)
+
+    # Beside it: what fits the limit's free swap starts, what counts more waits.
+    small = client.acquire(kind="work", weight=1, memory="512m", ttl_s=3600, wait_s=0)
+    assert small["status"] == "granted"
+    waiting = client.acquire(kind="work", weight=1, ttl_s=3600, wait_s=0)
+    assert waiting["status"] == "queued"
+    assert waiting["blocked"].startswith("the memory net holds new work: swap has 1.0 GiB free")
+
+    (tree.slice / "memory.swap.max").write_text(f"{4 * GIB}\n")
+    again = client.acquire(
+        kind="work", weight=1, ttl_s=3600, wait_s=5, lease_id=waiting["lease_id"]
+    )
+    assert again["status"] == "granted"
+
+
 def test_a_parked_command_stays_paused_across_a_restart_and_waits_its_turn(tmp_path, sock_dir):
     tree, clock = Tree(tmp_path), Clock()
     daemon = start(tmp_path, sock_dir, tree, clock)
