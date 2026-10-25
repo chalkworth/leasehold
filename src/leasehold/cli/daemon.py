@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from leasehold import discovery, doctor, machine, paths
+from leasehold import discovery, paths
 from leasehold.facts import probe
 
 
@@ -62,6 +62,7 @@ def _mode_options(s) -> None:
 
 
 def _serve(args, ctx) -> int:
+    from leasehold import machine
     from leasehold.server import serve
 
     try:
@@ -122,7 +123,7 @@ def _init(args, ctx) -> int:
 
 
 def _observe(args, ctx) -> int:
-    from leasehold import observe, proctable
+    from leasehold import machine, observe, proctable
 
     try:
         path = paths.find_config(ctx.config, ctx.env)
@@ -158,6 +159,8 @@ _MARK = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
 
 
 def _doctor(args, ctx) -> int:
+    from leasehold import doctor
+
     checks = doctor.run(socket=ctx.socket, config=ctx.config, env=ctx.env)
     if args.json:
         print(json.dumps([c.to_dict() for c in checks], indent=2))

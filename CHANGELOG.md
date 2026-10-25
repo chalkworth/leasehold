@@ -180,6 +180,11 @@ here.
 
 ### Changed
 
+- Faster startup. `import leasehold` no longer imports the SDK: the names in `__all__` load
+  on first use (they all still work, and `dir(leasehold)` lists them). The attach step, the
+  Claude Code hook, the shims and `hold` no longer import pydantic or the config loader, or
+  `logging`, unless they need them. A leased Bash command in Claude Code starts about 70 ms
+  sooner.
 - The Claude Code plugin's `hooks/prefilter.sh start` now also runs the Python hook once per
   session, to add the attach line to `CLAUDE_ENV_FILE`.
 - A command whose caller runs under a `memory.max` that its scope would not be under (Claude

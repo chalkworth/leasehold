@@ -18,20 +18,46 @@ The names in `__all__` are the supported API. Until 1.0 a minor release may chan
 `CHANGELOG.md` lists every such change.
 """
 
-from leasehold.leasing import (
-    Busy,
-    Cancelled,
-    DaemonError,
-    Lease,
-    LeaseError,
-    LeaseLost,
-    Refused,
-    Unavailable,
-    Waiting,
-    find_daemon,
-    lease,
-)
-from leasehold.supervise import Command, NotStarted
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from leasehold.leasing import (
+        Busy,
+        Cancelled,
+        DaemonError,
+        Lease,
+        LeaseError,
+        LeaseLost,
+        Refused,
+        Unavailable,
+        Waiting,
+        find_daemon,
+        lease,
+    )
+    from leasehold.supervise import Command, NotStarted
+
+#: Where each public name lives. `import leasehold` imports none of them: a name is imported
+#: the first time it is read, so a process that needs only a submodule (the hook, the attach
+#: step) does not pay for the whole SDK.
+_HOME = {
+    **dict.fromkeys(
+        (
+            "Busy",
+            "Cancelled",
+            "DaemonError",
+            "Lease",
+            "LeaseError",
+            "LeaseLost",
+            "Refused",
+            "Unavailable",
+            "Waiting",
+            "find_daemon",
+            "lease",
+        ),
+        "leasehold.leasing",
+    ),
+    **dict.fromkeys(("Command", "NotStarted"), "leasehold.supervise"),
+}
 
 __all__ = [
     "Busy",
@@ -52,3 +78,18 @@ __all__ = [
 
 #: The one place the version is written; the build reads it from here (`[tool.hatch.version]`).
 __version__ = "0.5.0"
+
+
+def __getattr__(name: str) -> Any:
+    home = _HOME.get(name)
+    if home is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(home), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

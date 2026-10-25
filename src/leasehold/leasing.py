@@ -25,7 +25,6 @@ lease's own keeps it renewed until it is released.
 from __future__ import annotations
 
 import contextlib
-import logging
 import os
 import threading
 import time
@@ -65,8 +64,6 @@ CANCEL_POLL_S = 1.0
 PROGRESS_S = 20.0
 #: How often a busy follower (`leasehold.follow`) is stepped between renewals.
 _FOLLOW_S = 0.2
-
-_log = logging.getLogger("leasehold")
 
 
 class LeaseError(Exception):
@@ -504,8 +501,10 @@ class Lease:
         if self._on_lost is not None:
             try:
                 self._on_lost(reason)
-            except Exception:  # noqa: BLE001 -- a caller's callback must not end the renewals
-                _log.exception("leasehold: on_lost raised")
+            except Exception:
+                import logging  # only a failing callback needs it, and it is slow to import
+
+                logging.getLogger("leasehold").exception("leasehold: on_lost raised")
 
     def check(self) -> None:
         """Raise `LeaseLost` if the lease was revoked or lost for good."""
