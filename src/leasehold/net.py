@@ -75,6 +75,7 @@ import math
 import os
 import select
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,11 +99,18 @@ SETTLE_COOLDOWN_S = 5.0
 SETTLE_MAX_S = 60.0
 TICK_S = 0.25
 MIN_STEP_S = 0.05
+#: A park needs swap room under its cap for at least this share of the victim's memory.
+ROOM_FIT = 1.0
+#: When it has not: "park" all the same, "skip" the park, or "fit": park the youngest heavy
+#: scope that fits instead.
+NO_ROOM = "park"
+
 #: The window `write_per_day` is counted over.
 DAY_S = 86400.0
 
-#: A lease the agent holds, as the net needs it: (lease id, wall-clock time it was granted).
-Held = tuple[str, float]
+#: A lease the agent holds, as the net needs it: (lease id, wall-clock time it was granted,
+#: the memory it counts in bytes).
+Held = tuple[str, float, int]
 
 _reported: set[tuple[str, int]] = set()
 
@@ -205,6 +213,10 @@ class _Cap:
     #: Its `memory.events` count at the last step, and when it last grew.
     events: int | None = None
     pressed_at: float = -math.inf
+    #: Swap free to the cap now (the least room of it, its parents and the machine), and its
+    #: swap limit (the least of theirs and the machine's swap).
+    room: int | None = None
+    swap_limit: int | None = None
 
 
 @dataclass
@@ -291,6 +303,8 @@ class MemoryNet:
         self.written = 0
         self.reason: str | None = None
         self._poller: _Watch | None = None
+        #: What each held lease counts, from the last step.
+        self._counted: dict[str, int] = {}
 
     # --- what others ask -----------------------------------------------------------------
 
@@ -305,6 +319,24 @@ class MemoryNet:
         if settling:
             return f"{_leases(settling)} resuming after a park"
         return None
+
+    def room(self) -> int | None:
+        """The swap, in bytes, a new command could be parked into while a heavy command runs:
+        the least free under any cap the net watches, or the machine's free swap when it
+        watches none. None while no heavy command runs (nothing to collide with), or while the
+        net cannot park."""
+        with self._lock:
+            if self.reason is not None or ROOM_FIT <= 0:
+                return None
+            heavy = any(n >= HEAVY_BYTES for n in self._counted.values()) or any(
+                s.parked_at is None and s.footprint >= HEAVY_BYTES for s in self._scopes.values()
+            )
+            if not heavy:
+                return None
+            rooms = [c.room for c in self._caps.values() if c.room is not None]
+            if rooms:
+                return min(rooms)
+            return _meminfo(self._proc).get("SwapFree")
 
     def state(self, lease_id: str) -> str | None:
         """`parked`, `settling` or None, for the lease `lease_id`."""
@@ -447,7 +479,8 @@ class MemoryNet:
         """Start watching the scopes of new leases; let go of those whose lease or scope is
         gone. A scope a net before this one froze is adopted as parked while its lease is
         held, and resumed otherwise."""
-        live = dict(held)
+        live = {h[0]: h for h in held}
+        self._counted = {h[0]: h[2] for h in held}
         for lease_id in list(self._scopes):
             scope = self._scopes[lease_id]
             if lease_id in live and scope.path.is_dir():
@@ -460,7 +493,7 @@ class MemoryNet:
         for lease_id in list(self._counts):
             if lease_id not in live:
                 del self._counts[lease_id]
-        for lease_id, granted_at in held:
+        for lease_id, granted_at, _ in held:
             if lease_id in self._scopes:
                 continue
             path = self._find(lease_id)
@@ -532,7 +565,23 @@ class MemoryNet:
                 cap.events = events
             if stall is not None:
                 cap.stall.add(now, stall)
+            cap.room, cap.swap_limit = self._room(cap)
         return used
+
+    def _room(self, cap: _Cap) -> tuple[int | None, int | None]:
+        info = _meminfo(self._proc)
+        room, limit = info.get("SwapFree"), info.get("SwapTotal")
+        path = cap.path
+        while path is not None and path != self._root and self._root in path.parents:
+            most = _int(path / "memory.swap.max")
+            held = _int(path / "memory.swap.current")
+            if most is not None:
+                limit = most if limit is None else min(limit, most)
+                if held is not None:
+                    free = max(0, most - held)
+                    room = free if room is None else min(room, free)
+            path = path.parent
+        return room, limit
 
     def _read_scope(self, scope: _Scope, now: float) -> None:
         scope.current = _int(scope.path / "memory.current") or 0
@@ -559,6 +608,7 @@ class MemoryNet:
         ):
             scope.thawed_at = scope.thawed_wall = scope.calm_since = scope.last = None
             scope.rate = 0.0
+            _trace(f"settled {scope.lease_id[:8]} swap {scope.swapped >> 20}")
 
     def _in(self, key: str) -> list[_Scope]:
         return [s for s in self._scopes.values() if s.cap == key]
@@ -630,7 +680,17 @@ class MemoryNet:
             due = full and _stalled(stall)
         if not due:
             return None
-        return max(self._heavy(key), key=lambda s: s.granted_at)
+        heavy = sorted(self._heavy(key), key=lambda s: s.granted_at, reverse=True)
+        room = cap.room
+        if room is None or room >= ROOM_FIT * heavy[0].current or NO_ROOM == "park":
+            return heavy[0]
+        _trace(f"no room: {room >> 20} MiB free, youngest uses {heavy[0].current >> 20} MiB")
+        if NO_ROOM == "fit":
+            for s in heavy:
+                if room >= ROOM_FIT * s.current:
+                    return s
+        cap.quiet_until = now + GAP_S
+        return None
 
     def _freeze(self, scope: _Scope, now: float) -> list[_Scope] | None:
         """Freeze `scope` and lift its swap limit and its cap's other running scopes'; those
@@ -643,6 +703,10 @@ class MemoryNet:
         self.parks += 1
         self._counts.setdefault(scope.lease_id, [0, 0.0])[0] += 1
         self._events.append({"type": "parked", "lease_id": scope.lease_id})
+        _trace(
+            f"park {scope.lease_id[:8]} cur {scope.current >> 20} swap {scope.swapped >> 20} "
+            f"room {(self._caps[scope.cap].room or 0) >> 20}"
+        )
         cap = self._caps[scope.cap]
         cap.stall.clear()
         cap.quiet_until = now + GAP_S
@@ -667,6 +731,7 @@ class MemoryNet:
         scope.swap.clear()
         scope.limit = "max"  # as `_freeze` left it; `_arm` sets it anew
         self._events.append({"type": "resumed", "lease_id": scope.lease_id})
+        _trace(f"resume {scope.lease_id[:8]} cur {scope.current >> 20} swap {scope.swapped >> 20}")
 
     def _written_day(self) -> int:
         since = self._clock() - DAY_S
@@ -709,6 +774,7 @@ class MemoryNet:
         finally:
             after = _int(scope.path / "memory.swap.current")
             written = max(0, (after or before) - before)
+            _trace(f"reclaimed {scope.lease_id[:8]} asked {want >> 20} wrote {written >> 20}")
             with self._lock:
                 self._writes.append((self._clock(), written))
                 self.written += written
@@ -738,6 +804,15 @@ def _load(state: Path | None) -> dict:
     except (OSError, ValueError):
         return {}
     return record if isinstance(record, dict) else {}
+
+
+def _gib(n: int) -> str:
+    return f"{n / (1 << 30):.1f} GiB"
+
+
+def _trace(text: str) -> None:
+    if os.environ.get("LEASEHOLD_NET_TRACE"):
+        os.write(2, f"net {time.time():.2f} {text}\n".encode())
 
 
 def _stalled(rise: tuple[int, float] | None) -> bool:

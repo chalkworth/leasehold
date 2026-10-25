@@ -770,6 +770,7 @@ class MachineConfig(_Strict):
         lease_memory: int | None = None,
         maintenance: str | None = None,
         memory_held: str | None = None,
+        memory_room: int | None = None,
     ) -> AdmissionPolicy:
         """The admission policy: the pools, with `closed` shut, each pool in `max_overrides`
         given that `max` instead of its configured one, `[[standing]]` weight held, and with
@@ -783,7 +784,8 @@ class MachineConfig(_Strict):
         is `observed`, since nothing waits in line for it, and its headroom is 0 unless the
         config gives one. `maintenance` is what waiters held up by a maintenance lease are
         told, and `memory_held` why the memory net holds new work (None: it does not), with a
-        budget or without one."""
+        budget or without one; `memory_room` the swap the net could park a new command into
+        (None: no such limit)."""
         pool_set = self.pool_set()
         observed = self.observed_pool
         pools = {}
@@ -824,6 +826,7 @@ class MachineConfig(_Strict):
             observed=unqueued,
             maintenance=maintenance,
             memory_held=memory_held,
+            memory_room=memory_room,
         )
 
     @property

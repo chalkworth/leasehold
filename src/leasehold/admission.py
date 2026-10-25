@@ -196,6 +196,10 @@ class AdmissionPolicy:
     #: Host to why the memory net holds new work there, in words: while it is named, nothing
     #: that counts memory there starts (nothing at all on a host with no budget).
     memory_held: Mapping[str, str] = field(default_factory=dict, hash=False)
+    #: Host to the swap, in bytes, the memory net could park a new command into there while a
+    #: heavy command runs: an item that counts more waits, since the net could not park it
+    #: whole if it overflowed. A host not named here has no such limit.
+    memory_room: Mapping[str, int] = field(default_factory=dict, hash=False)
 
     @classmethod
     def from_pools(
@@ -216,6 +220,7 @@ class AdmissionPolicy:
         observed: frozenset[str] = frozenset(),
         maintenance: str | None = None,
         memory_held: str | None = None,
+        memory_room: int | None = None,
     ) -> AdmissionPolicy:
         """The policy for one machine's `PoolSet`, every pool on host `MACHINE`. `memory` is
         the machine's memory budget in bytes (None: no memory is counted), `assumed_memory`
@@ -225,7 +230,8 @@ class AdmissionPolicy:
         the items that no longer let others by when short. `lease_memory` is the most memory
         one lease may count (None: no such limit), `observed` the pools nothing waits in
         line for, `maintenance` what `blocker` says of an item a whole item holds up, and
-        `memory_held` why the memory net holds new work on the machine (None: it does not)."""
+        `memory_held` why the memory net holds new work on the machine (None: it does not), and
+        `memory_room` the swap it could park a new command into (None: no such limit)."""
         return cls(
             slots={MACHINE: pool_set.slots},
             pools={
@@ -253,14 +259,19 @@ class AdmissionPolicy:
             observed=observed,
             maintenance=maintenance,
             memory_held={} if memory_held is None else {MACHINE: memory_held},
+            memory_room={} if memory_room is None else {MACHINE: memory_room},
         )
 
     def held_back(
         self, host: str, weight: int, memory: int | None, memory_per_slot: int | None = None
     ) -> bool:
-        """Whether the memory net's hold keeps an item of `weight` declaring `memory` or
-        `memory_per_slot` from starting on `host` now: the hold names the host, and the item
-        counts memory there, or the host counts none."""
+        """Whether the memory net keeps an item of `weight` declaring `memory` or
+        `memory_per_slot` from starting on `host` now: its hold names the host, and the item
+        counts memory there, or the host counts none; or the item counts more than the swap
+        the net could park it into there (`memory_room`)."""
+        room = self.memory_room.get(host)
+        if room is not None and self.counted(host, weight, memory, memory_per_slot) > room:
+            return True
         if host not in self.memory_held:
             return False
         return host not in self.memory or self.counted(host, weight, memory, memory_per_slot) > 0
@@ -1136,7 +1147,14 @@ def blocker(
         why = f" ({policy.memory_short})" if policy.memory_short else ""
         return f"memory is short{why}: nothing new starts until the pressure eases"
     if policy.held_back(pool.host, item.weight, item.memory, item.memory_per_slot):
-        return f"the memory net holds new work: {policy.memory_held[pool.host]}"
+        if pool.host in policy.memory_held:
+            return f"the memory net holds new work: {policy.memory_held[pool.host]}"
+        room = policy.memory_room[pool.host]
+        need = policy.counted(pool.host, item.weight, item.memory, item.memory_per_slot)
+        return (
+            f"the memory net holds new work: a heavy command runs and the swap has "
+            f"{gib(room)} free, too little to park this one ({gib(need)}) if memory ran out"
+        )
     need = policy.counted(pool.host, item.weight, item.memory, item.memory_per_slot)
     free_now = policy.memory_free.get(pool.host)
     if pool.host in policy.memory and free_now is not None and need > free_now:
