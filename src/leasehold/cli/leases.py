@@ -172,6 +172,12 @@ def register(sub) -> None:
     s.add_argument("lease_id")
     s.add_argument("--ttl", type=float, required=True, help="the TTL each renewal sets")
     _keep_limits(s)
+    s.add_argument(
+        "--attach",
+        action="store_true",
+        help="the lease was offered to an agent's command (a hook's): adopt its shell into the "
+        "lease's scope if it does not attach itself, and measure it",
+    )
     s.set_defaults(run=lambda args, ctx: handoff.keep_main(ctx.client(), args))
 
     s = sub.add_parser("release", help="give a lease back")

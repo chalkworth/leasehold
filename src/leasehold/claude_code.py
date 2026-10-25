@@ -10,6 +10,14 @@ killer was ending processes (`leasehold.host`, from counters `pre` noted), `post
 the agent, as context it reads, that the command was most likely killed for memory and is not
 a test failure, and tells the person the same in the transcript (`leasehold.verdict`).
 
+`SessionStart` runs `... start`, which adds to the session's `CLAUDE_ENV_FILE` the lines that
+put a leased command's shell in its lease's scope as it starts (`leasehold.attach`). Claude Code
+runs that file in each Bash command's shell, before the command. So a leased command is
+contained, measured and, with a `memory_max`, capped, as under `hold`. When its scope counted
+an OOM kill, `post` says so for certain, a worker's kill that made pytest exit 1 included.
+Where the shell cannot be moved (it runs under Claude Code's own memory limit, or the platform
+has no scopes), the lease only counts it, and the verdict stays "most likely".
+
 The command itself is never changed, so the user's permission rules see exactly what the agent
 wrote, and the hook does not size it. A rule's
 range, or a `LEASEHOLD_WANT` range in Claude Code's own environment (`leasehold.weights`), is
@@ -50,19 +58,35 @@ says the command did not run.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
 import signal
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from leasehold import busy, handoff, hooknotes, host, measure, programs, shell, verdict, weights
+from leasehold import (
+    attach,
+    busy,
+    contain,
+    handoff,
+    hooknotes,
+    host,
+    measure,
+    programs,
+    shell,
+    verdict,
+    weights,
+)
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_UNAVAILABLE
 from leasehold.hold import Waited, lease_request, wait_for_grant
 from leasehold.proctable import scan
+from leasehold.supervise import cap_bytes
+from leasehold.units import memory_to_bytes, size
 
 #: Lease ids are `cc.` and the tool call's id; sessions `cc-` and the Claude Code session's.
 LEASE_PREFIX = "cc."
@@ -265,9 +289,15 @@ def pre(
             reply.output = {"systemMessage": line}
             told.insert(0, line)
         reply.output = (reply.output or {}) | _context(" ".join(told))
+        contain_settings = answer.get("contain") or {}
+        cap = cap_bytes(rule.memory_max, contain_settings)
+        why = _no_attach(contain_settings)
+        if cap is not None and why is not None:
+            said = [reply.output.get("systemMessage"), _uncapped(found.program, cap, why)]
+            reply.output["systemMessage"] = " ".join(line for line in said if line)
         argv = handoff.keeper_argv(
             str(client.path), lid, ttl_s=float(answer["lease"]["ttl_s"]),
-            max_hold_s=max_hold(event), watch_pid=watch_pid,
+            max_hold_s=max_hold(event), watch_pid=watch_pid, attach=why is None,
         )  # fmt: skip
         try:
             pid = spawn(argv)
@@ -285,6 +315,16 @@ def pre(
             weight=granted,
             mark=host.mark().encode(),
         )
+        if noted and why is None:
+            memory = rule.memory
+            if memory is None and rule.memory_per_slot is not None:
+                memory = f"{granted * memory_to_bytes(rule.memory_per_slot)}b"
+            attach.offer(
+                directory, lid, command=command, agent=watch_pid, session=session(event),
+                program=found.program, weight=granted, memory=memory, cap_bytes=cap,
+                hard_cpu=bool(contain_settings.get("hard_cpu")), max_hold_s=max_hold(event),
+                rule=rule.key, repo=_repository(event) if rule.key is not None else None,
+            )  # fmt: skip
         if not noted:
             # Unnoted, `post` might never be run for it (the pre-filter): give it back now.
             if pid is not None:
@@ -312,6 +352,42 @@ def pre(
     return reply
 
 
+def _no_attach(contain_settings: Mapping) -> str | None:
+    """Why a granted command's shell is not offered its lease's scope here; None when it is."""
+    if contain_settings.get("mode", "auto") == "off":
+        return 'the daemon has [contain] mode = "off"'
+    found = host.adoption()
+    return found.reason if found.how == "none" else None
+
+
+def _uncapped(program: str, cap: int, why: str | None) -> str:
+    return f"leasehold: no memory cap of {size(cap)} on {program}: {why}"
+
+
+def start(event: Mapping, env: Mapping[str, str], *, python: str = sys.executable) -> Reply:
+    """At a session's start: add the lines that attach each leased command's shell to its
+    lease's scope (`leasehold.attach.env_lines`) to the session's `CLAUDE_ENV_FILE`, once.
+    Where nothing can be attached here, add none, and say why on stderr."""
+    reply = Reply()
+    target = env.get("CLAUDE_ENV_FILE")
+    if not target:
+        return reply
+    lines, why = attach.env_lines(env, session(event), python)
+    if not lines:
+        reply.log.append(f"commands are leased, not contained: {why}")
+        return reply
+    try:
+        path = Path(target)
+        have = path.read_text() if path.exists() else ""
+        if lines[-1] not in have.splitlines():
+            with path.open("a") as out:
+                out.write("" if not have or have.endswith("\n") else "\n")
+                out.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        reply.log.append(f"cannot add the attach lines to {target}: {exc}")
+    return reply
+
+
 def _refresh_programs(settings: shell.Served, env: Mapping[str, str]) -> None:
     """Keep the pre-filter's word list (`leasehold.programs`) in step with the served rules."""
     target = programs.path(env)
@@ -332,18 +408,53 @@ def post(event: Mapping, client: Client, *, env: Mapping[str, str]) -> Reply:
     directory = hooknotes.state_dir(env)
     noted = hooknotes.noted(directory, lid)
     hooknotes.stop(directory, lid)
+    collected = attach.collect(directory, lid)
     with contextlib.suppress(Unavailable, ApiError):
-        client.release(lid)  # one never taken, or already gone, is no error
-    found = None if noted is None else _memory(event, *noted, env=env)
+        # One never taken, or already gone, is no error.
+        client.release(lid, _outcome(event, collected))
+    found = None if noted is None else _memory(event, *noted, collected=collected, env=env)
+    program = noted[0] if noted else "the command"
+    said = []
+    if collected is not None and collected.attached is None:
+        reply.log.append(f"{program} was not contained: {collected.reason}")
+        if collected.cap_bytes is not None:
+            said.append(_uncapped(program, collected.cap_bytes, collected.reason))
+    if collected is not None and collected.left is not None and collected.unit:
+        pid, name, used = collected.left
+        failed = contain.neutral_scope(collected.unit)
+        said.append(
+            f"leasehold: {program} left {name} running (pid {pid}, {size(used)}) in its scope; "
+            + (failed or "it no longer has the lease's limits")
+        )
     if found is not None:
         reply.output = {
-            "systemMessage": found.person,
+            "systemMessage": " ".join([found.person, *said]),
             "hookSpecificOutput": {
                 "hookEventName": event.get("hook_event_name") or "PostToolUseFailure",
                 "additionalContext": found.agent,
             },
         }
+    elif said:
+        reply.output = {"systemMessage": " ".join(said)}
     return reply
+
+
+def _outcome(event: Mapping, collected: attach.Collected | None) -> dict | None:
+    """What the command's scope used, to send with the release; None when it had none, or its
+    shell was adopted by scan, after the command had started: what it used before that was
+    not counted, and an outcome too small would teach leasehold too little memory."""
+    if collected is None or collected.usage is None or collected.attached != "shell":
+        return None
+    status = exit_code(event)
+    if status is None and event.get("hook_event_name") == "PostToolUse":
+        status = 0
+    return {
+        "rule": collected.rule,
+        "repo": collected.repo,
+        **dataclasses.asdict(collected.usage),
+        "wall_s": collected.wall_s or 0.0,
+        "exit_status": status,
+    }
 
 
 _EXIT_CODE = re.compile(r"Exit code (\d+)")
@@ -358,14 +469,46 @@ def exit_code(event: Mapping) -> int | None:
 
 
 def _memory(
-    event: Mapping, program: str, mark: str | None, *, env: Mapping[str, str]
+    event: Mapping,
+    program: str,
+    mark: str | None,
+    *,
+    collected: attach.Collected | None,
+    env: Mapping[str, str],
 ) -> verdict.Verdict | None:
-    """The memory verdict on the command `program` that the event reports ended, read against
-    the host's counters noted before it started (`mark`); None when it ended some other way,
-    or nothing was noted."""
+    """The memory verdict on the command `program` that the event reports ended: `certain`
+    when its scope counted an OOM kill (`collected`), else read against the host's counters
+    noted before it started (`mark`); None when it ended some other way, or nothing was
+    noted."""
     status = exit_code(event)
-    if status is None or mark is None:
+    usage = None if collected is None else collected.usage
+    if status is None or (mark is None and usage is None):
         return None
     ending = host.ended(status, host.Mark.decode(mark))
-    limit = env.get(verdict.AGENT_LIMIT_ENV) or None
-    return verdict.describe(ending, program, status=status, agent_limit=limit)
+    peak = limit = largest = None
+    if usage is not None:
+        peak = usage.peak_bytes
+        reached = collected.capped and bool(host.cap_ended(collected.unit))
+        if usage.oom_kills or reached:
+            kind = _cap_or_kernel(collected)
+            ending = host.Ending(kind, "certain", ending.kills, how="exact")
+            limit = collected.cap_bytes if kind == "cap" else collected.limit_bytes
+            seen = collected.largest
+            # Named only when it held most of what was capped: otherwise it was read too early.
+            if kind == "cap" and seen is not None and seen[2] * 2 >= collected.cap_bytes:
+                largest = seen
+    agent_limit = env.get(verdict.AGENT_LIMIT_ENV) or None
+    return verdict.describe(
+        ending, program, status=status, peak_bytes=peak, limit_bytes=limit,
+        agent_limit=agent_limit, largest=largest,
+    )  # fmt: skip
+
+
+def _cap_or_kernel(collected: attach.Collected) -> str:
+    """Whose limit an OOM kill the scope counted was: `cap` when the command's own cap was the
+    tightest on it (to within a page, which the kernel rounds it to), else `kernel`."""
+    if not collected.capped or collected.cap_bytes is None:
+        return "kernel"
+    page = os.sysconf("SC_PAGE_SIZE")
+    above = collected.limit_bytes
+    return "cap" if above is None or above + page > collected.cap_bytes else "kernel"

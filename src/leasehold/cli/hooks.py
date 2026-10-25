@@ -28,7 +28,7 @@ def register(sub) -> None:
 
     s = sub.add_parser("hook", help="a coding agent's hook (reads its event on stdin)")
     s.add_argument("agent", choices=["claude-code"])
-    s.add_argument("event", choices=["pre", "post"])
+    s.add_argument("event", choices=["start", "pre", "post"])
     s.set_defaults(run=_hook)
 
     s = sub.add_parser("shims", help="PATH shims that run heavy programs under a lease")
@@ -171,16 +171,17 @@ def _hook(args, ctx) -> int:
     """Always exits 0: whatever goes wrong here, the agent's command runs."""
     try:
         event = json.load(sys.stdin)
-        client = ctx.client()
-        if args.event == "pre":
+        if args.event == "start":
+            reply = claude_code.start(event, os.environ)
+        elif args.event == "pre":
             reply = claude_code.pre(
                 event,
-                client,
+                ctx.client(),
                 env=os.environ,
                 watch_pid=claude_code.agent_pid(os.getppid()),
             )
         else:
-            reply = claude_code.post(event, client, env=os.environ)
+            reply = claude_code.post(event, ctx.client(), env=os.environ)
     except SystemExit:
         return 0  # no daemon found: the command runs as if leasehold were not installed
     except Exception as exc:  # noqa: BLE001 - a hook must never block the agent's work

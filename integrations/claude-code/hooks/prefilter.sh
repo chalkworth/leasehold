@@ -17,6 +17,8 @@
 # CLAUDE_ENV_FILE as LEASEHOLD_TOOL_TIMEOUT_S: BASH_DEFAULT_TIMEOUT_MS when set, else 120. A
 # PATH shim inside a Bash command then waits in line at most half of it, so the agent hears
 # why its command did not run before the tool's timeout ends it. A value already set is kept.
+# Then the Python hook adds the line that puts a leased command's shell in its lease's scope
+# before the command runs. For a command with no lease, that line costs one directory test.
 #
 # Either way, without `leasehold` on PATH it does nothing.
 
@@ -32,12 +34,13 @@ hook() {
 case $stage in
 start)
     [ -n "${CLAUDE_ENV_FILE:-}" ] || exit 0
-    [ -n "${LEASEHOLD_TOOL_TIMEOUT_S:-}" ] && exit 0
-    ms=${BASH_DEFAULT_TIMEOUT_MS:-120000}
-    case $ms in '' | *[!0-9]*) ms=120000 ;; esac
-    [ "$ms" -gt 0 ] || ms=120000
-    printf 'export LEASEHOLD_TOOL_TIMEOUT_S=%s\n' "$((ms / 1000))" >>"$CLAUDE_ENV_FILE"
-    exit 0
+    if [ -z "${LEASEHOLD_TOOL_TIMEOUT_S:-}" ]; then
+        ms=${BASH_DEFAULT_TIMEOUT_MS:-120000}
+        case $ms in '' | *[!0-9]*) ms=120000 ;; esac
+        [ "$ms" -gt 0 ] || ms=120000
+        printf 'export LEASEHOLD_TOOL_TIMEOUT_S=%s\n' "$((ms / 1000))" >>"$CLAUDE_ENV_FILE"
+    fi
+    hook
     ;;
 pre)
     [ -n "${LEASEHOLD_LEASE_ID:-}" ] && exit 0

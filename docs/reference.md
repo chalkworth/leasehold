@@ -831,7 +831,9 @@ much.
 ### Containment
 
 Where it can, `hold` (and so the PATH shims) starts the command in a systemd user scope sized to
-the lease, so the lease holds the command back instead of only counting it:
+the lease, so the lease holds the command back instead of only counting it. The Claude Code
+plugin moves a leased command's shell into the same kind of scope as the command starts
+([Containment on the hook path](#containment-on-the-hook-path)):
 
 - `CPUWeight` is 100 × the weight. Weights share the CPU among siblings when it is contended,
   and leave any CPU nobody else wants to whoever wants it: a weight-4 command gets four times
@@ -1502,14 +1504,20 @@ command, in that session's turn, and waits up to `wait_s`; a light one goes stra
 The command is never rewritten, so Claude Code's permission rules apply to what the agent
 wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the lease back.
 
-- When a leased command ends with exit code 137 (SIGKILL) and the kernel's OOM killer ended a
-  process while it ran, `post` tells the agent, as context it reads with the tool's result,
-  that the command was most likely killed for memory and is not a test failure, and what to
-  do next. The person sees the same in the transcript. With `CLAUDE_CODE_TOOL_MEMORY_LIMIT`
-  set, the message names that limit:
+- A leased command runs in its lease's scope, as under `hold` (see "Containment on the hook
+  path" below). It is measured, its outcome is recorded, a rule's `memory` sets its
+  `MemoryHigh`, and a `memory_max` caps it.
+- When memory ended a leased command, `post` tells the agent, as context it reads with the
+  tool's result, that the command was killed for memory and is not a test failure, and what
+  to do next. The person sees the same in the transcript. When the command's scope counted
+  the kill, the verdict is certain, and it covers a command that went on after one of its
+  processes was killed, such as pytest exiting 1 after an xdist worker died:
+  `leasehold: the kernel's OOM killer ended a process of pytest (peak 7.8 GiB) when the machine ran out of memory, and pytest exited 1. This is not a test failure. Run it again only after the other heavy work has finished, with fewer workers.`
+  For a command that was not contained, `post` compares the machine's count of OOM kills
+  (`/proc/vmstat`) before and after a command that ended with exit code 137 (SIGKILL), and
+  says "most likely". With `CLAUDE_CODE_TOOL_MEMORY_LIMIT` set, the message names that limit:
   `leasehold: pytest was most likely killed by Claude Code's tool memory limit (CLAUDE_CODE_TOOL_MEMORY_LIMIT=4G, shared by every command of this session). This is not a test failure. Run it alone, or raise the limit.`
-  It counts the machine's OOM kills (`/proc/vmstat`), so it says "most likely", and says
-  nothing on systems other than Linux.
+  On systems other than Linux it says nothing yet.
 - Sub-agents run in their parent's session, so a session's agents share its turns.
 - A renewer keeps the lease while the command runs, watches the Claude Code process, and
   stops at the Bash call's own timeout plus a minute, so an interrupted call cannot hold slots.
@@ -1564,6 +1572,52 @@ command, `post` starts only when the hook noted a lease for that call (in
 `$XDG_RUNTIME_DIR/leasehold-hooks-<uid>/`).
 
 The plugin's skill tells the agent what a wait, a refusal and the exit codes mean.
+
+#### Containment on the hook path
+
+The hook cannot start the command, and it does not change it. Instead, the command's own shell
+moves itself into the lease's scope before the command runs:
+
+1. At the start of a session, the plugin's `SessionStart` hook (`leasehold hook claude-code
+   start`) adds one line to the session's `CLAUDE_ENV_FILE`. Claude Code runs that file in the
+   shell of every Bash command, before the command:
+
+   ```sh
+   [ ! -d /run/user/1000/leasehold-hooks-1000/pending ] || /path/to/python -I -m leasehold.attach "$$" </dev/null >/dev/null 2>&1 || :
+   ```
+
+2. When `pre` grants a lease, it leaves a note in `pending/` with the command's text.
+3. The shell sees the directory and runs `python -m leasehold.attach` with its own pid. That
+   finds the note for the command this shell runs (Claude Code runs it as `eval '...'`) under
+   the same Claude Code process, and asks the systemd user manager to move the shell into a
+   new scope, `lease-cc.<tool call>.scope`, sized to the lease. The command then starts, and
+   everything it starts is in that scope.
+4. A small `sleep` process keeps the scope until `post`, so its counters can still be read
+   after the command ends. The lease's renewer measures the scope while the command runs, and
+   `post` sends what it used with the release.
+
+A command with no lease pays for one directory test, about 0.05 ms. A leased command pays for
+the Python start and the move, about 0.2 s, before it runs.
+
+The shell is not moved when it runs under a `memory.max` someone else set, such as Claude
+Code's own `CLAUDE_CODE_TOOL_MEMORY_LIMIT` cgroup: it keeps its lease and stays under that
+limit, and a kill there is reported as "most likely". It is not moved either without a systemd
+user manager, with `[contain] mode = "off"`, or with `LEASEHOLD_CONTAIN=off`. In each of these
+cases the hook's log says why. If a rule asked for a `memory_max`, the person is told that the
+cap did not hold, and why. On macOS there are no scopes, so `start` adds no line and a leased
+command is only counted; `pre` says so when a `memory_max` was asked for.
+
+If no shell claims a note (an older Claude Code, or a session started before the plugin was
+installed), the renewer falls back to a scan. It looks among the Claude Code process's
+descendants for the shell that runs the command, and moves that shell and what it has started
+into the scope. This is racy: memory the command used before the move stays charged outside the
+scope. A command found by scan still gets the verdict and the cap, but its outcome is not
+recorded, so a run that was only partly measured does not teach leasehold too little memory.
+
+Another agent harness can use the same mechanism. Its pre-command hook offers the lease
+(`leasehold.attach.offer`), its shell sources the lines `leasehold.attach.env_lines` gives, and
+its post-command hook collects the result (`leasehold.attach.collect`). The lines are plain
+POSIX shell.
 
 ### PATH shims
 

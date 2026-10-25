@@ -5,13 +5,14 @@ memory, which `memory_cap` says.
 macOS has no limit on a tree of processes' memory that a user can set without root
 (`RLIMIT_AS` bounds address space, which every process reserves far more of than it uses), so
 its cap will be polled, by the macOS port; until then a cap asked for there is not enforced,
-and `hold`, `doctor` and the status say so."""
+and `hold`, `doctor` and the status say so. For the same reason it adopts nothing: a lease taken
+for an agent's command there only counts it, and `adoption` says why."""
 
 from __future__ import annotations
 
 import sys
 
-from leasehold.host import Cap, Ending, Mark
+from leasehold.host import Adoption, Cap, Ending, Mark, TreeSpec
 
 
 class Posix:
@@ -38,3 +39,15 @@ class Posix:
 
     def cap_ended(self, scope: str) -> bool | None:
         return None
+
+    def adoption(self) -> Cap:
+        if sys.platform == "darwin":
+            return Cap(
+                "none",
+                "macOS has no per-command group without root, and leasehold's polled tree for "
+                "macOS is not built yet: an agent's commands are leased, not contained",
+            )
+        return Cap("none", f"leasehold cannot contain a running command on {sys.platform} yet")
+
+    def adopt(self, pids: list[int], spec: TreeSpec) -> Adoption:
+        return Adoption("none", reason=self.adoption().reason)
