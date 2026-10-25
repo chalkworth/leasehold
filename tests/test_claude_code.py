@@ -1,5 +1,6 @@
 """The Claude Code hook's contract with the agent (`leasehold.claude_code`): what its JSON
-output tells the agent and the person when a leased Bash command ends, against a real daemon."""
+output tells the agent and the person when a leased Bash command ends, against a real daemon,
+and what the built-in rules weigh the commands it sees."""
 
 from __future__ import annotations
 
@@ -7,8 +8,9 @@ import threading
 
 import pytest
 
-from leasehold import busy, claude_code
+from leasehold import busy, claude_code, commands
 from leasehold.client import Client
+from leasehold.commands import CommandSettings
 
 
 def no_renewer(_argv):
@@ -92,3 +94,43 @@ def test_what_the_agent_is_told_before_a_command_starts(daemon, tmp_path, monkey
         assert "behind cargo test (session other)" in reply.output["systemMessage"]
     else:
         assert "systemMessage" not in reply.output
+
+
+#: What the built-in rules weigh a command line at the default weights; None: no lease. Help,
+#: version, listings and cleaning take none; named tests weigh 1; any other arguments weigh what
+#: the program's rule weighs.
+WEIGHTS = {
+    "pytest --version": None,
+    "pytest --collect-only -q": None,
+    "uv run pytest tests/test_x.py::test_y -x": 1,
+    "pytest -k test_y": 1,
+    "pytest -k 'not slow'": 4,
+    "pytest --deselect tests/test_x.py::test_y": 4,
+    "pytest -q": 4,
+    "pytest -n 4 tests/test_x.py::test_y": 4,
+    "cargo build --help": None,
+    "cargo run -- --help": 4,
+    "make clean": None,
+    "make clean all": 4,
+    "make -j8": 4,
+    "ninja -t clean": None,
+    "bazel info release": None,
+    "bazelisk build //...": 4,
+    "go test -run TestX ./pkg": 1,
+    "go test -run TestX ./...": 4,
+    "npm test -- --help": None,
+    "npm run build -- --help": 4,
+    "npm test": 4,
+    "pnpm vitest": 4,
+    "tsc --version": None,
+    "tsc --noEmit": 4,
+    "just test": 4,
+    "npm install": 2,
+    "git status": None,
+}
+
+
+def test_what_a_command_line_weighs():
+    settings = CommandSettings()
+    found = {line: commands.match(settings, line) for line in WEIGHTS}
+    assert {line: m and m.rule.weight for line, m in found.items()} == WEIGHTS

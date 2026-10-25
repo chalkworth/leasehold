@@ -14,6 +14,7 @@ config's `[commands]` (`leasehold.commands`).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import shlex
@@ -90,10 +91,22 @@ _KEYWORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!"
 
 
 @dataclass(frozen=True)
+class Case:
+    """A case of a rule: a command the rule matches whose arguments contain the regular
+    expression `args` weighs `weight` instead, a count, or 0 for no lease. `note` says what
+    the case is, in words."""
+
+    args: str
+    weight: int
+    note: str | None = None
+
+
+@dataclass(frozen=True)
 class Rule:
     """`weight` to `max_weight` slots in `pool` for a command that runs one of `programs`
-    (basenames) with arguments in which the regular expression `args` is found. `source` is
-    `config` or `default`: the config's rules are tried first."""
+    (basenames) with arguments in which the regular expression `args` is found, unless one of
+    its `cases` matches them first. `source` is `config` or `default`: the config's rules are
+    tried first."""
 
     programs: frozenset[str]
     weight: int
@@ -121,6 +134,11 @@ class Rule:
     #: The hard cap on a command's memory when contained, as the daemon serves it: a size such
     #: as `123b`, or `off`; None when the rule sets none.
     memory_max: str | None = None
+    #: Cases tried in order on the arguments of a command the rule matches: the first that
+    #: matches gives its weight (`weighed`).
+    cases: tuple[Case, ...] = ()
+    #: What the rule, or the case it was weighed by, is, in words.
+    note: str | None = None
 
     def __post_init__(self) -> None:
         if self.max_weight is None or self.max_weight < self.weight:
@@ -142,6 +160,7 @@ class Rule:
             threads=_threads(row.get("threads")), max_weight=_count(row.get("max_weight")),
             memory_per_slot=per_slot or None, ceiling=_count(row.get("ceiling")),
             hook_ceiling=_count(row.get("hook_ceiling")), memory_max=row.get("memory_max"),
+            cases=tuple(_cases(row.get("case"))), note=row.get("note"),
         )  # fmt: skip
 
     def matches(self, program: str, args: Sequence[str]) -> bool:
@@ -155,6 +174,21 @@ class Rule:
             return xdist.in_args(args) is True
         return self.args is None or re.search(self.args, " ".join(args)) is not None
 
+    def weighed(self, program: str, args: Sequence[str]) -> Rule | None:
+        """This rule as it weighs `program` with `args`: None when it does not match them; when
+        one of its cases does (the first that does), a rule of the case's weight, `args` and
+        `note`, with no cases; else this rule."""
+        if not self.matches(program, args):
+            return None
+        joined = " ".join(args)
+        for case in self.cases:
+            if re.search(case.args, joined) is not None:
+                return dataclasses.replace(
+                    self, weight=case.weight, max_weight=case.weight, args=case.args,
+                    note=case.note, cases=(), hook_ceiling=None,
+                )  # fmt: skip
+        return self
+
     @property
     def key(self) -> str | None:
         """The name a command's outcome is filed under for this rule: its programs, sorted and
@@ -166,6 +200,23 @@ class Rule:
         names = ", ".join(sorted(self.programs))
         args = "xdist" if self.args == xdist.XDIST_ARGS else self.args
         return f"{names} ~ {args}" if args else names
+
+
+def _cases(rows: object) -> Iterator[Case]:
+    """The cases a served rule lists, leaving out any without a regular expression that
+    compiles or a weight of at least 0."""
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, Mapping) or not isinstance(row.get("args"), str):
+            continue
+        weight = row.get("weight")
+        if isinstance(weight, bool) or not isinstance(weight, int) or weight < 0:
+            continue
+        try:
+            re.compile(row["args"])
+        except re.error:
+            continue
+        note = row.get("note")
+        yield Case(row["args"], weight, note if isinstance(note, str) else None)
 
 
 def _threads(value: object) -> int | str:
@@ -487,10 +538,17 @@ def programs(command: str, *, depth: int = 0) -> Iterator[tuple[str, list[str]]]
 
 
 def match(rules: Iterable[Rule], command: str) -> Match | None:
-    """The rule `command` takes a lease under: the heaviest match among the config's rules,
-    else among the built-in ones, by `weight` (the least of a range), the first of equals;
-    None when no rule matches."""
+    """The rule `command` takes a lease under (`explain`); None when no rule matches, or when
+    the one that does weighs it 0, which is no lease."""
     return match_programs(rules, list(programs(command)))
+
+
+def explain(rules: Iterable[Rule], command: str) -> Match | None:
+    """The rule that weighs `command`: the heaviest match among the config's rules, else among
+    the built-in ones, each weighed by its first case that matches (`Rule.weighed`), by
+    `weight` (the least of a range), the first of equals; None when no rule matches. A weight
+    of 0 is a case that takes no lease."""
+    return explain_programs(rules, list(programs(command)))
 
 
 #: Programs that are pytest, for reading their configuration (`xdist`).
@@ -575,6 +633,14 @@ def match_programs(
     rules: Iterable[Rule], found: Sequence[tuple[str, Sequence[str]]]
 ) -> Match | None:
     """`match` for programs already known: (program, arguments) pairs."""
+    best = explain_programs(rules, found)
+    return None if best is None or best.rule.weight == 0 else best
+
+
+def explain_programs(
+    rules: Iterable[Rule], found: Sequence[tuple[str, Sequence[str]]]
+) -> Match | None:
+    """`explain` for programs already known: (program, arguments) pairs."""
     rules = list(rules)
     for source in ("config", "default"):
         best: Match | None = None
@@ -582,8 +648,9 @@ def match_programs(
             if rule.source != source:
                 continue
             for program, args in found:
-                if rule.matches(program, args) and (best is None or rule.weight > best.rule.weight):
-                    best = Match(rule, program, tuple(args))
+                own = rule.weighed(program, args)
+                if own is not None and (best is None or own.weight > best.rule.weight):
+                    best = Match(own, program, tuple(args))
         if best is not None:
             return best
     return None

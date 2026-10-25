@@ -1036,7 +1036,8 @@ class MachineAgent:
         with its pool named and its weight and `max_weight` each cut to the most one lease
         declaring its memory could ever be granted in that pool (`AdmissionPolicy.most`: what
         fits the pool and the machine, and with a per-slot size `[ceiling] memory`), so what it
-        asks for can be granted, and that most as its `ceiling`. Its `hook_ceiling` is what the
+        asks for can be granted, and that most as its `ceiling`; each of its cases' weights is
+        cut to the same most, and 0 stays 0 (no lease). Its `hook_ceiling` is what the
         rule's range alone would be granted on an idle machine (`admission.alone`): the most an
         agent hook asks, cutting both ends of its range to it. All are computed when served,
         from the pools as they are then. A rule declaring `memory_per_slot` alone is also served a
@@ -1076,6 +1077,7 @@ class MachineAgent:
             }
             if per_slot is not None and memory is None:
                 sizes["memory"] = f"{least * per_slot}b"
+            sizes["case"] = [c | {"weight": min(c["weight"], top)} for c in served["case"]]
             rules.append(served | sizes)
         return {
             "rules": rules,
