@@ -48,10 +48,10 @@ never as running, so per-user limits and whose turn it is stay a matter of real 
   own pool cannot keep it waiting for ever. (Items in other pools on the host may still start
   around it, as with slots alone.)
 
-**The memory net's hold.** While `memory_held` names a host (a memory net has a lease parked
-there, or one resuming after a park: `leasehold.net`), nothing new starts on it that counts
-memory there, and on a host with no budget, where nothing is counted, nothing new starts at
-all. The parked lease is still held, so its memory stays counted, and it is first to run again.
+**The watchdog's hold.** While `memory_held` names a host (the machine is short of memory, or
+the watchdog has paused work there that has not ended yet: `leasehold.watchdog`), nothing new
+starts on it that counts memory there, and on a host with no budget, where nothing is counted,
+nothing new starts at all. A paused lease is still held, so its memory stays counted.
 An item held back this way blocks its pool as any item whose turn it is does. No item there is
 granted more than its `weight`, and no elastic lease there grows.
 
@@ -193,7 +193,7 @@ class AdmissionPolicy:
     #: and until when). None: it says only that the machine is in, or draining for,
     #: maintenance.
     maintenance: str | None = None
-    #: Host to why the memory net holds new work there, in words: while it is named, nothing
+    #: Host to why the watchdog holds new work there, in words: while it is named, nothing
     #: that counts memory there starts (nothing at all on a host with no budget).
     memory_held: Mapping[str, str] = field(default_factory=dict, hash=False)
 
@@ -225,7 +225,7 @@ class AdmissionPolicy:
         the items that no longer let others by when short. `lease_memory` is the most memory
         one lease may count (None: no such limit), `observed` the pools nothing waits in
         line for, `maintenance` what `blocker` says of an item a whole item holds up, and
-        `memory_held` why the memory net holds new work on the machine (None: it does not)."""
+        `memory_held` why the watchdog holds new work on the machine (None: it does not)."""
         return cls(
             slots={MACHINE: pool_set.slots},
             pools={
@@ -258,7 +258,7 @@ class AdmissionPolicy:
     def held_back(
         self, host: str, weight: int, memory: int | None, memory_per_slot: int | None = None
     ) -> bool:
-        """Whether the memory net's hold keeps an item of `weight` declaring `memory` or
+        """Whether the watchdog's hold keeps an item of `weight` declaring `memory` or
         `memory_per_slot` from starting on `host` now: the hold names the host, and the item
         counts memory there, or the host counts none."""
         if host not in self.memory_held:
@@ -776,7 +776,7 @@ def alone(
 ) -> int:
     """The weight `grants` gives one item asking `weight` to `max_weight` in `pool` on an idle
     host: nothing held but the standing work, the pool open, memory neither short nor under
-    pressure, and the memory net holding nothing. `weight` when it would not be admitted even
+    pressure, and the watchdog holding nothing. `weight` when it would not be admitted even
     then. An agent hook cuts both ends of the range it asks to this."""
     idle = replace(
         policy,
@@ -1091,7 +1091,7 @@ def blocker(
     its host (`policy.maintenance`); it waits behind the whole item its host drains for (the
     same); it is that whole item, and leases still run there; its pool is closed;
     another item is ahead of it; its user is at the pool's per-user limit; its pool is capped
-    to its reservation; memory is under pressure (`memory_pressing`), held by the memory net
+    to its reservation; memory is under pressure (`memory_pressing`), held by the watchdog
     (`memory_held`) or short (`memory_free`);
     its pool is full; the machine's free
     slots are owed to other pools' reservations or are all in use; the memory budget is used.
@@ -1136,7 +1136,7 @@ def blocker(
         why = f" ({policy.memory_short})" if policy.memory_short else ""
         return f"memory is short{why}: nothing new starts until the pressure eases"
     if policy.held_back(pool.host, item.weight, item.memory, item.memory_per_slot):
-        return f"the memory net holds new work: {policy.memory_held[pool.host]}"
+        return f"the watchdog holds new work: {policy.memory_held[pool.host]}"
     need = policy.counted(pool.host, item.weight, item.memory, item.memory_per_slot)
     free_now = policy.memory_free.get(pool.host)
     if pool.host in policy.memory and free_now is not None and need > free_now:

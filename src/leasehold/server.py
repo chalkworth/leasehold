@@ -3,11 +3,9 @@
 The socket (mode `socket_mode`, group `socket_group`) is the only listener: whoever may open it
 may ask for leases, and the peer's uid (`SO_PEERCRED`) names the user a lease is charged to.
 A tick thread runs `MachineAgent.tick` every `tick_s`; with the watchdog on, a thread reads the
-machine's memory as often as the watchdog asks (`MachineAgent.watch_memory`); and with the memory
-net on, a thread of its own runs the net (`leasehold.net`). SIGTERM or SIGINT stops them
-cleanly: the listener closes, the socket file goes, the net lifts the swap limits it set and
-leaves what it parked paused, and the leases stay in the ledger until their TTLs, so a
-restarted daemon picks them (and what the net parked) up again.
+machine's memory as often as the watchdog asks (`MachineAgent.watch_memory`). SIGTERM or SIGINT
+stops them cleanly: the listener closes, the socket file goes, and the leases stay in the ledger
+until their TTLs, so a restarted daemon picks them up again.
 
 A request body is read only as far as a well-formed `Content-Length` of at most `_MAX_BODY`
 says: a missing one is no body, a malformed or negative one 400 `bad_request`, a larger one 413
@@ -173,12 +171,6 @@ class Daemon:
         if self.agent.watchdog is not None:
             self._threads.append(
                 threading.Thread(target=self._watch, daemon=True, name="leasehold-watchdog")
-            )
-        if self.agent.net is not None:
-            self._threads.append(
-                threading.Thread(
-                    target=self.agent.net.run, args=(self.stopping,), name="leasehold-net"
-                )
             )
         for t in self._threads:
             t.start()

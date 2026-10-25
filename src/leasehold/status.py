@@ -221,7 +221,6 @@ def report(
     memory_limit: dict | None = None,
     queue: list[dict],
     maintenance: dict | None = None,
-    memory_net: dict | None = None,
     contain: dict | None = None,
     host: dict | None = None,
     watchdog: dict | None = None,
@@ -230,8 +229,7 @@ def report(
 ) -> dict:
     """The whole status object. `leases` and `queue` are already `public`; `maintenance` is
     the maintenance lease waiters are told about (`leasehold.maintenance.describe`), or None;
-    `memory_net` the memory net's own status (`leasehold.net.MemoryNet.status`), or None when
-    it is off; `contain` how commands are contained and capped (default: `[contain]` as
+    `contain` how commands are contained and capped (default: `[contain]` as
     configured); `host` what the host can do here, by operation (`leasehold.host`), or None
     when not known; `watchdog` the agent sessions watched (`leasehold.sessions.Sessions.status`),
     or None."""
@@ -276,6 +274,5 @@ def report(
         "leases": leases,
         "queue": queue,
         "maintenance": maintenance,
-        "memory_net": memory_net,
         "watchdog": watchdog,
     }

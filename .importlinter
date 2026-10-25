@@ -7,8 +7,7 @@
 #
 # Everything leasehold asks of the operating system about processes and memory goes through
 # `leasehold.host`, at the bottom of the layers. Only it imports its platform modules (linux,
-# posix, systemd), and only it reads cgroup files, apart from the daemon's load reader and the
-# memory net (whose swap parking reads its scopes' files until the watchdog replaces it).
+# posix, systemd), and only it reads cgroup files, apart from the daemon's load reader.
 #
 # A package named here (`cli`, `top`, `host`) stands for itself and every module in it.
 
@@ -27,7 +26,7 @@ layers =
     template
     api
     agent
-    status | lend | guard | events | outcomes | net | sessions | watchdog
+    status | lend | guard | events | outcomes | sessions | watchdog
     machine
     quota | observe | commands
     shell
@@ -84,7 +83,6 @@ protected_modules =
 allowed_importers =
     leasehold.host
     leasehold.load
-    leasehold.net
 
 [importlinter:contract:leaves]
 name = leaf modules import nothing else of leasehold's

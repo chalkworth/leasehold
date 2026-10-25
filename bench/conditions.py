@@ -19,10 +19,6 @@ A condition is a name from `CONDITIONS`, optionally followed by `@` and paramete
   sets the ceiling, the pools' `max` and the work pool's reservation as `init` would.
 * `mem=declared`: each `mem` job declares its size plus 512 MiB (`hold --memory`).
 * `budget`: `[memory] budget`, a size such as `7g` (otherwise `--memory-budget`, else auto).
-* `net=park`: the daemon's memory net on (`[memory_net] mode = "park"`, `leasehold.net`): it
-  parks a job when memory inside the limit runs out, and holds new work while one is parked or
-  resuming. Only the conditions whose jobs run in lease scopes take it.
-* `overflow`: `[memory_net] overflow`, a size such as `1g` or `max`. Only with `net=park`.
 * `arm`: a tag that changes nothing, so that one condition can run as two arms (an A/A run).
 
 Only the leasehold conditions (`lh-...`, except `lh-enforced-v020`) take parameters. In a
@@ -60,7 +56,7 @@ CONDITIONS = {
 #: The conditions that run by default: all but those that need a jobserver.
 DEFAULT_CONDITIONS = [c for c in CONDITIONS if c not in ("lh-jobserver", "lh-elastic")]
 #: The parameters, in their canonical order.
-KEYS = ("w", "h", "grow", "kept", "mem", "budget", "net", "overflow", "arm")
+KEYS = ("w", "h", "grow", "kept", "mem", "budget", "arm")
 _WEIGHT = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
 _SIZE = re.compile(r"^[0-9]+(\.[0-9]+)?[kmgt]?b?$", re.IGNORECASE)
 #: The choices of `grow`, the same as `leasehold.elastic.HEADROOM_MODES`.
@@ -98,8 +94,6 @@ class Condition:
     kept: int | None = None
     declared: bool = False
     budget: str | None = None
-    net: str | None = None
-    overflow: str | None = None
     arm: str | None = None
     params: dict[str, str] = field(default_factory=dict, compare=False, hash=False)
 
@@ -121,8 +115,6 @@ class Condition:
             "kept": None if self.kept is None else str(self.kept),
             "mem": "declared" if self.declared and self.base != "lh-enforced-declared" else None,
             "budget": self.budget,
-            "net": self.net,
-            "overflow": self.overflow,
             "arm": self.arm,
         }
         return [(k, values[k]) for k in KEYS if values[k] is not None]
@@ -192,19 +184,6 @@ def parse(text: str) -> Condition:
     budget = params.get("budget")
     if budget is not None and not _SIZE.match(budget):
         raise ValueError(f"{text!r}: budget={budget!r} is not a size such as 7g")
-    net = params.get("net")
-    if net is not None and net != "park":
-        raise ValueError(f"{text!r}: net is 'park'")
-    contained = Condition(base).contained
-    if net is not None and not contained:
-        raise ValueError(
-            f"{text!r}: net=park needs jobs in lease scopes (lh-enforced and the like)"
-        )
-    overflow = params.get("overflow")
-    if overflow is not None and net is None:
-        raise ValueError(f"{text!r}: overflow needs net=park")
-    if overflow is not None and overflow != "max" and not _SIZE.match(overflow):
-        raise ValueError(f"{text!r}: overflow={overflow!r} is not a size such as 1g, or max")
     arm = params.get("arm")
     if arm is not None and not _TAG.match(arm):
         raise ValueError(f"{text!r}: arm={arm!r} is letters and digits only")
@@ -216,8 +195,6 @@ def parse(text: str) -> Condition:
         kept=kept,
         declared=mem == "declared" or base == "lh-enforced-declared",
         budget=budget,
-        net=net,
-        overflow=overflow,
         arm=arm,
         params=params,
     )
@@ -346,11 +323,6 @@ def config(
             else f"# the benchmark's jobs ask hold --weight {least}-{most}"
         )
         text = _insert_after(text, "[commands]", line)
-    if condition.net is not None:
-        table = f'\n[memory_net]\nmode = "{condition.net}"\n'
-        if condition.overflow is not None:
-            table += f'overflow = "{condition.overflow}"\n'
-        text = text.rstrip("\n") + "\n" + table
     if condition.base == "lh-hardcpu-greedy":
         if "hard_cpu = false" not in text:
             raise ValueError("the generated config has no hard_cpu line to turn on")
@@ -375,5 +347,4 @@ def summary(text: str) -> dict:
         "heavy_weight": raw.get("commands", {}).get("heavy_weight", 4),
         "hard_cpu": raw.get("contain", {}).get("hard_cpu", False),
         "elastic_headroom": raw.get("elastic", {}).get("headroom", "keep"),
-        "memory_net": raw.get("memory_net", {}).get("mode", "off"),
     }
