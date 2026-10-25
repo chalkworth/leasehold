@@ -287,9 +287,9 @@ def _vmstat() -> dict[str, int]:
     return _kv(Path("/proc/vmstat"))
 
 
-def _cache_file(mib: float) -> Path:
+def _cache_file(mib: float, n: int) -> Path:
     """A file of `mib` MiB for a job to read, made once and kept for later runs."""
-    path = Path.home() / ".cache" / "lhscn" / f"cache-{round(mib)}m.bin"
+    path = Path.home() / ".cache" / "lhscn" / f"cache-{n}-{round(mib)}m.bin"
     if not path.exists() or path.stat().st_size != round(mib) * MIB:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as f:
@@ -448,7 +448,7 @@ class Runner:
         if job.write:
             cmd.append("--write")
         if job.cache:
-            cmd += ["--cache-file", str(_cache_file(job.cache * s))]
+            cmd += ["--cache-file", str(_cache_file(job.cache * s, i))]
         if job.late:
             cmd += ["--late", str(int(job.late * s * MIB)), "--late-at", str(job.late_at)]
         weight = int(self.arm.get("weight", job.weight))
