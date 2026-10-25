@@ -310,28 +310,36 @@ leasehold admits (and `[[standing]]` memory); memory other programs use is the
 A request that declares no memory can instead count what its rule's past runs used. Since 0.5
 a contained command's [outcome](#containment) is kept with the `[commands]` rule that sized it
 and the repository it ran in. A request from `hold` (with no `--weight`), a shim or the agent
-hook sends its rule and repository too. The daemon works out a **learned figure** for that
-user, rule and repository:
+hook sends its rule and repository too. The daemon works out a **learned figure** a slot of
+weight for that user, rule and repository:
 
 - A run's size is its most anonymous memory (`anon_bytes`). Page cache can be reclaimed, so it
   says little about running out of memory, and `memory.peak` includes it. `anon_bytes` is read
   about once a second, so a run shorter than 10 seconds, which a few reads can miss a spike
-  in, gives its `peak_bytes` instead.
+  in, gives its `peak_bytes` instead. Neither counts memory in swap, so the run's most swap
+  (`swap_bytes`) is added: a run that spilled to swap, or that the [memory net](#memory-net)
+  parked, is sized by all it held. An outcome from a client that does not report swap adds
+  none.
+- A run's size a slot is its size over the weight its lease held when it ended. A command
+  given more slots runs more jobs, so the figure is counted a slot, as a declared
+  `memory_per_slot` is: a lease counts it times the weight it is granted, and an elastic lease
+  counts more as it grows.
 - Only clean runs count: ones that exited 0 and that the OOM killer did not reach. A failed or
   interrupted run may have stopped before it used what a whole run uses.
 - The figure is 115% of the larger of the weighted median of the clean runs, with each run
   weighing half as much as the one 10 runs newer, and the smaller of the newest two. Two big
   runs in a row raise it at once; it comes down only as smaller runs take over the median.
-- A run the OOM killer reached holds the figure at 120% of its size, and at least 256 MiB
-  above it, while its outcome is kept. No figure is under 256 MiB.
+- A run the OOM killer reached holds the figure at 120% of its size a slot, and at least
+  256 MiB a slot above it, while its outcome is kept. No figure is under 64 MiB a slot.
 - There is no figure until 3 clean runs are known. Until then the request counts its weight
   times `assumed_per_slot`, as before.
 
 `learn` says what the figure does:
 
-- `"on"`: a request with a figure counts it in place of its weight times `assumed_per_slot`. A
-  figure over the budget left beside `[[standing]]` memory, or over `[ceiling] memory`, is cut
-  to it, so the command runs alone instead of being refused.
+- `"on"`: a request with a figure counts it in place of `assumed_per_slot`. A figure whose
+  least weight's worth would not fit the budget left beside `[[standing]]` memory is cut so
+  that it does, and the command runs alone instead of being refused. `[ceiling] memory` does
+  not cut it: that is the most a lease may declare, and a learned figure is no declaration.
 - `"shadow"` (the default): the figure is worked out and shown, but the request counts what it
   would with `"off"`. Run in shadow for a while and compare the figures with what is assumed
   (`leasehold leases`, `leasehold outcomes`) before turning it on.
@@ -339,12 +347,11 @@ user, rule and repository:
 
 Declared memory always wins: a request with `--memory`, `--memory-per-slot` or a rule's
 `memory` counts what it declares, whatever was learned. A figure is fixed when the request
-first asks, so a lease counts the same while it is held. A learned figure is never a limit:
-the command's scope gets no `MemoryHigh` from it. Since the figure starts from a median, about
-half of runs use more than the median. The 15% margin covers part of that, and the
-[memory guard](#memory-guard) stops new work while memory is short.
-`leasehold doctor` warns when `learn` is not `"off"` but `[contain] mode = "off"`, since then
-nothing is measured.
+first asks. A learned figure is never a limit: the command's scope gets no `MemoryHigh` from
+it. Since the figure starts from a median, about half of runs use more than the median. The
+15% margin covers part of that, and the [memory guard](#memory-guard) stops new work while
+memory is short. `leasehold doctor` warns when `learn` is not `"off"` but
+`[contain] mode = "off"`, since then nothing is measured.
 
 Without a `[memory]` table no memory is counted, as in leasehold 0.2, and a declared size only
 sets `MemoryHigh`. A 0.2 config gains the table with `leasehold setup --upgrade-config` (see
@@ -838,6 +845,8 @@ with the lease's size, range and declared memory. `leasehold outcomes` lists it.
   second added.
 - `anon_bytes`: the most `anon` seen in `memory.stat`. Page cache is not counted here, so it is
   a lower bound on what the command needed.
+- `swap_bytes`: `memory.swap.peak`, the most swap the scope used, or on kernels before 6.5 the
+  most `memory.swap.current` seen. Neither of the two above counts memory in swap.
 - `oom_kills` and `high_events`: `oom_kill` and `high` from `memory.events`.
 - `cpu_usec`: `usage_usec` from `cpu.stat`. `wall_s` is how long the command ran and
   `exit_status` how it ended (negative: the signal that killed it).
@@ -1469,7 +1478,7 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
   administrator. `--json` prints the API's answer, every outcome included.
 - `leasehold leases` lists the leases held and the queue. Its `MEMORY` column is what each
   counts and where that comes from: `6.0 GiB declared`, `1.2 GiB learned (3 runs)`, or
-  `4.0 GiB assumed`, followed by `, learned 1.2 GiB` when learning is in shadow.
+  `4.0 GiB assumed`, followed by `, learned 1.2 GiB/slot` when learning is in shadow.
 - `leasehold metrics` prints the status in the Prometheus text format;
   `--textfile DIR` writes `DIR/leasehold.prom` for node_exporter's textfile collector.
   `leasehold ui` serves the same at `/metrics?token=...`.
@@ -1508,7 +1517,7 @@ client for it.
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
 | `POST /v1/elastic` | `lease_id` | `elastic`, with the lease's `weight`, `jobs`, `target` and `target_jobs`: a held range is elastic from now on; 409 `conflict` when it is not held, 400 for a lease with no range |
 | `POST /v1/release` | `lease_id`, `outcome` | `released` |
-| `GET /v1/outcomes` | | `outcomes`, newest first, and `groups`, one for each rule and repository: the asking user's, or every user's for an administrator. A group has `learned_bytes`, the [learned figure](#learned-memory) the asking user's own runs there give (null while fewer than 3 clean runs are known, and for a group with no rule), and `learned_runs`, the clean runs behind it |
+| `GET /v1/outcomes` | | `outcomes`, newest first, and `groups`, one for each rule and repository: the asking user's, or every user's for an administrator. A group has `learned_per_slot_bytes`, the [learned figure](#learned-memory) a slot the asking user's own runs there give (null while fewer than 3 clean runs are known, and for a group with no rule), and `learned_runs`, the clean runs behind it |
 | `POST /v1/lend` | `open`: true or false | the lend state; administrators only |
 | `POST /v1/pools/<name>` | `max`: a number, or null to reset | the pool; administrators only |
 
@@ -1612,9 +1621,9 @@ when a field is removed or changes meaning:
   lease declaring memory per slot gives the total it was granted, its weight times the size),
   `memory_per_slot_bytes` (what it declared per slot, or null) and `memory_counted_bytes`
   (what admission counts for it). `memory_from` says where that comes from: `declared`,
-  `learned` or `assumed` (its weight times `assumed_per_slot`). `learned_bytes` is the
-  [learned figure](#learned-memory) it was given when it asked, whether counted or only shown
-  (null: none), and `learned_runs` the clean runs behind it, also while too few are known
+  `learned` or `assumed` (its weight times `assumed_per_slot`). `learned_per_slot_bytes` is
+  the [learned figure](#learned-memory) a slot it was given when it asked, whether counted or
+  only shown (null: none), and `learned_runs` the clean runs behind it, also while too few are known
   (null: none was worked out). Each also has `weight`, `min_weight` and `max_weight`: a lease's
   `weight` is the size it holds (granted, or since moved to by an elastic lease), a queued
   item's the least it needs, and `min_weight` and `max_weight` are the

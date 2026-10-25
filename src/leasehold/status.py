@@ -27,16 +27,18 @@ def public(row: dict, policy: AdmissionPolicy | None = None) -> dict:
     it now under `policy` (`AdmissionPolicy.most`) when one is given.
     `memory_from` is where the memory it counts comes from: `declared`, `learned` (from past runs
     of its rule, `leasehold.estimate`) or `assumed` (its weight times the assumed size a slot).
-    `learned_bytes` is the learned figure it was given when it asked, counted or only shown
-    (None: none), and `learned_runs` the clean runs behind it (None: not worked out)."""
+    `learned_per_slot_bytes` is the learned figure a slot it was given when it asked, counted
+    (at its weight, as a declared size a slot is) or only shown (None: none), and
+    `learned_runs` the clean runs behind it (None: not worked out)."""
     weight = row["weight"]
-    learned = row.get("learned")
-    counts_learned = learned is not None and row.get("memory") is not None
-    declared = row.get("memory") is not None and not counts_learned
-    if row.get("memory_per_slot") is not None or declared:
+    learned = row.get("learned_per_slot")
+    counts_learned = learned is not None and row.get("memory_per_slot") is not None
+    if counts_learned:
+        memory_from = "learned"
+    elif row.get("memory") is not None or row.get("memory_per_slot") is not None:
         memory_from = "declared"
     else:
-        memory_from = "learned" if counts_learned else "assumed"
+        memory_from = "assumed"
     most = _or(row.get("max_weight"), weight)
     if policy is not None and "acquired_at" not in row and row["pool"] in policy.pools:
         most = policy.most(row["pool"], weight, most, row.get("memory"), row.get("memory_per_slot"))
@@ -53,9 +55,9 @@ def public(row: dict, policy: AdmissionPolicy | None = None) -> dict:
         "ttl_s": row["ttl_s"],
         "expires_at": row["expires_at"],
         "memory_bytes": None if counts_learned else row.get("memory"),
-        "memory_per_slot_bytes": row.get("memory_per_slot"),
+        "memory_per_slot_bytes": None if counts_learned else row.get("memory_per_slot"),
         "memory_from": memory_from,
-        "learned_bytes": learned,
+        "learned_per_slot_bytes": learned,
         "learned_runs": row.get("learned_runs"),
     }
     out["elastic"] = bool(row.get("elastic"))
@@ -118,10 +120,10 @@ def counted(policy: AdmissionPolicy, item: dict) -> int:
     """The memory, in bytes, admission counts for a lease or queued item (0 without a budget)."""
     shaped = policy.pools.get(item["pool"])
     host = shaped.host if shaped is not None else MACHINE
-    total = item.get("memory_bytes")
+    per_slot = item.get("memory_per_slot_bytes")
     if item.get("memory_from") == "learned":
-        total = item["learned_bytes"]
-    return policy.counted(host, item["weight"], total, item.get("memory_per_slot_bytes"))
+        per_slot = item["learned_per_slot_bytes"]
+    return policy.counted(host, item["weight"], item.get("memory_bytes"), per_slot)
 
 
 def with_counted(policy: AdmissionPolicy, items: list[dict]) -> list[dict]:

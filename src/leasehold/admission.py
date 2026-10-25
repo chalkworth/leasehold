@@ -31,9 +31,9 @@ never as running, so per-user limits and whose turn it is stay a matter of real 
 
 **Memory**, on a host that `AdmissionPolicy.memory` gives a budget (and only there):
 
-* every item counts memory: what it declares (`memory`, in bytes, which may instead be a
-  figure learned from past runs, counted the same way), or, when it declares none, its weight
-  times the host's `assumed_memory` per slot (0 when that is not given);
+* every item counts memory: what it declares (`memory`, in bytes, or `memory_per_slot`, which
+  may instead be a figure learned from past runs, counted the same way), or, when it declares
+  none, its weight times the host's `assumed_memory` per slot (0 when that is not given);
 * an item enters only if the memory counted on its host (standing memory, held leases and what
   this decision admitted) plus its own stays within the budget. Like weight, it is never
   preempted to make room, and the item whose turn it is still blocks its pool;
@@ -452,7 +452,8 @@ class Waiting:
     memory_per_slot: int | None = None
     #: The item takes its host to itself (the module docstring's whole hosts).
     whole: bool = False
-    #: Its `memory` was learned from past runs, not declared: only what `blocker` says differs.
+    #: Its `memory_per_slot` was learned from past runs, not declared: only what `blocker` says
+    #: differs.
     learned: bool = False
 
     @property
@@ -651,13 +652,14 @@ def _memory_need(
     memory_per_slot: int | None = None,
     learned: bool = False,
 ) -> str:
-    """What an item counts, and where that comes from, in words. A `learned` `memory` came from
-    past runs, not a declaration."""
+    """What an item counts, and where that comes from, in words. A `learned` `memory_per_slot`
+    came from past runs, not a declaration."""
     need = policy.counted(host, weight, memory, memory_per_slot)
     if memory is not None:
-        return f"its {'learned' if learned else 'declared'} {gib(need)}"
+        return f"its declared {gib(need)}"
     if memory_per_slot is not None:
-        return f"{gib(need)} (weight {weight} at its declared {gib(memory_per_slot)} a slot)"
+        source = "learned" if learned else "declared"
+        return f"{gib(need)} (weight {weight} at its {source} {gib(memory_per_slot)} a slot)"
     per_slot = policy.assumed_memory.get(host, 0)
     return f"{gib(need)} (weight {weight} at {gib(per_slot)} a slot, none declared)"
 

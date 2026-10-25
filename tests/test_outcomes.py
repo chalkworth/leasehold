@@ -88,14 +88,14 @@ def test_a_release_keeps_its_outcome_and_the_listing_sums_them(daemon):
         {
             "rule": None, "repo": None, "runs": 1, "peak_p95_bytes": None,
             "peak_max_bytes": None, "anon_max_bytes": GIB // 2, "oom_runs": 0, "high_runs": 0,
-            "parallelism": 2.0, "last_ended_at": rows[0]["ended_at"], "learned_bytes": None,
-            "learned_runs": None,
+            "parallelism": 2.0, "last_ended_at": rows[0]["ended_at"],
+            "learned_per_slot_bytes": None, "learned_runs": None,
         },
         {
             "rule": "cargo", "repo": "/src/app", "runs": 2, "peak_p95_bytes": 3 * GIB,
             "peak_max_bytes": 3 * GIB, "anon_max_bytes": GIB // 2, "oom_runs": 1,
             "high_runs": 0, "parallelism": 1.5, "last_ended_at": rows[1]["ended_at"],
-            "learned_bytes": None, "learned_runs": 1,
+            "learned_per_slot_bytes": None, "learned_runs": 1,
         },
     ]  # fmt: skip
     shown = cli(daemon.path, "outcomes")
@@ -117,11 +117,12 @@ def test_a_daemon_that_refuses_the_outcome_still_releases(daemon, monkeypatch):
 
 
 @contextlib.contextmanager
-def budgeted(tmp_path, sock_dir, learn: str):
+def budgeted(tmp_path, sock_dir, learn: str, **overrides):
     """A daemon on the 2-slot test machine with an 8 GiB memory budget (4 GiB assumed a slot)
     and `[memory] learn = learn`."""
     memory = {"budget": "8g", "learn": learn}
-    config = machine_config(tmp_path, socket=str(sock_dir / "s.sock"), memory=memory)
+    sock = str(sock_dir / "s.sock")
+    config = machine_config(tmp_path, socket=sock, memory=memory, **overrides)
     d = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
     d.start()
     try:
@@ -130,51 +131,60 @@ def budgeted(tmp_path, sock_dir, learn: str):
         d.stop()
 
 
-def ran(client: Client, repo: str, *runs: dict) -> None:
-    """A lease of the `cargo` rule in `repo` for each of `runs`, released with that outcome."""
+def ran(client: Client, repo: str, *runs: dict, weight: int = 1) -> None:
+    """A lease of `weight` of the `cargo` rule in `repo` for each of `runs`, released with that
+    outcome."""
     for run in runs:
-        lease_id = granted(client, rule="cargo", repo=repo)
+        lease_id = granted(client, rule="cargo", repo=repo, weight=weight)
         client.release(lease_id, outcome=outcome(1, repo=repo, wall_s=60.0) | run)
+
+
+def cargo(client: Client, repo: str, **request) -> dict:
+    return client.acquire(kind="work", rule="cargo", repo=repo, ttl_s=30, wait_s=0, **request)
 
 
 @pytest.mark.parametrize("learn", ["off", "shadow", "on"])
 def test_a_rule_s_past_runs_set_what_its_next_lease_counts_once_learn_is_on(
     tmp_path, sock_dir, learn
 ):
-    learned = math.ceil(GIB * 1.15)  # the median anon of three clean runs, plus 15%
+    learned = math.ceil(GIB * 1.15)  # a slot: the median of 2 GiB at weight 2, plus 15%
     with budgeted(tmp_path, sock_dir, learn) as client:
-        ran(client, "/src/app", *[{"anon_bytes": GIB}] * 3)
+        ran(client, "/src/app", *[{"anon_bytes": 2 * GIB}] * 3, weight=2)
         ran(client, "/src/new", {"anon_bytes": GIB}, {"anon_bytes": GIB})  # 2 runs: cold
         ran(client, "/src/new", {"anon_bytes": 5 * GIB, "exit_status": 1})  # failed: not clean
+        ran(client, "/src/swap", *[{"anon_bytes": GIB, "swap_bytes": GIB}] * 3)  # 2 GiB each
         big = granted(client, memory="6g")
-        answer = client.acquire(kind="work", rule="cargo", repo="/src/app", ttl_s=30, wait_s=0)
+        answer = cargo(client, "/src/app")
         if learn == "on":
-            # Counted at the learned 1.15 GiB, it fits beside the 6 GiB declared.
+            # Counted at the learned 1.15 GiB a slot, it fits beside the 6 GiB declared.
             assert answer["status"] == "granted"
             lease = answer["lease"]
             assert (lease["memory_from"], lease["memory_counted_bytes"]) == ("learned", learned)
-            assert lease["memory_bytes"] is None  # nothing was declared
+            assert lease["memory_bytes"] is lease["memory_per_slot_bytes"] is None  # undeclared
         else:
             # Counted at weight 1 x 4 GiB assumed, it waits.
             assert answer["status"] == "queued"
             assert "this counts 4.0 GiB (weight 1 at 4.0 GiB a slot" in answer["blocked"]
             (lease,) = client.leases()["queue"]
             assert (lease["memory_from"], lease["memory_counted_bytes"]) == ("assumed", 4 * GIB)
-        assert lease["learned_bytes"] == (None if learn == "off" else learned)
+        assert lease["learned_per_slot_bytes"] == (None if learn == "off" else learned)
         assert lease["learned_runs"] == (None if learn == "off" else 3)
         shown = {
             "off": "4.0 GiB assumed ",
-            "shadow": "4.0 GiB assumed, learned 1.2 GiB ",
+            "shadow": "4.0 GiB assumed, learned 1.2 GiB/slot ",
             "on": "1.2 GiB learned (3 runs) ",
         }
         assert shown[learn] in cli(client.path, "leases").stdout
         client.release(lease["lease_id"])
         client.release(big)
 
-        cold = client.acquire(kind="work", rule="cargo", repo="/src/new", ttl_s=30, wait_s=0)
-        declared = client.acquire(
-            kind="work", rule="cargo", repo="/src/app", memory="2g", ttl_s=30, wait_s=0
-        )
+        # What a learned lease counts grows with its weight, as a declared size a slot does.
+        wide = cargo(client, "/src/app", weight=2)["lease"]
+        assert wide["memory_counted_bytes"] == (2 * learned if learn == "on" else 8 * GIB)
+        client.release(wide["lease_id"])
+
+        cold = cargo(client, "/src/new")
+        declared = cargo(client, "/src/app", memory="2g")
         assert [x["memory_from"] for x in (cold["lease"], declared["lease"])] == [
             "assumed",
             "declared",
@@ -182,14 +192,23 @@ def test_a_rule_s_past_runs_set_what_its_next_lease_counts_once_learn_is_on(
         assert cold["lease"]["memory_counted_bytes"] == 4 * GIB
         assert cold["lease"]["learned_runs"] == (None if learn == "off" else 2)
         assert declared["lease"]["memory_counted_bytes"] == 2 * GIB
-        assert declared["lease"]["learned_bytes"] is None
+        assert declared["lease"]["learned_per_slot_bytes"] is None
 
         groups = {g["repo"]: g for g in client.outcomes()["groups"]}
-        assert (groups["/src/app"]["learned_bytes"], groups["/src/new"]["learned_bytes"]) == (
-            learned,
-            None,
-        )
+        repos = ("/src/app", "/src/new", "/src/swap")
+        figures = [groups[repo]["learned_per_slot_bytes"] for repo in repos]
+        assert figures == [learned, None, math.ceil(2 * GIB * 1.15)]
         assert client.status()["memory"]["learn"] == learn
+
+
+def test_a_learned_figure_over_the_lease_ceiling_is_counted_in_full(tmp_path, sock_dir):
+    # [ceiling] memory bounds what a lease may declare; a learned figure is no declaration.
+    ceiling = {"slots": 2, "memory": "1g"}
+    with budgeted(tmp_path, sock_dir, "on", ceiling=ceiling) as client:
+        ran(client, "/src/app", *[{"anon_bytes": 3 * GIB}] * 3)
+        answer = cargo(client, "/src/app")
+        assert answer["status"] == "granted"
+        assert answer["lease"]["memory_counted_bytes"] == math.ceil(3 * GIB * 1.15)
 
 
 @pytest.mark.parametrize(
