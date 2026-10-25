@@ -9,7 +9,7 @@ learned figure a slot, or none while too few runs are known:
   `anon_bytes` is read about once a second, so it can miss a short spike: a run shorter than
   `SAMPLED_S`, or one with no `anon_bytes`, gives its `peak_bytes` instead, the upper bound.
   Neither counts memory in swap, so the most swap the scope used (`swap_bytes`) is added: a run
-  that spilled to swap, or that the memory net parked, is sized by all it held. An outcome that
+  that spilled to swap, or that the watchdog paused, is sized by all it held. An outcome that
   reports no swap (from an older client) adds none.
 * A run's size a slot is its size over the weight its lease held when it ended. A command given
   more slots runs more jobs, so what it uses is counted as growing with its weight.

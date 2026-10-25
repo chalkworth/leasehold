@@ -831,10 +831,6 @@ _EVENTS: dict[EventType, _Shown] = {
     ),
     EventType.POOL_MAX: _Shown("pool max", "bold", _pool_max),
     EventType.RESIZED: _Shown("resized", "", _resized),
-    EventType.PARKED: _Shown(
-        "parked", "bad", lambda e: f"{_who(e)}'s command paused, its memory moved to swap"
-    ),
-    EventType.RESUMED: _Shown("resumed", "ok", lambda e: f"{_who(e)}'s command runs again"),
     EventType.SESSION_STARTED: _Shown(
         "session", "", lambda e: f"session {e.get('session')} ({_agent(e)}) is watched"
     ),

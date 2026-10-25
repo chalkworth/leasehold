@@ -1,5 +1,6 @@
 """`leasehold doctor`'s warnings: a negative `oom_score_adj`, and a memory cap that is set but
-cannot hold; and a `memory_max` that is no cap, which is a config error."""
+cannot hold; and a `memory_max` that is no cap, or a retired `[memory_net]` table, which is a
+config error."""
 
 from __future__ import annotations
 
@@ -58,9 +59,21 @@ def test_doctor_says_how_each_operation_works_on_this_host():
     assert {op for op, how in said.items() if how != "none"} == {"pause", "resume", "kill"}
 
 
-@pytest.mark.parametrize("cap", ["0g", "150%", "lots"])
-def test_a_memory_max_that_is_no_cap_is_a_config_error(tmp_path, cap):
-    rule = {"programs": ["x"], "weight": 1, "memory_max": cap}
-    for commands in ({"memory_max": cap}, {"rule": [rule]}):
-        with pytest.raises(pydantic.ValidationError, match="give a size such as"):
-            machine_config(tmp_path, commands=commands)
+_NO_CAPS = ("0g", "150%", "lots")
+
+
+@pytest.mark.parametrize(
+    ("raw", "said"),
+    [
+        *[({"commands": {"memory_max": cap}}, "give a size such as") for cap in _NO_CAPS],
+        *[
+            ({"commands": {"rule": [{"programs": ["x"], "weight": 1, "memory_max": cap}]}},
+             "give a size such as")
+            for cap in _NO_CAPS
+        ],
+        ({"memory_net": {"mode": "park"}}, r"\[memory_net\] is gone.*see \[watchdog\]"),
+    ],
+)  # fmt: skip
+def test_a_config_that_cannot_hold_is_a_config_error(tmp_path, raw, said):
+    with pytest.raises(pydantic.ValidationError, match=said):
+        machine_config(tmp_path, **raw)

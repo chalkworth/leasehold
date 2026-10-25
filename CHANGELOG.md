@@ -41,43 +41,11 @@ here.
 - `leasehold doctor` warns when this shell has a negative `oom_score_adj`. Leased commands are
   reset to 0, but commands that are not leased keep the value, so the kernel spares them under
   memory pressure.
-- A memory net for your own daemon, off by default: `[memory_net] mode = "park"`. When the
-  contained commands under one memory limit spill into swap while the limit is near full and
-  stalls on memory, the daemon parks the youngest heavy command. It freezes the command's scope
-  and asks the kernel to move its memory out to swap, then lets it run again once another
-  command under that limit ends or memory frees. While a park is possible under a limit (two or
-  more heavy commands run there), each running scope's `memory.swap.max` is `overflow` (`"1g"`;
-  `"max"` for no limit) above the swap it held; otherwise the net sets no swap limit. Parking
-  writes at most `write_per_day` (`"16g"`) to swap in 24 hours. The net keeps
-  `memory-net.json` beside the ledger: a parked command stays frozen across a daemon restart and
-  the next daemon takes it over, and a daemon with the net off lets it run. See "Memory net" in
-  docs/reference.md.
-- While a lease is parked, or settling after it runs again, no new request that counts memory
-  is granted (none at all without `[memory]`). Such a request waits with `blocked` saying `the
-  memory net holds new work: lease ID is parked until memory frees` or `... is resuming after a
-  park`. No elastic lease grows meanwhile. `AdmissionPolicy` has a `memory_held` field, and
-  `AdmissionPolicy.from_pools` and `MachineConfig.policy` take `memory_held`.
-- The status object has a `memory_net` field: null while the net is off, else its mode, whether
-  it is active and why not, its limits, the bytes it wrote to swap, the leases `parked` and
-  `settling`, and the count of `parks`.
-- `POST /v1/renew` answers `parked` with `ok`. `Lease.parked` in the Python API says whether the
-  lease's command is parked, and `hold` tells its user when the command is paused and when it
-  runs again.
-- Events of type `parked` and `resumed`, shown by `top`.
-- An outcome records `parks` and `parked_s`, how often the net parked the command and for how
-  long. The ledger's outcomes table gains the two columns.
-- `leasehold doctor` warns when the net is on and there is no swap or the kernel is older than
-  5.19 (no `memory.reclaim`), and says when swap is on a non-rotational disk, which parking
-  wears.
-- A config with `[memory_net] mode = "park"` and `[contain] mode = "off"`, or for the machine's
-  daemon, is an error, and so is an `overflow` of 0.
-- The benchmark takes `net=park` (and `overflow=SIZE`) on the conditions whose jobs run in lease
-  scopes, and records the net's parks and swap writes for each run.
 - Learned memory. A request that declares no memory can count what its `[commands]` rule's
   past runs in its repository used for each slot of weight: 115% of the weighted median of each
   clean run's size over the weight it held, newer runs weighing more. Two big runs in a row
   raise it at once, and a run the OOM killer reached holds it up. A run's size is the most
-  anonymous memory it used plus the most swap, so a run that spilled to swap or was parked
+  anonymous memory it used plus the most swap, so a run that spilled to swap or was paused
   counts all it held. A run shorter than 10 seconds is sized by its `memory.peak` plus swap. A
   clean run exited 0 and the OOM killer did not reach it. There is no figure until 3 clean runs
   are known; until then the request counts its weight times `assumed_per_slot`, as before.

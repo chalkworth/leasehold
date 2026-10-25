@@ -17,7 +17,7 @@ lease's own keeps it renewed until it is released.
   the block ends.
 * A lease that ran a contained command (`popen`) sends what the command used with its release
   (`leasehold.measure`): the last such command's, when it ran more than one.
-* `parked` says whether the daemon's memory net (`leasehold.net`) has paused the lease's
+* `paused` says whether the daemon's watchdog (`leasehold.watchdog`) has paused the lease's
   command, as of the last renewal; the lease's `_say` hears when it is paused and when it runs
   again.
 """
@@ -330,9 +330,9 @@ class Lease:
         #: The memory verdict on the last command run under it (`supervise.Command.memory`):
         #: why memory ended it, which its exit status cannot say. None: memory did not.
         self.memory = None
-        #: Whether the daemon's memory net has the lease's command paused, as the last renewal
+        #: Whether the daemon's watchdog has the lease's command paused, as the last renewal
         #: said.
-        self.parked = False
+        self.paused = False
         self._on_lost = on_lost
         self._say = _say
         self._stop = threading.Event()
@@ -438,7 +438,7 @@ class Lease:
                 last_ok = time.monotonic()
             if verdict == "ok" and not pending:
                 self._take(renewal)
-                self._heard_parked(bool(renewal.get("parked")))
+                self._heard_paused(bool(renewal.get("paused")))
                 if follower is not None:
                     follower.heard(renewal)
                     follower.step()
@@ -475,17 +475,19 @@ class Lease:
                     )
                     return
 
-    def _heard_parked(self, parked: bool) -> None:
-        if parked == self.parked:
+    def _heard_paused(self, paused: bool) -> None:
+        if paused == self.paused:
             return
-        self.parked = parked
-        if parked:
+        self.paused = paused
+        if paused:
+            self._paused_at = time.monotonic()
             self._say(
-                "memory ran short, so the command is paused and its memory moved to swap; it "
-                "runs again once memory frees"
+                "memory is short: the command is paused, as the newest heavy work, until "
+                "memory frees. Nothing is lost; it continues where it stopped"
             )
         else:
-            self._say("the command runs again")
+            took = time.monotonic() - getattr(self, "_paused_at", time.monotonic())
+            self._say(f"the command runs again after {took:.0f}s paused")
 
     def _ask_again(self) -> dict:
         try:

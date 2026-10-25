@@ -317,8 +317,8 @@ weight for that user, rule and repository:
   says little about running out of memory, and `memory.peak` includes it. `anon_bytes` is read
   about once a second, so a run shorter than 10 seconds, which a few reads can miss a spike
   in, gives its `peak_bytes` instead. Neither counts memory in swap, so the run's most swap
-  (`swap_bytes`) is added: a run that spilled to swap, or that the [memory net](#memory-net)
-  parked, is sized by all it held. An outcome from a client that does not report swap adds
+  (`swap_bytes`) is added: a run that spilled to swap, or that [the watchdog](#the-watchdog)
+  paused, is sized by all it held. An outcome from a client that does not report swap adds
   none.
 - A run's size a slot is its size over the weight its lease held when it ended. A command
   given more slots runs more jobs, so the figure is counted a slot, as a declared
@@ -393,91 +393,6 @@ what new work may start depends on whether memory is counted:
   and test rule.
 
 The machine's daemon (`serve --system`) runs without the guard unless `[guard] enabled = true`.
-
-### Memory net
-
-Admission counts what each lease declares or is assumed to use, and a count can be wrong. When
-it is, the commands under one memory limit need more than the limit together and spill into
-swap. Once the limit's swap fills, the kernel's OOM killer ends one of them. The memory net,
-off by default, steps in before that in your own daemon: it pauses one command and moves its
-memory out to swap until another command ends, then lets it run again.
-
-```toml
-[memory_net]
-mode = "park"            # "off" (the default) or "park"
-overflow = "1g"          # the swap each contained command may spill into; "max": no limit
-write_per_day = "16g"    # the most parking may write to swap in any 24 hours
-```
-
-The net pauses a command by its scope, so it needs [containment](#containment), and it runs
-only in your own daemon, which can reach your scopes. A config that turns it on with `[contain]
-mode = "off"`, or for the machine's daemon, is an error. It also needs swap and a kernel with
-`memory.reclaim` (Linux 5.19 or later): without them, it parks nothing, `status` says why, and
-`leasehold doctor` warns.
-
-The net watches the scope of every contained command, grouped by the memory limit above it.
-That limit is the cgroup that sets the lowest `memory.max` or `memory.high` (a `leasehold run`
-session slice with a limit, the user slice, a container), or else the machine. The net looks
-four times a second, and sooner when a limit's `memory.events` changes.
-
-Heavy commands are those holding 256 MiB or more in memory and swap. While two or more heavy
-commands run under one limit and parking has writes left for the day, the net sets each
-running command's `memory.swap.max` to `overflow` more than the swap it holds then. That gives
-a command room to spill while the net acts, and no more. Otherwise the net sets no swap limit,
-and puts back `max` where it set one: a command it would not park swaps as freely as without
-the net.
-
-The net parks the youngest heavy command under a limit, the one granted last, which has done
-the least work, when all of these hold:
-
-- the limit is near: what it holds is 90% of the limit or more, or its `memory.events` counted
-  a `high` or `max` event in the last 4 s;
-- the limit stalls on memory for at least 5% of the time (PSI `some`);
-- a command's swap grew by 32 MiB or more within a quarter of a second or within 4 s, or it has
-  used three quarters of its overflow (a command at its swap limit can spill no further, so its
-  swap stops growing).
-
-Parking freezes the scope (`cgroup.freeze`), lifts its swap limit and asks the kernel to
-reclaim its memory (`memory.reclaim`), which writes it to swap. The other commands' swap limits
-are lifted while that runs. The net never parks the only heavy command under a limit, never
-within 2 s of a park or of letting a command run again there, and never once parking has
-written `write_per_day` in the last 24 hours, though it still resumes what it parked. The
-day's count is kept with the ledger, so a restart does not reset it.
-
-The command parked longest runs again when no other heavy command under its limit runs, or
-when what the limit holds plus what the command has in swap is under 80% of the limit. Until
-then it waits, however long that is. It then reads its memory back, and it is settling until
-its growth, averaged over a second, has stayed under 16 MiB a second (or 1% of what it uses)
-for 5 s, or for 60 s at most.
-
-While any lease is parked or settling, no new request that counts memory starts, under any
-limit: a park in one `leasehold run` session holds the others too. With no
-`[memory]` table nothing is counted, so no new request starts at all. A request held this way
-waits, saying `the memory net holds new work: lease ID is parked until memory frees` (or `...
-is resuming after a park`), and blocks its pool as any request whose turn it is does; no
-elastic lease grows meanwhile. The parked lease is still held, so its memory stays counted, and
-it runs again before anything new starts. Without this hold, a request granted the moment
-another command ended would start beside the resumed one as it reads its memory back, and the
-two would overflow the limit again.
-
-`hold` says when its command is parked and when it runs again. A renewal answers `parked`, and
-`leasehold.lease()` has `lease.parked`. `status` has `memory_net` ([the status
-object](#the-status-object)), events say `parked` and `resumed`, and a lease's
-[outcome](#containment) records how often it was parked (`parks`) and for how long in all
-(`parked_s`). A lease that ends while parked is let run again without settling.
-
-The net keeps a record beside the ledger (`memory-net.json`) of the commands it froze, the swap
-limits it set and what it wrote to swap. A daemon that stops leaves a parked command frozen
-and puts back `max` on every swap limit it set. The next daemon with the net on takes over a
-frozen command whose lease it still holds as parked, so it waits its turn and the hold applies,
-and lets any other frozen command run. A daemon with the net off lets every command in the
-record run. Of the scopes of leases the daemon does not hold, the net touches only those in
-its record.
-
-A park costs time and disk writes: the command waits for another to end, and its memory goes to
-swap and comes back. Every write wears an SSD or NVMe disk; `write_per_day` bounds the writes,
-and `leasehold doctor` says when swap is on such a disk. With admission that counts memory
-well, the net rarely has to act.
 
 ### Lending
 
@@ -738,7 +653,6 @@ an example machine. An unknown key is an error.
 | `[commands]` | the built-in rules | see [`[commands]`](#which-commands-take-a-lease-commands): `defaults`, `[[commands.rule]]`, `heavy_weight` (4), `light_weight` (2), `wait_s`, `when_busy` |
 | `[memory]` | none: no memory counted | see [Memory](#memory): `budget` (`"auto"`), `kept` (`"25%"`), `assumed_per_slot` (`"auto"`), `learn` (`"shadow"`) |
 | `[guard]` | on for your own daemon | see [Memory guard](#memory-guard): `enabled`, `memory_pressure_on` (10), `memory_pressure_off` (2.5), `min_available` (5% of memory, at least 512 MiB), `settle_s` (30) |
-| `[memory_net]` | `mode = "off"` | see [Memory net](#memory-net): `mode` (`"off"` or `"park"`), `overflow` (`"1g"`, or `"max"`), `write_per_day` (`"16g"`) |
 | `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again; at least 1 |
 | `[elastic] headroom` | `"keep"` | how much of the pools' and the machine's headroom an [elastic lease](#elastic-leases) leaves free as it grows: `"keep"` all of it, `"leave-one"` one slot, `"use"` none |
 | `[watchdog] agents` | `["claude", "codex", "gemini", "cursor-agent", "aider"]` | the program names your own daemon [watches as sessions](#watched-sessions) without being asked; `[]` for none |
@@ -902,8 +816,8 @@ with the lease's size, range and declared memory. `leasehold outcomes` lists it.
   ` ~ ` and its `args` when it has them (`make ~ -j`). The built-in pytest-xdist rule is
   `py.test, pytest ~ xdist`.
 - `repo`: the top of the git work tree the command ran in, or null.
-- `parks` and `parked_s`: how often the [memory net](#memory-net) parked the command and for
-  how long in all, recorded by the daemon; null where no net watched it.
+- `pauses` and `paused_s`: how often [the watchdog](#the-watchdog) paused the command and
+  for how long in all, recorded by the daemon; null where it did not say.
 
 An uncontained command records nothing. A lease from `leasehold.lease()` records its last
 contained command's outcome, with no rule. The ledger keeps the newest 50 outcomes for each
@@ -1876,7 +1790,7 @@ client for it.
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
 | `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it), `memory_max`, the rule's [hard cap](#a-hard-cap-memory_max) in bytes (`"8589934592b"`), `"off"`, or null when it sets none, and `case`, its cases, each with `args`, `weight` (clamped the same way; 0 is no lease) and `note`; a rule no lease could ever be granted for carries `never`, the reason |
 | `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic`, `rule` and `repo` (what the work's outcome will be filed under; with a rule, a request that declares no memory may count a [learned figure](#learned-memory)) | `status`: `granted` (with `lease`; `elastic`, the daemon's `[elastic]` settings; `contain`, its `[contain]` settings with `memory_max`, the `[commands] memory_max` [cap](#a-hard-cap-memory_max) in bytes or null; the lease has `max_jobs`, the job count of its `max_weight`, and `memory_counted_bytes`, the memory admission counts for it at the weight granted), `queued` (with `position`, `blocked`, the `min_weight` and `max_weight` it waits with, as admission would cut them now, and, while a maintenance lease holds or drains the machine, `maintenance` as in [status](#the-status-object)) or `refused` (with `reason`) |
-| `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs`; with `ok`, `parked`: whether the [memory net](#memory-net) has its command paused |
+| `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs` |
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
 | `POST /v1/elastic` | `lease_id` | `elastic`, with the lease's `weight`, `jobs`, `target` and `target_jobs`: a held range is elastic from now on; 409 `conflict` when it is not held, 400 for a lease with no range |
 | `POST /v1/release` | `lease_id`, `outcome` | `released` |
@@ -1937,8 +1851,7 @@ Events are kept in memory, the last 500, each with a `type`: `granted` (and whet
 `waited`), `queued` (with its `position`), `left` (the line, without a grant), `released`,
 `ended` (with a `reason`: `expired`, `holder gone`, or `no longer matched` for an observed
 program), `revoked`, `resized` (an elastic lease's size changed, from `previous_weight`),
-`parked` and `resumed` (the [memory net](#memory-net) paused a lease's command, or let it run
-again), `lend_opened` and `lend_closed`, and `session_started` and `session_ended` (a
+`lend_opened` and `lend_closed`, and `session_started` and `session_ended` (a
 [watched session](#watched-sessions), with its `session`, `source`, `user`, `agent` and
 `agent_pid`; an end has a `reason`: `unregistered`, `agent ended`, or `joined` when a registered
 session took in an agent that was found by name), and from [the watchdog](#the-watchdog),
@@ -1990,12 +1903,6 @@ when a field is removed or changes meaning:
   oldest one draining it, or null: `lease_id`, `state` (`held` or `draining`), `user`, `name`
   (its `name` label, or else its user), `reason`, `until` (its `until` label, or null) and
   `message`, the words a request it holds up gives as `blocked`;
-- `memory_net`: null while the [memory net](#memory-net) is off, else `mode`, `active` and
-  `reason` (why it parks nothing, such as no swap, or null), `overflow_bytes` (null for
-  `"max"`), `write_per_day_bytes`, `written_day_bytes` (what parking wrote to swap in the last
-  24 hours), `watched` (the scopes it watches), `parked` (each with `lease_id`, `since` and
-  `memory_bytes`, what it held in memory and swap when parked), `settling` (each with
-  `lease_id` and `since`), and since the daemon started, `parks` and `written_bytes`;
 - `watchdog`: the [watched sessions](#watched-sessions). `processes` says whether a session's
   processes can be found here (`how`: `polled` or `none`, and `reason`), `discover` lists the
   `[watchdog] agents` names this daemon looks for (empty for the machine's daemon), and

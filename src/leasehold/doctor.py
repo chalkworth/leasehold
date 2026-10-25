@@ -561,78 +561,6 @@ def check_proc(roots: Roots, config) -> Check:
     )
 
 
-def _swap_disk(sys_root: Path, name: str, kind: str) -> tuple[str, bool | None]:
-    """The block device under the swap area `name` (a `Filename` of `/proc/swaps`, of `Type`
-    `kind`), and whether it is rotational (None: unknown)."""
-    try:
-        found = os.stat(name)
-    except OSError:
-        return Path(name).name, None
-    number = found.st_rdev if kind == "partition" else found.st_dev
-    device = sys_root / "dev" / "block" / f"{os.major(number)}:{os.minor(number)}"
-    try:
-        device = device.resolve(strict=True)
-    except OSError:
-        return Path(name).name, None
-    disk = device.parent if (device / "partition").exists() else device
-    flag = (disk / "queue" / "rotational").read_text().strip() if disk.is_dir() else ""
-    return disk.name, {"0": False, "1": True}.get(flag)
-
-
-def _kernel(proc: Path) -> tuple[int, int] | None:
-    """The running kernel's major and minor version, or None when unknown."""
-    try:
-        major, minor = (proc / "sys" / "kernel" / "osrelease").read_text().split(".")[:2]
-        return int(major), int("".join(c for c in minor if c.isdigit()) or 0)
-    except (OSError, ValueError):
-        return None
-
-
-def check_memory_net(config, roots: Roots) -> Check | None:
-    """With `[memory_net] mode = "park"`, whether there is swap to park in, and, where it is
-    on a disk that wears with writes, that parking writes to it."""
-    if config is None or not config.memory_net.on:
-        return None
-    try:
-        lines = (roots.proc / "swaps").read_text().splitlines()[1:]
-    except OSError:
-        lines = []
-    areas = [line.split() for line in lines if len(line.split()) >= 3]
-    if not areas:
-        return Check(
-            "memory_net",
-            "warn",
-            'mode = "park", but there is no swap, so nothing can be parked: a command that '
-            "runs memory out is killed as without the net",
-            'add swap (a swap file of a few GiB will do), or set [memory_net] mode = "off"',
-        )
-    release = _kernel(roots.proc)
-    if release is not None and release < (5, 19):
-        return Check(
-            "memory_net",
-            "warn",
-            f'mode = "park", but this kernel ({".".join(map(str, release))}) has no '
-            "memory.reclaim, which Linux 5.19 added, so nothing can be parked",
-            'run a newer kernel, or set [memory_net] mode = "off"',
-        )
-    cap = config.memory_net.write_per_day
-    worn = []
-    for name, kind, *_ in areas:
-        if Path(name).name.startswith("zram"):
-            continue  # compressed memory: no disk is written
-        disk, rotational = _swap_disk(roots.sys, name, kind)
-        if rotational is False:
-            worn.append(disk)
-    detail = f"parks in swap ({', '.join(a[0] for a in areas)})"
-    if worn:
-        detail += (
-            f"; it is on {', '.join(dict.fromkeys(worn))}, a disk that is not rotational (an "
-            f"SSD or NVMe), which every write wears: parking writes at most {cap} a day "
-            "([memory_net] write_per_day)"
-        )
-    return Check("memory_net", "ok", detail)
-
-
 def check_ledger(config) -> Check | None:
     """Whether a daemon run by this user could keep its ledger where the config says. The
     system daemon's runs as another user, so only its default directory is vouched for."""
@@ -711,9 +639,6 @@ def run(
     oom = check_oom_score(roots)
     if oom is not None:
         checks.append(oom)
-    net = check_memory_net(resolved, roots)
-    if net is not None:
-        checks.append(net)
     commands = check_commands(resolved)
     if commands is not None:
         checks.append(commands)

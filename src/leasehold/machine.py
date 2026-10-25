@@ -263,43 +263,6 @@ class ContainSettings(_Strict):
     hard_cpu: bool = False
 
 
-class MemoryNetSettings(_Strict):
-    """The `[memory_net]` table: what the daemon does when memory under a limit runs out
-    (`leasehold.net`). Off unless `mode = "park"`."""
-
-    #: `off`: nothing; `park`: pause the youngest heavy contained command and push its memory
-    #: to swap, and hold new memory-counting work until it has resumed and settled.
-    mode: Literal["off", "park"] = "off"
-    #: The swap each running contained command may spill into before it is parked
-    #: (`memory.swap.max` of its scope), a size such as `1g`; `max` leaves the scope's swap
-    #: unlimited.
-    overflow: str = "1g"
-    #: The most parking may push to swap in any 24 hours, a size such as `16g`. Once it has,
-    #: nothing more is parked until the oldest of those writes is a day old; what is parked
-    #: is still resumed.
-    write_per_day: str = "16g"
-
-    @field_validator("overflow")
-    @classmethod
-    def _overflow(cls, value: str) -> str:
-        if value != "max" and memory_to_bytes(value) == 0:
-            raise ValueError("an overflow of 0 lets no command spill at all; give a size or max")
-        return value
-
-    _write = field_validator("write_per_day")(_size)
-
-    @property
-    def on(self) -> bool:
-        return self.mode == "park"
-
-    def overflow_bytes(self) -> int | None:
-        """`overflow` in bytes; None for `max`."""
-        return None if self.overflow == "max" else memory_to_bytes(self.overflow)
-
-    def write_per_day_bytes(self) -> int:
-        return memory_to_bytes(self.write_per_day)
-
-
 #: The agents a user's own daemon watches without being asked, by program name.
 DEFAULT_AGENTS = ("claude", "codex", "gemini", "cursor-agent", "aider")
 
@@ -522,8 +485,6 @@ class MachineConfig(_Strict):
     #: The memory admitted work may count together. None (no `[memory]` table): no memory is
     #: counted.
     memory: MemorySettings | None = None
-    #: What happens when memory under a limit runs out (`leasehold.net`).
-    memory_net: MemoryNetSettings = Field(default_factory=MemoryNetSettings)
     #: Which agent sessions are watched (`leasehold.sessions`).
     watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
 
@@ -547,6 +508,16 @@ class MachineConfig(_Strict):
     def defaults(cls, *, slots: int) -> MachineConfig:
         """The config a daemon runs on when it has no file: `slots` slots, the default pools."""
         return cls(ceiling=MachineCeiling(slots=max(1, slots)))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired(cls, data):
+        if isinstance(data, dict) and "memory_net" in data:
+            raise ValueError(
+                "[memory_net] is gone: the watchdog pauses and stops work when the machine runs "
+                "short of memory. Remove the table, and see [watchdog]"
+            )
+        return data
 
     @model_validator(mode="after")
     def _consistent(self) -> MachineConfig:
@@ -587,16 +558,6 @@ class MachineConfig(_Strict):
                 errors.append(f"pools.{pool}: a lend pool reserves nothing")
         errors += self._standing_errors(pools)
         errors += self._memory_errors()
-        if self.memory_net.on and self.contain.mode == "off":
-            errors.append(
-                'memory_net: mode = "park" pauses contained commands, and [contain] mode is '
-                '"off", so there would be none to pause'
-            )
-        if self.memory_net.on and self.mode == "system":
-            errors.append(
-                'memory_net: mode = "park" runs only in a user\'s own daemon, which can reach '
-                "the scopes of that user's commands"
-            )
         errors += self._observe_errors()
         for n, rule in enumerate(self.commands.rule):
             if rule.pool is None and self.rule_pool(rule) not in pools:
@@ -914,7 +875,7 @@ class MachineConfig(_Strict):
         lease may count (`[ceiling] memory`), with a budget or without one. The observed pool
         is `observed`, since nothing waits in line for it, and its headroom is 0 unless the
         config gives one. `maintenance` is what waiters held up by a maintenance lease are
-        told, and `memory_held` why the memory net holds new work (None: it does not), with a
+        told, and `memory_held` why the watchdog holds new work (None: it does not), with a
         budget or without one."""
         pool_set = self.pool_set()
         observed = self.observed_pool
@@ -1021,10 +982,6 @@ def resolve(config: MachineConfig, mode: Mode | None, env: Mapping[str, str]) ->
     socket = Path(config.socket) if config.socket else default_socket(chosen, env)
     ledger_dir = Path(config.ledger_dir) if config.ledger_dir else default_ledger_dir(chosen, env)
     check_mode(chosen, socket, ledger_dir, env)
-    if chosen == "system" and config.memory_net.on:
-        raise ValueError(
-            'memory_net: mode = "park" runs only in a user\'s own daemon, not --system'
-        )
     return config.model_copy(
         update={
             "mode": chosen,
