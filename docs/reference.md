@@ -1488,8 +1488,8 @@ the last `mapped_window_s` (5 minutes) plus 0.5 GiB, whichever is more. It uses 
 value, because `Mapped` falls as the cache is evicted, which is just when the floor matters.
 `critical_below` is only the lowest the floor goes, and `hold_below` only sets how far the `warn`
 line sits above the floor (1 GiB by default); the lines in use are `floor_bytes` and
-`hold_line_bytes`. When `Mapped` raised the floor, the `critical` and `warn` reasons in events and
-holds say so, such as `2.8 GiB available, under 3.0 GiB (mapped 2.5 GiB + 0.5)`. Status shows
+`hold_line_bytes`. When `Mapped` raised the floor, the `critical` reason in events and
+holds says so; the `warn` reason names only its line. A `critical` reason reads like `2.8 GiB available, under 3.0 GiB (mapped 2.5 GiB + 0.5)`. Status shows
 the floor in use and why (`floor_reason`, such as `2.6 GiB: mapped 2.1 GiB + 0.5`). A file
 read with `read()` and not mapped is not in `Mapped`; the disk stall below covers that case.
 

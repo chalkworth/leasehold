@@ -244,7 +244,7 @@ def judge(
     if m.os_level == "critical":
         return "critical", "the system says memory is critical"
     if counts and avail < under.hold:
-        return "warn", f"{_gib(avail)} available, under {_gib(under.hold)}{raised}{swap}"
+        return "warn", f"{_gib(avail)} available, under {_gib(under.hold)}{swap}"
     if m.os_level == "warn":
         return "warn", f"the system warns of memory, with {_gib(avail)} available"
     return "ok", f"{_gib(avail)} available{swap}"
@@ -516,7 +516,8 @@ class Watchdog:
         else:
             if self._ok_since is None:
                 self._ok_since = memory.now
-            self._last_stop = None
+            if self._critical_since is None:
+                self._last_stop = None
         self._let_go(state)
         self._choose(state)
         self._level = state.level

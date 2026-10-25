@@ -541,7 +541,9 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         (2.5, [101, 105, 106], [], [105, 106], paused_now),  # a flap to warn
         (1.5, [101, 105, 106], [("kill", 106)], [105], paused_now),
         # The disk stall of the file cache read back after a stop stops nothing more.
-        *[(2.5, [101, 105], [], [105], paused_now, 50)] * 2,
+        (2.98, [101, 105], [], [105], paused_now, 50),
+        (3.0, [101, 105], [], [105], paused_now),  # a blip of ok does not end the episode
+        (2.98, [101, 105], [], [105], paused_now, 50),
         (10, [101], [("resume", 105)], [], None),  # 105 ended: the rest of it runs again
         *[(10, [101], [], [], None)] * 2,  # calm for 5 s ends the episode
         (1.5, [101, 103], [("pause", 103)], [103], paused_now),
