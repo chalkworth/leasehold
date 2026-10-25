@@ -293,17 +293,22 @@ LARGE_SHARE = 0.25
 ACT_AT = "critical"
 #: `max_pause_s`: a tree paused this long is stopped, so a long peer cannot keep it paused.
 MAX_PAUSE_S = 900.0
-#: Command lines never chosen, besides `[watchdog] protect`, matched against each process of
-#: a tree: the agents themselves (and agents they start), MCP servers, which start with their
-#: agent, and the browsers and editors an agent opens for the person.
+#: Command lines never chosen, matched against every process of a tree: the coding agents, so
+#: that an agent another agent started is left alone.
+PROTECT_ANY = (r"^(\S*/)?(claude|codex|gemini|cursor-agent|aider|opencode|goose)(\s|$)",)
+#: Command lines never chosen, besides `[watchdog] protect`, matched against a tree's heads (its
+#: root, and the programs its tool shells run): MCP servers, by their program, package or module
+#: name and never by a path, and the browsers and editors an agent opens for the person, unless
+#: headless (a test runner's browser, stopped with its tests).
 PROTECT = (
-    r"^(\S*/)?(claude|codex|gemini|cursor-agent|aider|opencode|goose)(\s|$)",
     r"@modelcontextprotocol/",
-    r"(^|[\s/])mcp[-_]server",
-    r"^(\S*/)?(npx|uvx|bunx|pnpx|node|bun|deno|python3?)(\s+-\S+)*\s+\S*mcp",
-    r"^(\S*/)?uv\s+run(\s+-\S+)*\s+\S*mcp",
-    r"^(\S*/)?(xdg-open|code|code-insiders|cursor|codium|zed|chromium|chromium-browser|chrome"
-    r"|google-chrome|google-chrome-stable|firefox|firefox-esr)(\s|$)",
+    r"^(\S*/)?[\w.-]*mcp[\w.-]*(\s|$)",
+    r"^(\S*/)?(npx|uvx|bunx|pnpx)(\s+-\S+)*\s+(@[\w.-]+/)?[\w.-]*mcp[\w.-]*(@\S*)?(\s|$)",
+    r"^(\S*/)?uv\s+run(\s+-\S+)*\s+[\w.-]*mcp[\w.-]*(\s|$)",
+    r"^(\S*/)?(python3?|uv\s+run\s+python3?)(\s+-\S+)*\s+-m\s+[\w.]*mcp[\w.]*(\s|$)",
+    r"^(?!.*\s--?headless)(?!.*\s-marionette)(\S*/)?(xdg-open|code|code-insiders|cursor|codium"
+    r"|zed|chromium|chromium-browser|chrome|google-chrome|google-chrome-stable|firefox"
+    r"|firefox-esr)(\s|$)",
 )
 #: The watchdog's levels, least first.
 LEVELS = ("ok", "warn", "critical")
@@ -346,7 +351,7 @@ class WatchdogSettings(_Strict):
     #: chosen. They are watched and reported either way.
     choose_discovered: bool = False
     #: Regular expressions searched for in a tree's command line: a tree that matches is never
-    #: chosen. They add to the built-in ones (`PROTECT`).
+    #: chosen. They add to the built-in ones (`PROTECT`), and are tried against the same lines.
     protect: list[str] = Field(default_factory=list)
 
     @field_validator("agents")

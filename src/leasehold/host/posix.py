@@ -162,6 +162,15 @@ class Posix:
         """The command `proc` runs: not readable here."""
         return None
 
+    def freeable(self, proc: Proc) -> int | None:
+        """What stopping `proc` would return to available memory: not readable here."""
+        return None
+
+    def boot_id(self) -> str | None:
+        """What names this boot of the machine, so that a pid recorded in an earlier boot is
+        not taken for one now: not readable here."""
+        return None
+
     def wakeup_fd(self) -> int | None:
         """A file descriptor that turns readable when a tree or the machine's memory changes,
         so that a loop can look again before its next tick; None: there is none here."""

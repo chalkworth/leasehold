@@ -499,6 +499,25 @@ class Linux(Posix):
                 found.append(got)
         return found
 
+    def freeable(self, proc: Proc) -> int | None:
+        """What stopping `proc` would return to available memory: its proportional share of
+        the anonymous memory it holds in RAM (`Pss_Anon`), so that pages forked workers share
+        copy-on-write count once across them, and memory in swap (which frees swap, not RAM)
+        does not count. None once it has ended or when it cannot be read."""
+        text = _read(self._proc / str(proc.pid) / "smaps_rollup")
+        if text is None or (proc.fence is not None and self._fence(proc.pid) != proc.fence):
+            return None
+        for line in text.splitlines():
+            if line.startswith("Pss_Anon:"):
+                return int(line.split()[1]) << 10
+        return None
+
+    def boot_id(self) -> str | None:
+        """This boot's id (`/proc/sys/kernel/random/boot_id`), so that a pid recorded in an
+        earlier boot is not taken for one now."""
+        text = _read(self._proc / "sys" / "kernel" / "random" / "boot_id")
+        return None if text is None else text.strip() or None
+
     def command_line(self, proc: Proc) -> str | None:
         """The command `proc` runs, its arguments joined by spaces; None once it has ended (or
         its pid is another process's) or when it cannot be read."""

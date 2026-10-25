@@ -195,24 +195,28 @@ here.
   2 GiB available once swap is nearly full (or there is none), or every task stalled on memory
   over 20% of the last 2 seconds. `warn`: under 3 GiB available once swap is nearly full. With
   `[watchdog] mode = "on"`, at `act_at` (`critical` by default) it holds new heavy work and
-  pauses a session's tree: a runaway first (growing over two 5 second windows, and either over
-  twice what its leases declared or learned or growing by half the machine's fall in available
-  memory), then a tree over a quarter of memory, then the newest. It pauses the next tree after
-  2 seconds and only while available memory keeps falling. Once the level has been `critical`
-  for 5 seconds it kills one tree paused for at least 5 seconds, a runaway first, with
-  SIGKILL; a paused runaway is killed 5 seconds after its pause while the level
-  is `warn` or worse, and any tree paused over `max_pause_s`. A stop that frees less than half
-  the tree's footprint within 2 seconds means the shortage is outside the sessions: it stops
-  nothing more that episode, holds new heavy work and says so. Once the level has been `ok` for
-  10 seconds the oldest paused tree runs again, and new heavy work waits until it settles
-  (flat for 30 seconds with room) or `max_pause_s` has passed. `hold`, the shims and the tool's
-  shells are never paused or stopped. Trees of sessions found by name, the agent process,
-  trees of only leasehold's own processes, small trees, trees that started with their agent
-  and trees where any process matches a protect pattern are never chosen. The built-in
-  patterns cover coding agents, MCP servers, browsers and editors. Where the machine's memory
-  cannot be read (macOS for now) it never acts. `mode = "watch"` only says what it would do. A
-  simulation and real runs in a 16 GiB VM set the defaults. See "The watchdog" in
-  docs/reference.md.
+  pauses a session's tree. A runaway goes first: one growing over two 5 second windows, and
+  either over twice what its leases declared or learned or growing by half the machine's fall
+  in available memory. Then comes a tree whose stop would free a quarter of memory, then the
+  newest. It picks only a tree whose stop would help: a runaway, or one that would return a
+  quarter of what available memory lacks of `hold_below`, measured from each process's
+  `Pss_Anon`. It pauses the next tree after 2 seconds, and only while available memory keeps
+  falling. Once the level has been `critical` for 5 seconds it kills one tree paused for at
+  least 5 seconds, a runaway first, with SIGKILL. A paused runaway is killed 5 seconds after its
+  pause while the level is `warn` or worse, and any tree paused over `max_pause_s` is killed
+  whatever else holds. When no tree paused or in line would help, the shortage is outside the
+  sessions: the paused trees run again, new heavy work waits while the level is at `act_at`,
+  and the agents are told. Once the level has been `ok` for 10 seconds the oldest paused tree
+  runs again, and new heavy work waits until it settles (flat for 30 seconds with room) or
+  `max_pause_s` has passed. `hold`, the shims and the shells they run under are never paused
+  or stopped; a program that runs a shim is. It never chooses trees of sessions found by name,
+  the agent process, trees of only leasehold's own processes, small trees, trees that started
+  with their agent, trees with a coding agent in them, or trees whose first process (or what
+  its tool shells run) matches a protect pattern. The built-in patterns cover MCP servers by
+  program, package or module name, and browsers and editors that are not headless. Where the
+  machine's memory cannot be read (macOS for now) it never acts. `mode = "watch"` only says
+  what it would do. A simulation and real runs in a 16 GiB VM set the defaults. See "The
+  watchdog" in docs/reference.md.
 - `[watchdog]` keys: `mode` (`"watch"`, `"on"` or `"off"`), `act_at` (`"critical"`, or
   `"warn"`), `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`, or a
   size), `max_pause_s` (900, at least 10), `choose_discovered` (false) and `protect` (regular
@@ -221,7 +225,8 @@ here.
 - The status object's `watchdog` has `mode`, `act_at`, `level`, `reason`, `available_bytes`,
   `swap_free_bytes`, `available_counts`, `stall_recent`, `limits` (with `max_pause_s`), `how`,
   `candidates`, `passed_over`, `victim`, `would`, `held` (why new heavy work waits), `outside`
-  (true while the shortage is outside the sessions), `paused` and `stopped`. Where the machine's memory cannot be read, `level` is null and `reason` says
+  (true while no tree in a session would help), `paused` and `stopped`. A tree in it has
+  `frees_bytes`. Where the machine's memory cannot be read, `level` is null and `reason` says
   the watchdog cannot see memory there.
 - Events `held`, `paused`, `resumed`, `stopped` and `runaway` from the watchdog, each with
   `would` (true while it only decides). `top` shows `paused`, `resumed` and `stopped`.
@@ -249,8 +254,10 @@ here.
   while a notice waits. `hooknotes.notice` and `hooknotes.notices` are new.
 - `watchdog.json` beside the ledger keeps the trees the watchdog paused, with each process and
   its start time. A daemon that stops lets them run, and one that starts lets any it finds
-  there run, even when a tree's first process has ended. `host.Tree` has `spare` (processes
-  pause, resume and kill leave alone) and `members` (the processes recorded at a pause).
+  there run, even when a tree's first process has ended.   `host.Tree` has `spare` (processes
+  pause, resume and kill leave alone) and `members` (the processes recorded at a pause). The
+  file names the boot it was written in (`host.boot_id`), and a daemon only removes one from an
+  earlier boot. The host's `freeable(proc)` says what stopping a process would free.
 - With the watchdog on, `leasehold serve` locks the daemon's memory in RAM (`mlockall`) and
   raises its priority where the user may (`host.stay_resident`). On Linux it locks with
   `MCL_ONFAULT`, and threads started after it get a 256 KiB stack. `leasehold doctor` has a

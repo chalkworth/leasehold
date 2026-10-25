@@ -1503,25 +1503,38 @@ order:
    available memory fell. Real builds and test runs repeat their peaks to within about 10%, so
    twice is far beyond. A test run that grows slowly while something else (a browser, say)
    takes the memory is not a runaway.
-2. A tree holding a quarter of the machine's memory or more, the largest first.
+2. A tree whose stop would free a quarter of the machine's memory or more, the largest first.
 3. The newest tree, by its first process's start, across all sessions. A tree that holds no
    lease and runs no tool shell (for a session its hooks registered) comes after those that
    do, so the commands the agent ran go first.
+
+Each is chosen only when stopping it would help: when it is a runaway, or would return at least
+a quarter of the deficit (what available memory lacks of `hold_below`) to available memory.
+While memory is short, the daemon measures what a stop would free as each process's
+proportional share of the anonymous memory it holds in RAM (`Pss_Anon`). Pages that forked
+workers share count once across them, and memory in swap, which a stop returns to swap and not
+to RAM, does not count (`frees_bytes`; until it is measured, the footprint stands in). While
+available memory does not count (swap has room), every tree helps.
 
 Some trees are never chosen:
 
 - a tree under `min_size`;
 - one the agent process runs under;
 - one made only of leasehold's own processes: `leasehold hold`, a PATH shim, a hook, the daemon.
-  In any other tree those processes are `spared`: left out of its footprint, and left running
-  if it were paused. A program that holds its own lease through the Python API (a test runner,
-  say) is not leasehold's, and is paused with its tree;
-- one where any process's command line matches a built-in pattern or one of
-  `[watchdog] protect`. The built-in patterns match by the program a process runs, never by a
-  path elsewhere on the line: coding agents (`claude`, `codex`, `gemini`, `cursor-agent`,
-  `aider`, `opencode`, `goose`), so a nested agent is left alone; MCP servers such as
-  `npx -y @modelcontextprotocol/...`, `uvx mcp-...` or `uv run my_mcp_server.py`; and browsers
-  and editors (`xdg-open`, `code`, `cursor`, `zed`, Chrome, Chromium, Firefox);
+  A process is leasehold's when leasehold is its program, not when its arguments name
+  leasehold. In any other tree those processes are `spared`: left out of its footprint, and
+  left running if it were paused, with the shells they run under, up to the first other
+  program. A program that runs a shim (a test run calling `make`) is paused and stopped with
+  its tree, and so is a program that holds its own lease through the Python API;
+- one with a coding agent among its processes (`claude`, `codex`, `gemini`, `cursor-agent`,
+  `aider`, `opencode`, `goose`), so a nested agent is left alone;
+- one whose heads (its first process, and what its tool shells run) match a built-in pattern or
+  one of `[watchdog] protect`. The built-in patterns match the program, package or module name,
+  never a path elsewhere on the line: MCP servers such as `npx -y @modelcontextprotocol/...`,
+  `uvx mcp-...`, `github-mcp-server` or `python -m my_mcp`; and browsers and editors
+  (`xdg-open`, `code`, `cursor`, `zed`, Chrome, Chromium, Firefox) unless headless
+  (`--headless`, `-headless`, `-marionette`). A test runner's browser further down a tree
+  protects nothing;
 - one whose first process started within 10 seconds of its agent, such as the MCP and language
   servers a session starts with;
 - any tree of a session found by name, which never asked to join, unless `choose_discovered =
@@ -1567,11 +1580,15 @@ With `mode = "on"`:
   from the last stop, it kills one paused tree that has been paused for at least 5 seconds,
   a runaway first, then the newest, with SIGKILL (a scope with `cgroup.kill`). A paused
   runaway is killed 5 seconds after its pause while the level is `warn` or worse, and a large
-  tree waits for `critical` like any other. A tree paused longer than `max_pause_s` (900) is killed too.
-- If a stop has not raised available memory by half the stopped tree's footprint 2 seconds
-  later, the shortage is outside leasehold's sessions. For the rest of that episode it stops
-  and pauses nothing more, holds new heavy work, sets `watchdog.outside` in the status, and
-  tells the agents that memory is short outside leasehold's sessions.
+  tree waits for `critical` like any other. It kills a paused tree only while the tree still
+  helps (down to an eighth of the deficit, so that a deficit near the line does not pause and
+  resume it in turn). A tree paused longer than `max_pause_s` (900) is killed whatever else
+  holds, so nothing stays paused past it.
+- When no tree paused or in line would help, the shortage is outside leasehold's sessions. The
+  trees it paused run again, since stopping them would not help, it holds new heavy work while
+  the level is at `act_at`, sets `watchdog.outside` in the status, and tells the agents (at
+  most every 5 minutes) that memory is short outside leasehold's sessions. A tree that grows
+  enough to help ends this at the next reading.
 - Once the level has been `ok` for 10 seconds, with room for the tree to grow again, it lets
   the oldest paused tree run. New heavy work then waits until that tree settles: the level is
   `ok`, available memory is at least `hold_below` and a margin, and the tree's footprint has
@@ -1597,10 +1614,10 @@ When the command ran under a `[commands]` rule and was not a runaway, the next r
 same session under the same rule runs alone: it waits until no other lease is held on the
 machine, and its `blocked` says so. A command that was stopped while it already ran alone
 gets `rerun: false`, and the line says to run it again only with fewer workers. `hold` and the
-PATH shims run such a command again once, on their own, under a built-in rule. The daemon
-forgets a rule's run alone after 30 minutes. They never do for a runaway, for a rule in your config, or for
-`cargo`, `bazel`, `docker`, `podman`, `npm`, `pnpm` and `yarn`, which may leave work half done.
-The Python API does not run a command again.
+PATH shims run such a command again once, on their own, under a built-in rule. They never do
+for a runaway, for a rule in your config, or for `cargo`, `bazel`, `docker`, `podman`, `npm`,
+`pnpm` and `yarn`, which may leave work half done. The Python API does not run a command again.
+The daemon forgets a rule's run alone after 30 minutes.
 
 The agent hears of it once, in one line, at its next Bash tool call: the daemon leaves a notice
 for a session its hooks registered, and the Claude Code hook passes it on as
@@ -1615,11 +1632,12 @@ line on a pause says why the command was chosen.
 The daemon keeps the trees it paused in `watchdog.json` beside the ledger. A daemon that stops
 lets them run first, and one that starts lets any it finds there run, so no pause outlives the
 daemon that made it. The file records each paused process with its start time, so a tree
-whose first process has gone is let run all the same. While it acts, `leasehold serve` locks
+whose first process has gone is let run all the same, and the boot it was written in: a file
+from an earlier boot is only removed. While it acts, `leasehold serve` locks
 the daemon's memory in RAM (`mlockall`, with `MCL_ONFAULT` on Linux, so that memory it reserved
 and never touched takes no RAM), gives its threads small stacks, and raises its priority, where
-the user may, so that it still runs when memory is short. `leasehold doctor` warns in a `watchdog` check when the user's locked-memory limit
-(`ulimit -l`) is too low for that.
+the user may, so that it still runs when memory is short. `leasehold doctor` warns in a
+`watchdog` check when the user's locked-memory limit (`ulimit -l`) is too low for that.
 
 ### The Claude Code plugin
 
@@ -2001,9 +2019,11 @@ when a field is removed or changes meaning:
   `protected`, `started with its agent`, `small`), `victim` (the tree first in line whenever
   the level is not `ok`), `would` (what it would do now: null below `act_at`,
   `{"action": "hold"}`, or `action` `pause` with the tree), `held` (why new heavy work waits
-  now, or null; always null in watch mode), `paused` (the trees it paused, or let run and that
+  now, or null; always null in watch mode), `outside` (true while no tree in a session would
+  help), `paused` (the trees it paused, or let run and that
   have not ended, oldest first, each with `paused_s` and `resumed`) and `stopped` (the last 20
   trees it killed, each with `stopped_for` and `paused_s`). A tree has `session`, `pid`, `cmd`, `footprint_bytes`,
+  `frees_bytes` (what stopping it would return to available memory, or null until measured),
   `expected_bytes` (what its leases declared or learned, or null), `growth_bytes_per_s`,
   `started`, `why` (`runaway`, `large` or `newest`), `runaway` and `spared` (the pids of
   leasehold's own processes in it);

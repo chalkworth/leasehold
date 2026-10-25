@@ -281,8 +281,9 @@ def test_a_session_is_watched_with_its_footprint_and_an_agent_is_found_by_name(s
 
 class FakeHost(Posix):
     """A machine whose processes and memory a test sets: `procs` by pid, each with its
-    anonymous memory and start time, `commands` by pid, `available`, `swap` (total and free)
-    and `stall` (the recent share every task stalled)."""
+    anonymous memory and start time, `commands` by pid, `available`, `swap` (total and free),
+    `stall` (the recent share every task stalled) and `frees` (what stopping a process would
+    free, by pid: its anonymous memory where not set)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -292,6 +293,10 @@ class FakeHost(Posix):
         self.available = 12 << 30
         self.swap = (0, 0)
         self.stall = 0.0
+        self.frees: dict[int, int] = {}
+
+    def freeable(self, proc: host.Proc) -> int | None:
+        return self.frees.get(proc.pid, proc.anon)
 
     def support(self, operation: str) -> host.Support:
         if operation in ("members", "pressure", "session_processes"):
@@ -397,8 +402,26 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
             (105, 100, 100, "sleep 60", [0.1, 0.1]),  # under min_size
             (108, 100, 110, "leasehold mcp", [0.4, 0.4]),  # only leasehold's own
             (109, 100, 115, "sh -c open-docs", [0.1, 0.1]),
-            (110, 109, 116, "/usr/bin/firefox --new-tab x", [2, 2]),  # any member counts
+            (110, 109, 116, "/usr/bin/firefox --new-tab x", [2, 2]),  # what its shell runs
+            (111, 100, 117, "make -j8", [0.1, 0.1]),
+            (112, 111, 118, "claude -p fix it", [2, 2]),  # an agent, anywhere in the tree
         ], (101, "newest", [])),
+        ("an end-to-end suite's headless browser protects nothing", [
+            (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "pytest -n 4", [1, 1]),
+            (102, 100, 120, "sh -c npx playwright test", [0.01, 0.01]),
+            (103, 102, 121, "node /x/node_modules/.bin/playwright test", [0.3, 0.3]),
+            (104, 103, 122, "/x/ms-playwright/chromium-1140/chrome-linux/chrome --headless=new",
+             [1, 1]),
+        ], (102, "newest", [])),
+        ("nor a path with mcp in it, nor a headless browser it runs", [
+            (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "python3 ../mcp-x/run.py", [1, 1]),
+            (102, 100, 120, "python mcpbench/run.py", [1, 1]),
+            (103, 100, 130, "firefox -headless -marionette", [1, 1]),
+        ], (103, "newest", [])),
         ("never a session found by name", [
             (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
         ], [
@@ -485,8 +508,10 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         (1.5, [101, 103], [("pause", 103)], [103], paused_now),
         (1.5, [101, 103], [], [103], paused_now),
         (1.5, [101, 103], [("kill", 103)], [], "memory is short"),
-        (1.5, [101], [], [], "outside leasehold's sessions"),  # the stop freed nothing
-        (1.5, [101], [], [], "outside leasehold's sessions"),
+        (1.5, [101], [], [], "memory is short"),  # not falling: nothing more is paused
+        # 101 ended, and stopping 104 would free little: its workers share their pages.
+        (1.5, [104], [], [], "outside leasehold's sessions"),
+        (1.5, [104], [], [], "outside leasehold's sessions"),
     ]  # fmt: skip
     fake, mono = FakeHost(), Clock(0.0)
     fake.procs[100] = host.Proc(100, "100", "fake-agent", parent=1, started=1000.0, anon=GIB)
@@ -509,7 +534,9 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
             101: ("make -j8", 60, None),
             102: ("python3 -m pytest -n 4", 120, lid),
             103: ("cargo build", 130, None),
+            104: ("python3 -m pytest -n 8", 140, None),
         }
+        fake.frees[104] = 100 << 20
         for n, (free, alive, told, paused, why) in enumerate(steps):
             for pid in set(fake.procs) - {100} - set(alive):
                 del fake.procs[pid]
@@ -583,21 +610,25 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
     monkeypatch.setattr(watchdog_module, "KILL_AFTER_S", 1.0)
     for contain in ["off"] if NO_SCOPE else ["off", "auto"]:
         _stop_a_real_hold(sock_dir, tmp_path / f"real-{contain}", contain)
+    # A program that runs `hold` (a test run calling a shimmed tool) holds memory of its own: it
+    # is stopped with the command, and only `hold` is spared.
+    _stop_a_real_hold(sock_dir, tmp_path / "real-wrapped", "off", wrapped=True)
 
 
 class _Short(Linux):
-    """This machine, with its memory read as short once `low` is set."""
+    """This machine, with every task read as stalled on memory once `low` is set (with swap
+    room, so that available memory does not count, and any tree would help)."""
 
     low = False
 
     def pressure(self) -> host.Pressure:
         return host.Pressure(
-            "exact", available=(1 if self.low else 8) * GIB, total=16 * GIB, swap_total=0,
-            swap_used=0, stall_full_recent=0.0,
+            "exact", available=8 * GIB, total=16 * GIB, swap_total=8 * GIB, swap_used=0,
+            stall_full_recent=50.0 if self.low else 0.0,
         )  # fmt: skip
 
 
-def _stop_a_real_hold(sock_dir, where, contain: str) -> None:
+def _stop_a_real_hold(sock_dir, where, contain: str, wrapped: bool = False) -> None:
     real = _Short()
     where.mkdir()
     config = machine_config(
@@ -610,6 +641,14 @@ def _stop_a_real_hold(sock_dir, where, contain: str) -> None:
     )
     daemon.start()
     hold = f"{sys.executable} -m leasehold --socket {daemon.path} hold -- sleep 300"
+    if wrapped:
+        wrapper = where / "wrapper.py"
+        wrapper.write_text(
+            "import pathlib, subprocess, sys\n"
+            "code = subprocess.call(sys.argv[2:])\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(code))\n"
+        )
+        hold = f"{sys.executable} {wrapper} {where}/wrapper-ended {hold}"
     tool = f"sh -c '{hold} 2>{where}/said; echo $? >{where}/code'; sleep 60"
     env = {**CHILD_ENV} | ({"LEASEHOLD_CONTAIN": "off"} if contain == "off" else {})
     shell = subprocess.Popen(["sh", "-c", tool], env=env, start_new_session=True)
@@ -624,10 +663,15 @@ def _stop_a_real_hold(sock_dir, where, contain: str) -> None:
             timeout=20,
         )
         real.low = True
-        until(code.exists, timeout=30)
-        assert code.read_text().strip() == "137", contain
-        said = (where / "said").read_text()
-        assert "leasehold's watchdog" in said, said
+        said = where / "said"
+        until(lambda: "leasehold's watchdog" in said.read_text(), timeout=30)  # `hold` reports
+        if wrapped:  # stopped with the shell it ran under, not spared
+            sessions = client.status
+            until(lambda: sessions()["watchdog"]["sessions"][0]["processes"] == 1)  # `sleep 60`
+            assert not (where / "wrapper-ended").exists()
+        else:  # the shell `hold` ran under was spared
+            until(code.exists)
+            assert code.read_text().strip() == "137", contain
         assert shell.poll() is None, contain  # the agent's shell runs on
         (stopped,) = client.status()["watchdog"]["stopped"]
         assert stopped["stopped_for"] == "critical"

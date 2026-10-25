@@ -71,6 +71,8 @@ SESSIONS_S = 2.0
 #: After the watchdog stops a command, how long its rule's next request from that session runs
 #: alone.
 TICKET_S = 1800.0
+#: The agents are told memory is short outside the sessions at most this often.
+OUTSIDE_TOLD_S = 300.0
 #: The lease ids the Claude Code hook takes (`claude_code.LEASE_PREFIX`): its `post` reports a
 #: stop to the agent.
 HOOK_LEASE_PREFIX = "cc."
@@ -196,8 +198,13 @@ def _expected(row: Mapping) -> int | None:
     return None if per_slot is None else per_slot * row["weight"]
 
 
-#: A command line that runs leasehold: `leasehold ...`, or `python -m leasehold...`.
-_LEASEHOLD_LINE = re.compile(r"(^|[\s/])leasehold(\s|$)|(^|\s)-m\s+leasehold(\.|\s|$)")
+#: A command line that runs leasehold as its program: `leasehold ...`, `python -m leasehold...`
+#: or `python .../leasehold ...` (an entry point's script). A program that only names
+#: leasehold among its arguments (one that runs `hold` in turn) is not leasehold.
+_LEASEHOLD_LINE = re.compile(
+    r"^(\S*/)?leasehold(\s|$)"
+    r"|^(\S*/)?python[\d.]*(\s+-[^m\s]\S*)*\s+(-m\s+leasehold(\.\S*)?|\S*/leasehold)(\s|$)"
+)
 
 
 def _quoted(work: Work) -> str:
@@ -239,15 +246,34 @@ def _together(done: list[host.Done]) -> host.Done:
 
 
 def _spare(branch: Branch, own: set[int]) -> set[int]:
-    """leasehold's own processes in `branch` (`own`), and the processes they run under in it:
-    acting on the tree never signals these, so that `hold` lives to report the stop."""
-    parent = {p.pid: p.parent for p in branch.members}
-    spare = set()
+    """leasehold's own processes in `branch` (`own`), and the shells they run under in it, up to
+    the first other program: acting on the tree never signals these, so that `hold` lives to
+    report the stop. A program that runs a shim (a test run calling `make`) is not spared: it
+    is what holds the memory."""
+    by_pid = {p.pid: p for p in branch.members}
+    spare = set(own) & set(by_pid)
     for pid in own:
-        while pid in parent and pid not in spare:
-            spare.add(pid)
-            pid = parent[pid]
+        up = by_pid.get(pid)
+        up = None if up is None else by_pid.get(up.parent)
+        while up is not None and up.name in _SHELLS and up.pid not in spare:
+            spare.add(up.pid)
+            up = by_pid.get(up.parent)
     return spare
+
+
+def _heads(branch: Branch) -> set[int]:
+    """`branch`'s heads: its root, and each program a shell among its heads runs (what a tool
+    shell runs, not what that program starts in turn)."""
+    heads = {branch.root.pid}
+    names = {p.pid: p.name for p in branch.members}
+    grew = True
+    while grew:
+        grew = False
+        for p in branch.members:
+            if p.pid not in heads and p.parent in heads and names.get(p.parent) in _SHELLS:
+                heads.add(p.pid)
+                grew = True
+    return heads
 
 
 def _work(
@@ -256,17 +282,24 @@ def _work(
     own: set[int],
     expected: dict[int, int],
     alone: bool,
-    lines: tuple[str, ...] = (),
+    lines: dict[int, str] | None = None,
+    frees: dict[int, int] | None = None,
 ) -> Work:
     """`branch` of `session` as the watchdog weighs it (`leasehold.watchdog.Work`); `own` are
-    the pids of leasehold's own processes, and `lines` its processes' command lines."""
+    the pids of leasehold's own processes, `lines` its processes' command lines, and `frees`
+    what stopping each would return to available memory, where it was measured."""
     reading = session.reading
     agent = None if reading is None else reading.agent
+    lines = lines or {}
     kept = tuple(p.pid for p in branch.members if p.pid in own)
-    others = [p for p in branch.members if p.pid not in own]
-    sizes = [expected[p.pid] for p in branch.members if p.pid in expected]
     root = branch.root
     spare = _spare(branch, own)
+    others = [p for p in branch.members if p.pid not in spare]
+    sizes = [expected[p.pid] for p in branch.members if p.pid in expected]
+    measured = None
+    if frees is not None and all(p.pid in frees for p in others):
+        measured = sum(frees[p.pid] for p in others)
+    heads = _heads(branch)
     scopes = tuple(
         sorted(
             {
@@ -290,7 +323,7 @@ def _work(
         started=root.started,
         agent_started=None if agent is None else agent.started,
         spared=kept,
-        leasehold=not others,
+        leasehold=not [p for p in branch.members if p.pid not in own],
         agent_line=branch.agent_line,
         expected=sum(sizes) if sizes else None,
         leases=leases,
@@ -298,7 +331,9 @@ def _work(
         members=tuple((p.pid, p.fence) for p in branch.members if p.pid not in spare),
         spare=tuple(sorted(spare)),
         scopes=scopes,
-        lines=lines,
+        lines=tuple(lines.get(p.pid, p.name) for p in branch.members),
+        heads=tuple(lines.get(p.pid, p.name) for p in branch.members if p.pid in heads),
+        frees=measured,
         tool=session.source != "hook" or root.name in _SHELLS or bool(scopes or leases),
     )
 
@@ -411,6 +446,8 @@ class MachineAgent:
         self._own_cache: dict[tuple[int, str | None], bool] = {}
         #: Each process's command line as read, by pid and fence.
         self._lines_cache: dict[tuple[int, str | None], str] = {}
+        #: When the agents were last told memory is short outside the sessions.
+        self._outside_told: float | None = None
         if not config.for_user:
             self._watchdog_off = "the machine's daemon has no watchdog: each user's daemon has one"
         elif config.watchdog.mode == "off":
@@ -731,6 +768,9 @@ class MachineAgent:
                     expected[row["holder_pid"]] = expected.get(row["holder_pid"], 0) + size
         seen: dict[tuple[int, str | None], bool] = {}
         lines: dict[tuple[int, str | None], str] = {}
+        # What stopping a process would free is read only while memory is short: it walks
+        # each process's memory map.
+        measure = self.watchdog is not None and self.watchdog.short()
         out = []
         for session, branch in self.sessions.work():
             own = set()
@@ -743,7 +783,7 @@ class MachineAgent:
                 if seen[key]:
                     own.add(p.pid)
             alone = bool(self._alone_leases & _leases(branch.members))
-            said = []
+            said = {}
             for p in branch.members:
                 key = (p.pid, p.fence)
                 if key not in lines:
@@ -751,8 +791,15 @@ class MachineAgent:
                     if line is None:
                         line = self.sessions.host.command_line(p) or p.name
                     lines[key] = line
-                said.append(lines[key])
-            out.append(_work(session, branch, own, expected, alone, tuple(said)))
+                said[p.pid] = lines[key]
+            frees = None
+            if measure:
+                frees = {
+                    p.pid: got
+                    for p in branch.members
+                    if (got := self.sessions.host.freeable(p)) is not None
+                }
+            out.append(_work(session, branch, own, expected, alone, said, frees))
         self._own_cache = seen
         self._lines_cache = lines
         return out
@@ -794,7 +841,12 @@ class MachineAgent:
         )
         with self._watchdog_lock:
             events = self.watchdog.observe(reading)
-            if any(e.get("outside") for e in events):
+            mono = self._monotonic()
+            told = self._outside_told
+            if any(e.get("outside") for e in events) and (
+                told is None or mono - told >= OUTSIDE_TOLD_S
+            ):
+                self._outside_told = mono
                 for session in self.sessions.listed():
                     self._tell(
                         session.id,
@@ -1021,18 +1073,24 @@ class MachineAgent:
         ]
         with contextlib.suppress(OSError):
             tmp = self._paused_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"paused": trees}))
+            boot = self.sessions.host.boot_id()
+            tmp.write_text(json.dumps({"boot": boot, "paused": trees}))
             tmp.replace(self._paused_file)
 
     def _let_recorded_run(self) -> None:
         """Let every tree `watchdog.json` names run again: a pause is never taken over, since a
-        stale stop would hold work for ever."""
+        stale stop would hold work for ever. A file from an earlier boot names processes that
+        are gone, and pids that may be others' now: it is only removed."""
         if self._paused_file is None:
             return
         try:
-            trees = json.loads(self._paused_file.read_text()).get("paused", [])
+            saved = json.loads(self._paused_file.read_text())
+            trees = saved.get("paused", [])
+            boot = saved.get("boot")
         except (OSError, ValueError, AttributeError):
             return
+        if boot != self.sessions.host.boot_id():
+            trees = []
         for tree in trees:
             with contextlib.suppress(TypeError, ValueError):
                 self.sessions.host.resume(host.Tree.from_dict(tree))
