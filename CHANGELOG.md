@@ -9,6 +9,10 @@ here.
 
 ### Added
 
+- On macOS, `leasehold serve`, `init`, `setup` and `doctor` say in one line what runs there
+  and what does not: leases, `hold`, the shims and the SDK work, but the daemon counts slots
+  only, and nothing contains a command, caps its memory or reports a memory kill. `doctor`
+  shows it as a `platform` check at level `warn`. Hooks, shims and `hold` stay quiet.
 - The memory verdict. When memory ended a command, leasehold says so in one line that starts
   with `leasehold:`, says "This is not a test failure" (or "most likely ... not a test
   failure"), and says what to do next. The command keeps its own exit code. `hold` and the
