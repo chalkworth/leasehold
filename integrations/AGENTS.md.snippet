@@ -11,5 +11,8 @@ instead of slowing everyone down.
   a command takes a lease, and how heavy it is).
 - Exit 75 means the machine stayed busy until the timeout: retry later. Exit 77 means the
   request can never fit: ask for a smaller weight. Exit 69 means no daemon: run without it.
+- A last line `leasehold: ... This is not a test failure.` means memory ran out and the
+  kernel killed the command; its tests did not fail. Run it later or with fewer workers, not
+  unchanged.
 - Never run a heavy command a way that avoids the lease (another name, a full path, a
   wrapper): it only makes everyone's work slower, yours included.

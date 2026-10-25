@@ -167,3 +167,18 @@ def test_a_revoked_lend_lease_stops_its_command(daemon):
         until(lambda: gone(command.pid))  # stopped with no one waiting for it
         assert command.stopped_for == lease.lost
         assert command.wait(timeout=10) == -signal.SIGTERM
+
+
+@pytest.mark.parametrize(("kills", "certain"), [(1, False), (0, None)])
+def test_a_command_killed_for_memory_says_so(daemon, oom_kills, kills, certain):
+    with leasehold.lease(socket=daemon.path) as lease:
+        command = lease.popen(["sleep", "30"], contain=False)
+        oom_kills(kills)
+        os.kill(command.pid, signal.SIGKILL)
+        assert command.wait(timeout=10) == -signal.SIGKILL  # the exit status is its own
+    if certain is None:
+        assert command.memory is None
+        return
+    assert (command.memory.kind, command.memory.certain) == ("kernel", certain)
+    assert "not a test failure" in command.memory.agent
+    assert lease.memory is command.memory

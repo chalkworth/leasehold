@@ -3,8 +3,9 @@ in a directory only this user may enter.
 
 A note holds the lease's renewer (pid and birth, `0 -` when none started), the agent the hook
 runs under (pid, `0` when unknown), the program the lease is for, the job count and
-`threads` setting the command is sized to, and the weight granted: `pre` writes it once the
-lease is granted, `post` stops the renewer and deletes it. While a note's renewer lives, its
+`threads` setting the command is sized to, the weight granted, and the host's counters from
+before the command started (`leasehold.host.Mark`): `pre` writes it once the lease is granted,
+`post` reads the counters back, stops the renewer and deletes it. While a note's renewer lives, its
 lease covers that program run under that agent: `covering` finds it for a PATH shim, which
 then runs inside that lease rather than taking a second one for the same command, sized to it
 (`sizing`, `weight`).
@@ -49,13 +50,14 @@ def write(
     jobs: int = 0,
     threads: int | str = "jobs",
     weight: int = 0,
+    mark: str = "-",
 ) -> bool:
     """Note `lease_id`, its renewer, its agent, its program, the job count (0: none) and
-    `threads` its command is sized to, and the weight it was granted (0: not said). Whether it
-    was noted."""
+    `threads` its command is sized to, the weight it was granted (0: not said), and the host's
+    counters as one word (`leasehold.host.Mark.encode`). Whether it was noted."""
     birth = None if renewer is None else process_birth(renewer)
     line = f"{renewer or 0} {birth or '-'} {agent or 0} {program.split()[0] if program else '-'}"
-    line += f" {max(0, jobs)} {threads} {max(0, weight)}"
+    line += f" {max(0, jobs)} {threads} {max(0, weight)} {mark or '-'}"
     try:
         (directory / lease_id).write_text(line + "\n")
     except OSError:
@@ -106,6 +108,21 @@ def weight(env: Mapping[str, str], lease_id: str) -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     return granted if granted >= 1 else None
+
+
+def noted(directory: Path | None, lease_id: str) -> tuple[str, str | None] | None:
+    """The program the note for `lease_id` is for, and the host's counters it kept as `write`
+    was given them (None: a note from before they were kept); None when there is no such
+    note."""
+    if directory is None:
+        return None
+    try:
+        fields = (directory / lease_id).read_text().split()
+    except OSError:
+        return None
+    if len(fields) < 4:
+        return None
+    return fields[3], fields[7] if len(fields) > 7 else None
 
 
 def stop(directory: Path | None, lease_id: str) -> None:

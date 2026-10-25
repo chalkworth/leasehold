@@ -20,6 +20,10 @@ group.
 * Once a contained command ends, `oom_killed` says whether the kernel's OOM killer ended any
   of its processes: its scope counted an OOM kill, or it ended by SIGKILL while the machine
   counted one. `peak_bytes` is the most memory its scope used.
+* Once any command ends, `memory` is the memory verdict on it (`leasehold.verdict`), or None
+  when memory did not end it as far as leasehold can tell: `certain` when its scope counted
+  the OOM kill, `likely` when it ended by SIGKILL while the machine's count rose
+  (`leasehold.host`, which knows of no kills off Linux).
 
 No signal handler is installed: a caller that wants signals passed on sends them to `pid`'s
 group.
@@ -38,7 +42,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, follow, jobs, measure
+from leasehold import contain, follow, host, jobs, measure, verdict
 from leasehold.kinds import PREEMPTIBLE
 from leasehold.leasing import Lease, own_env
 from leasehold.units import memory_to_bytes
@@ -130,7 +134,9 @@ class Command:
 
     Once it has ended, `oom_killed` says whether the OOM killer ended any of its processes and
     `peak_bytes` is the most memory its scope used (None: unknown). Both are known only for a
-    contained command: an uncontained one is never `oom_killed`."""
+    contained command: an uncontained one is never `oom_killed`. `memory` is the memory
+    verdict on any command once it has ended (`leasehold.verdict`; None: memory did not end
+    it, as far as leasehold can tell)."""
 
     def __init__(
         self,
@@ -160,6 +166,10 @@ class Command:
         self.returncode: int | None = None
         self.oom_killed = False
         self.peak_bytes: int | None = None
+        self.memory: verdict.Verdict | None = None
+        self._program = Path(argv[0]).name if argv else ""
+        self._mark = host.Mark()
+        self._limit: int | None = None
         self._say = say
         self._meter: measure.Meter | None = None
         self._repo: str | None = None
@@ -205,6 +215,7 @@ class Command:
                 raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
         group = {"process_group": 0} if tty else {"start_new_session": True}
         started = time.monotonic()
+        self._mark = host.mark()
         try:
             self.process, self.uncontained = contain.spawn(
                 argv, prefix, env=env, cancel_fd=cancel_fd, **group, **popen
@@ -218,6 +229,7 @@ class Command:
             running = lambda: self.process.poll() is None  # noqa: E731
             self._meter = measure.Meter(self.pid, unit, started=started, running=running)
             self._stack.callback(self._meter.stop)
+            self._limit = host.memory_max(self.pid)
         if lease.held and lease.kind in PREEMPTIBLE:
             watcher = threading.Thread(
                 target=self._stop_when_lost, name=f"leasehold-watch-{self.pid}", daemon=True
@@ -256,6 +268,7 @@ class Command:
         return code
 
     def _end(self, code: int) -> None:
+        ending = host.ended(code, self._mark)
         if self._meter is not None:
             wall_s = self._meter.stop()
             usage = self._meter.usage
@@ -271,6 +284,17 @@ class Command:
                 code == -signal.SIGKILL and (self._meter.machine_oom_kills or 0) > 0
             )
             self.lease.oom_killed = self.oom_killed
+            if usage.oom_kills:  # its own scope counted it
+                ending = host.Ending("kernel", "certain", ending.kills, how="exact")
+        self.memory = verdict.describe(
+            ending,
+            self._program,
+            status=code,
+            peak_bytes=self.peak_bytes,
+            limit_bytes=self._limit if ending.confidence == "certain" else None,
+            agent_limit=os.environ.get(verdict.AGENT_LIMIT_ENV) or None,
+        )
+        self.lease.memory = self.memory
         if group_alive(self.pid):
             stop_group(self.process, self.grace_s)
         self.returncode = code

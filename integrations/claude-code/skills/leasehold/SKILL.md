@@ -31,6 +31,13 @@ slots.
 - **"machine busy ...; running pytest without a lease".** It ran anyway. If it was slow, that
   is why.
 
+## When memory ended a command
+
+"leasehold: ... killed for memory ... This is not a test failure." The kernel killed the
+command because memory ran out (the machine's, or a limit's); its tests did not fail. Do not
+debug the tests and do not re-run it unchanged. Do what the line says: wait for the other heavy
+work to finish, or run fewer workers (`-n 2`) or a narrower selection.
+
 ## Exit codes of `leasehold hold` and `leasehold acquire`
 
 | Code | Meaning |

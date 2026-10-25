@@ -9,6 +9,24 @@ here.
 
 ### Added
 
+- The memory verdict. When memory ended a command, leasehold says so in one line that starts
+  with `leasehold:`, says "This is not a test failure" (or "most likely ... not a test
+  failure"), and says what to do next. The command keeps its own exit code. `hold` and the
+  PATH shims print the line last on stderr, for contained and uncontained commands alike. It
+  is certain when the command's scope counted the OOM kill, and then names the `memory.max`
+  above the command when there is one. It says "most likely" when the command ended by
+  SIGKILL while the machine counted an OOM kill.
+- The Claude Code hook's `post` returns the verdict for a leased command that ended with exit
+  code 137 while the machine counted an OOM kill: as `additionalContext`, which the agent
+  reads, and as a `systemMessage` for the person. With `CLAUDE_CODE_TOOL_MEMORY_LIMIT` set,
+  it names Claude Code's own memory limit. `pre` keeps the machine's OOM kill count in its
+  note for `post` to compare.
+- `Command.memory` and `Lease.memory` in the Python API: the verdict on the command (an object
+  with `kind`, `certain`, `program`, `peak_bytes`, `limit_bytes`, `person` and `agent`), or
+  None.
+- `leasehold.host`, the one place that asks the operating system how a command ended. Linux
+  reads the kernel's OOM kill count; other systems give no verdict yet. The new
+  `leasehold.verdict` holds the wording.
 - A memory net for your own daemon, off by default: `[memory_net] mode = "park"`. When the
   contained commands under one memory limit spill into swap while the limit is near full and
   stalls on memory, the daemon parks the youngest heavy command. It freezes the command's scope
@@ -68,6 +86,9 @@ here.
 
 ### Changed
 
+- `hold`'s line about an OOM kill no longer opens with "the kernel's OOM killer ended this
+  command, or a process in it": it now gives only the peak, the memory counted and the
+  suggested `--memory`, and the verdict line follows it.
 - A lease that counts a learned figure gives `memory_bytes` null in the status object, since it
   declared nothing, and its outcome records no declared memory. A `blocked` reason names the
   figure as `its learned 1.2 GiB`.

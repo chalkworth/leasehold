@@ -5,8 +5,13 @@ runs, taken before the command starts and given back when it ends.
 rule (`leasehold.shell`), it waits in line for that rule's weight, then lets the command run
 with a renewer keeping the lease (`leasehold keep`, watching the Claude Code process, so an
 agent that dies gives its leases back within one TTL). `PostToolUse` and `PostToolUseFailure`
-run `... post`, which releases it. The command itself is never changed, so the user's
-permission rules see exactly what the agent wrote, and the hook does not size it. A rule's
+run `... post`, which releases it. When the command ended by SIGKILL while the kernel's OOM
+killer was ending processes (`leasehold.host`, from counters `pre` noted), `post` also tells
+the agent, as context it reads, that the command was most likely killed for memory and is not
+a test failure, and tells the person the same in the transcript (`leasehold.verdict`).
+
+The command itself is never changed, so the user's permission rules see exactly what the agent
+wrote, and the hook does not size it. A rule's
 range, or a `LEASEHOLD_WANT` range in Claude Code's own environment (`leasehold.weights`), is
 asked for as a range: from its least up to the rule's `hook_ceiling`, both ends cut to it.
 `hook_ceiling` is what the range alone would be granted on an idle machine
@@ -49,7 +54,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from leasehold import busy, handoff, hooknotes, measure, programs, shell, weights
+from leasehold import busy, handoff, hooknotes, host, measure, programs, shell, verdict, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_UNAVAILABLE
 from leasehold.hold import lease_request, wait_for_grant
@@ -270,6 +275,7 @@ def pre(
             jobs=jobs,
             threads=_threads(settings, command, event, env) or rule.threads,
             weight=granted,
+            mark=host.mark().encode(),
         )
         if not noted:
             # Unnoted, `post` might never be run for it (the pre-filter): give it back now.
@@ -309,12 +315,49 @@ def _refresh_programs(settings: shell.Served, env: Mapping[str, str]) -> None:
 def post(event: Mapping, client: Client, *, env: Mapping[str, str]) -> Reply:
     """After a Bash command, whether it succeeded, failed or was interrupted: stop its renewer
     and give its lease back. The renewer goes first, so a release the daemon misses still ends
-    the lease, one TTL later."""
+    the lease, one TTL later. When memory most likely ended the command (`_memory`), the reply
+    says so to the agent and to the person."""
     reply = Reply()
     lid = lease_id(event)
     if event.get("tool_name") != "Bash" or lid is None:
         return reply
-    hooknotes.stop(hooknotes.state_dir(env), lid)
+    directory = hooknotes.state_dir(env)
+    noted = hooknotes.noted(directory, lid)
+    hooknotes.stop(directory, lid)
     with contextlib.suppress(Unavailable, ApiError):
         client.release(lid)  # one never taken, or already gone, is no error
+    found = None if noted is None else _memory(event, *noted, env=env)
+    if found is not None:
+        reply.output = {
+            "systemMessage": found.person,
+            "hookSpecificOutput": {
+                "hookEventName": event.get("hook_event_name") or "PostToolUseFailure",
+                "additionalContext": found.agent,
+            },
+        }
     return reply
+
+
+_EXIT_CODE = re.compile(r"Exit code (\d+)")
+
+
+def exit_code(event: Mapping) -> int | None:
+    """The Bash command's exit code, from the first line of a `PostToolUseFailure` event's
+    `error` (`Exit code 137`); None when the event gives none."""
+    error = event.get("error")
+    found = _EXIT_CODE.match(error) if isinstance(error, str) else None
+    return int(found.group(1)) if found else None
+
+
+def _memory(
+    event: Mapping, program: str, mark: str | None, *, env: Mapping[str, str]
+) -> verdict.Verdict | None:
+    """The memory verdict on the command `program` that the event reports ended, read against
+    the host's counters noted before it started (`mark`); None when it ended some other way,
+    or nothing was noted."""
+    status = exit_code(event)
+    if status is None or mark is None:
+        return None
+    ending = host.ended(status, host.Mark.decode(mark))
+    limit = env.get(verdict.AGENT_LIMIT_ENV) or None
+    return verdict.describe(ending, program, status=status, agent_limit=limit)

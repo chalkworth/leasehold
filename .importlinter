@@ -85,6 +85,8 @@ source_modules =
     leasehold.weights
     leasehold.measure
     leasehold.estimate
+    leasehold.host
+    leasehold.verdict
 forbidden_modules =
     leasehold.admission
     leasehold.ledger

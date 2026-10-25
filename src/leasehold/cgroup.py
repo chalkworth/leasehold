@@ -51,9 +51,11 @@ def _bytes(text: str | None) -> int | None:
     return int(text) if text.isdigit() else None
 
 
-def limit(cgroup_root: Path, cgroup: str) -> MemoryLimit | None:
-    """The lowest memory limit on `cgroup` and its ancestors up to the root of `cgroup_root`,
-    or None when none of them sets one (or `cgroup_root` is not cgroup v2)."""
+def limit(
+    cgroup_root: Path, cgroup: str, files: tuple[str, ...] = LIMIT_FILES
+) -> MemoryLimit | None:
+    """The lowest memory limit (in `files`) on `cgroup` and its ancestors up to the root of
+    `cgroup_root`, or None when none of them sets one (or `cgroup_root` is not cgroup v2)."""
     if not (cgroup_root / "cgroup.controllers").is_file():
         return None
     path = PurePosixPath(cgroup)
@@ -62,7 +64,7 @@ def limit(cgroup_root: Path, cgroup: str) -> MemoryLimit | None:
     lowest: MemoryLimit | None = None
     for group in (path, *path.parents):
         base = cgroup_root / str(group).lstrip("/")
-        for name in LIMIT_FILES:
+        for name in files:
             value = _bytes(_read(base / name))
             if value is not None and (lowest is None or value < lowest.limit_bytes):
                 lowest = MemoryLimit(value, str(group))
