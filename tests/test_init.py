@@ -44,3 +44,15 @@ def test_an_upgraded_0_2_config_keeps_the_built_in_weights(tmp_path):
     assert planned.pristine and "# heavy_weight = 3" in planned.text
     (tmp_path / "new.toml").write_text(planned.text)
     assert machine.load(tmp_path / "new.toml").commands.heavy_weight == 4
+
+
+@pytest.mark.parametrize(("platform", "said"), [("darwin", True), ("linux", False)])
+def test_macos_is_told_once_what_does_not_run_there(tmp_path, monkeypatch, capsys, platform, said):
+    from leasehold.cli import main
+
+    monkeypatch.setattr("sys.platform", platform)
+    assert main(["--config", str(tmp_path / "machine.toml"), "init"]) == 0
+    assert ("macOS is untested" in capsys.readouterr().err) == said
+    assert main(["--socket", str(tmp_path / "none.sock"), "doctor", "--json"]) == 1  # no daemon
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)}
+    assert ("platform" in checks) == said

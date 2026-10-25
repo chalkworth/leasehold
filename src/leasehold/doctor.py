@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-from leasehold import contain, discovery, host, machine, paths, upgrade, verdict
+from leasehold import contain, discovery, host, machine, macos, paths, upgrade, verdict
 from leasehold.admission import alone, gib
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.commands import HEAVY_WEIGHT, default_rules
@@ -702,6 +702,8 @@ def run(
     platform = host.current(env=env)
     capabilities = platform.capabilities()
     checks.append(check_host(capabilities))
+    if (says := macos.note()) is not None:
+        checks.append(Check("platform", "warn", says))
     checks.append(check_contain(resolved, env, capabilities["start"]))
     checks.append(
         check_memory_cap(resolved, env, capabilities["start"], capabilities["memory_hard"])
