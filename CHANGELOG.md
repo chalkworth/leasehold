@@ -74,6 +74,21 @@ here.
 - A command run through a shim now files its outcome under its rule, as `hold` does; before,
   its rule was null.
 
+### Fixed
+
+- A directory's empty or stray `.git` no longer counts as a repository. Outcomes, and the
+  memory learned from them, are filed under the work tree git would find: the nearest
+  directory up whose `.git` is a repository (it holds a `HEAD`) or a `gitdir:` file. Before,
+  every project under a directory with an empty `.git` shared one repository.
+- A request that could never be granted is refused with `code: "never_grantable"`. It had no
+  code, so `Refused.code` was None.
+- The pool message in a refusal and in a config error now reads `more than the max 3 of pool
+  'background'`, where it printed `pool 'background''s max 3`.
+- The GitHub runner hooks' default weight is the range `1-4`, not 4. The `external` pool of
+  the config `leasehold setup` writes on 8 CPUs refused 4, so the job ran without a lease.
+  `LEASEHOLD_RUNNER_WEIGHT` takes a number or a range, and `ephemeral.sh` has the same default.
+  `job-completed.sh` says when the job held no lease, where it said it had released one.
+
 ## [0.5.0]
 
 ### Added

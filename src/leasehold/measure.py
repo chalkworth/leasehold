@@ -153,15 +153,28 @@ class Meter:
         return (self._ended or time.monotonic()) - self._started
 
 
+def _is_repository(entry: Path) -> bool:
+    """Whether `entry`, a directory's `.git`, is one a repository uses: a directory that holds
+    a `HEAD`, or the file a linked work tree or submodule has, which starts `gitdir:`."""
+    try:
+        if entry.is_dir():
+            return (entry / "HEAD").is_file()
+        with entry.open("rb") as handle:
+            return handle.read(7) == b"gitdir:"
+    except OSError:
+        return False
+
+
 def repository(cwd: str | os.PathLike | None = None) -> str | None:
-    """The top of the git work tree `cwd` (default ours) is in: the nearest directory, from
-    `cwd` up, that holds a `.git` (a directory, or the file a linked work tree has). None when
-    there is none, or `cwd` cannot be read."""
+    """The top of the work tree `cwd` (default ours) is in, found as the version-control tool
+    finds it: the nearest directory, from `cwd` up, whose `.git` is a repository's
+    (`_is_repository`). An empty or stray `.git` is passed over. None when there is none, or
+    `cwd` cannot be read."""
     try:
         here = Path(os.getcwd() if cwd is None else cwd).resolve()
     except OSError:
         return None
     for directory in (here, *here.parents):
-        if (directory / ".git").exists():
+        if _is_repository(directory / ".git"):
             return str(directory)
     return None

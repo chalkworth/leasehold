@@ -151,6 +151,16 @@ def _user_name(uid: int) -> str:
         return f"uid:{uid}"
 
 
+#: The `code` of a refusal because no wait could end in a grant (exit 77, `Refused.code`).
+NEVER_GRANTABLE = "never_grantable"
+
+
+def _never(lease_id: str | None, reason: str) -> dict:
+    """The answer to a request that could never be granted, however long it waited."""
+    answer = {"status": "refused", "reason": reason, "code": NEVER_GRANTABLE}
+    return answer if lease_id is None else answer | {"lease_id": lease_id}
+
+
 def _over_quota(lease_id: str, reason: str) -> dict:
     return {"status": "refused", "lease_id": lease_id, "reason": reason, "code": "quota_exceeded"}
 
@@ -641,7 +651,7 @@ class MachineAgent:
         refused rather than queued again."""
         pool, refused = self._refusal(req)
         if refused is not None:
-            return {"status": "refused", "reason": refused}
+            return _never(None, refused)
         if req.kind in WHOLE:
             # The whole machine, whatever was asked: its size is not the client's to choose.
             req = req.model_copy(
@@ -664,11 +674,7 @@ class MachineAgent:
                 f"({least / 2**30:.1f} GiB)"
             )
             limit = lease_memory_limit(self.config.ceiling.memory, self.limits.memory_bytes)
-            return {
-                "status": "refused",
-                "lease_id": lease_id,
-                "reason": f"{what} is more than {limit}",
-            }
+            return _never(lease_id, f"{what} is more than {limit}")
         item = LedgerItem(
             scope=SCOPE,
             item_id=lease_id,
@@ -744,7 +750,7 @@ class MachineAgent:
                 **self._waiting_range(lease_id),
                 **held_up,
             }
-        return {"status": "refused", "lease_id": lease_id, "reason": outcome.reason}
+        return _never(lease_id, outcome.reason)
 
     def learned(self, user: str | None, rule: str | None, repo: str | None) -> estimate.Learned:
         """What `user`'s past runs of `rule` in `repo` give (`leasehold.estimate.learn`), worked

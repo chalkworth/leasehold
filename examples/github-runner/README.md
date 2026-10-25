@@ -13,21 +13,24 @@ holds two leases per job.
 
 ## Hooks
 
-The hooks are `deploy/github-runner/job-started.sh` and `job-completed.sh`. Install them as the
-main README says ("GitHub Actions runner hooks": the `leasehold` group, the copy to
+The hooks are `deploy/github-runner/job-started.sh` and `job-completed.sh`. Install them as
+"GitHub Actions runner hooks" in `docs/reference.md` describes (the `leasehold` group, the copy to
 `/opt/leasehold/github-runner/`, the `runner.slice` drop-in), then add to the runner's `.env`
 (`<runner-dir>/.env`, read when the runner starts, so restart it after a change):
 
 ```
 ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/leasehold/github-runner/job-started.sh
 ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/leasehold/github-runner/job-completed.sh
-LEASEHOLD_RUNNER_WEIGHT=4
+LEASEHOLD_RUNNER_WEIGHT=1-4
 ```
 
-`LEASEHOLD_RUNNER_WEIGHT` is the weight in slots of every job this runner takes (4 by default).
-For jobs of different sizes, register one runner per size with its own `.env` weight and a label
+`LEASEHOLD_RUNNER_WEIGHT` is the weight in slots of every job this runner takes: a number, or a
+range `MIN-MAX` (`1-4` by default). A range waits for its least and is granted up to its most,
+so the default fits a small `external` pool, such as the one `leasehold setup` writes on 8 CPUs,
+which holds 3 slots. For jobs of different sizes, register one runner per size with its own `.env` weight and a label
 of its own (`heavy`, say), and let each workflow choose with `runs-on: [self-hosted, heavy]`. A
-weight above the `external` pool's `max` is refused, and the job then runs without a lease.
+weight above the `external` pool's `max` is refused, and the job then runs without a lease;
+`job-completed.sh` then says it had no lease to release.
 
 To see what the hooks do for one job, run them the way the runner does, against a daemon of your
 own (`leasehold serve`):
@@ -85,7 +88,7 @@ registration. `ephemeral.sh` registers one and runs it under a lease. Run it fro
 directory, with `gh` signed in to an account that may add runners to the repository:
 
 ```sh
-export RUNNER_REPO=acme/api LEASEHOLD_RUNNER_WEIGHT=4
+export RUNNER_REPO=acme/api LEASEHOLD_RUNNER_WEIGHT=1-4
 /path/to/ephemeral.sh
 ```
 
