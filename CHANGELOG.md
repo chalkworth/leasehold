@@ -91,9 +91,33 @@ here.
   the asking user's own runs give, and the clean runs behind it.
 - `leasehold leases` has a `MEMORY` column (`2.3 GiB learned (3 runs)`, `4.0 GiB assumed`), and
   `leasehold outcomes` a `LEARNED` column (`1.2 GiB/slot`).
+- `LEASEHOLD_TOOL_TIMEOUT_S`: the caller's tool timeout in seconds. A PATH shim and `hold`
+  under it wait in line at most half of it, then refuse (exit 75) with the busy message, so an
+  agent hears why its command did not run before its own timeout ends the call. The new
+  `leasehold.toolwait` module reads it.
+- `leasehold run --tool-timeout S` sets that variable for the agent's session (`0`: none).
+  Without it, `run` keeps one already set, and for Claude Code (`claude`) uses the Bash tool's
+  default: `BASH_DEFAULT_TIMEOUT_MS` when set, else 120 s. The Claude Code plugin has a
+  `SessionStart` hook that writes the same value to the session's `CLAUDE_ENV_FILE`.
+- A busy message names how long the heaviest lease has run and, once 3 clean runs of its
+  `[commands]` rule in its repository are known, how long it usually takes. A refusal then says
+  when to retry: `... holds 4 slots, running 2m10s (it usually takes ~3m) ... The command did
+  not run. Retry in about 1 minute, or do lighter work first.` `hold` prints this line too when
+  it gives up.
+- A lease asked for with a rule (`leasing.lease_request(rule=..., repo=...)`) carries `rule` and
+  `repo` labels, which the busy message reads.
+- The Claude Code hook tells the agent, as `additionalContext`, that a command waited in line
+  and behind which lease, where only the person was told before. It also tells the agent the
+  job count for every leased command, a fixed weight included. A shim and `hold` print the same
+  waited line on stderr once a command waited 5 s or more.
 
 ### Changed
 
+- `busy.told` returns the reason and the advice as a pair. `hold.wait_for_grant` takes
+  `waited`, a `hold.Waited` it fills in with how long the request waited and the lease ahead of
+  it.
+- The hook's context for a range granted less than its most now reads "pytest was granted 3 of
+  2-6 slots; run it with at most 3 jobs", where it said "size it to 3 jobs".
 - `hold`'s line about an OOM kill no longer opens with "the kernel's OOM killer ended this
   command, or a process in it": it now gives only the peak, the memory counted and the
   suggested `--memory`, and the verdict line follows it.

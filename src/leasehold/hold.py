@@ -9,8 +9,12 @@ runs (`leasehold.terminal`); otherwise it runs in a session of its own.
 * A revoked lease (only `lend` is ever revoked), or a `lend` lease lost to its TTL, stops the
   group -- SIGTERM, then SIGKILL after the grace -- and exits `EXIT_REVOKED`.
 * Waiting longer than `--timeout` exits `EXIT_BUSY` (75: busy, not failed), the place in line
-  given back. A request that could never be granted, or that the daemon answers with an error
-  (a 5xx included), exits `EXIT_REFUSED`: a daemon that answers is never taken for none.
+  given back, after a line that says who holds the machine and when to retry
+  (`leasehold.busy`). Under an agent whose tool timeout `LEASEHOLD_TOOL_TIMEOUT_S` gives, the
+  wait is at most half of that (`leasehold.toolwait`). A command granted after a wait of
+  `busy.WAIT_NOTED_S` or more says how long it waited, and behind what. A request that could
+  never be granted, or that the daemon answers with an error (a 5xx included), exits
+  `EXIT_REFUSED`: a daemon that answers is never taken for none.
 * With no daemon, the command runs without a lease, after a warning (`run_unleased`); with
   `if_unavailable="fail"`, `hold` exits `EXIT_UNAVAILABLE` instead.
 * A `work` or `external` lease the daemon no longer knows (it was down longer than the TTL) is
@@ -56,10 +60,12 @@ import re
 import shlex
 import signal
 import sys
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from leasehold import (
+    busy,
     contain,
     jobs,
     leasing,
@@ -68,6 +74,7 @@ from leasehold import (
     shell,
     supervise,
     terminal,
+    toolwait,
     weights,
 )
 from leasehold.client import ApiError, Client, Unavailable
@@ -105,6 +112,15 @@ def _say(message: str) -> None:
     sys.stderr.flush()
 
 
+@dataclasses.dataclass
+class Waited:
+    """How long a request waited in line (`seconds`), and the lease ahead of it when it began
+    to wait (`busy.ahead`; None: it did not wait, or the daemon did not say)."""
+
+    seconds: float = 0.0
+    behind: str | None = None
+
+
 def wait_for_grant(
     client: Client,
     request: dict,
@@ -113,6 +129,7 @@ def wait_for_grant(
     *,
     quiet_unavailable: bool = False,
     fault: int = EXIT_UNAVAILABLE,
+    waited: Waited | None = None,
 ) -> tuple[int | None, dict]:
     """Ask for `request`'s lease, waiting in line (`leasing.wait`) until it is granted or
     `timeout_s` is up. `(None, answer)` on a grant, else `(exit code, answer)`: `EXIT_BUSY`
@@ -124,10 +141,14 @@ def wait_for_grant(
     maintenance lease holds the machine, or drains it, it also says who holds it and until
     when, as one line a script can read (`maintenance.holder_line`). While it waits it says
     its place and why whenever they change, and at least every `leasing.PROGRESS_S` with the
-    time waited so far."""
+    time waited so far. `waited`, when given, is filled in with how long it waited and the lease
+    ahead of it."""
     said: list[str] = []
+    started = time.monotonic()
 
     def waiting(where: leasing.Waiting) -> None:
+        if waited is not None and not said:
+            waited.behind = busy.ahead(client, request.get("pool"))
         line = waiting_line(request, {"position": where.position, "blocked": where.blocked})
         if said and said[-1] == line:
             say(f"{line}; {where.waited_s:.0f}s so far")
@@ -152,6 +173,9 @@ def wait_for_grant(
         if not quiet_unavailable:
             say(f"{exc}; is a daemon running? (`leasehold doctor` says what it finds)")
         return EXIT_UNAVAILABLE, {}
+    finally:
+        if waited is not None:
+            waited.seconds = time.monotonic() - started
 
 
 def waiting_line(request: dict, answer: dict) -> str:
@@ -291,6 +315,8 @@ def hold(
                 rule=rule_key,
                 repo=measure.repository() if rule_key is not None else None,
             )
+            limit_s = toolwait.limit(os.environ, timeout_s)
+            waited = Waited()
             if client is None:
                 code, answer = EXIT_UNAVAILABLE, {}
             else:
@@ -299,16 +325,25 @@ def hold(
                 code, answer = wait_for_grant(
                     client,
                     request,
-                    timeout_s,
+                    limit_s,
                     _say,
                     quiet_unavailable=if_unavailable == "run",
                     fault=EXIT_REFUSED,
+                    waited=waited,
                 )
             if code == EXIT_UNAVAILABLE and if_unavailable == "run":
                 _say("no daemon answers; running without a lease")
                 return run_unleased(argv, grace_s=grace_s)
+            program = Path(argv[0]).name
+            if code == EXIT_BUSY and client is not None:
+                if cut := toolwait.said(os.environ, timeout_s):
+                    _say(cut)
+                why, todo = busy.told(client, answer, pool=request["pool"], waited_s=limit_s)
+                _say(f"not running {program}: {why}. {todo}")
             if code is not None:
                 return code
+            if waited.seconds >= busy.WAIT_NOTED_S:
+                sys.stderr.write(busy.waited(program, waited.seconds, waited.behind) + "\n")
             return run_leased(
                 client,
                 argv,

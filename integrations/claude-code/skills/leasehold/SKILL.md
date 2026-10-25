@@ -21,13 +21,12 @@ slots.
 
 ## When a command waited, or was refused
 
-- **It waited** ("leasehold: pytest waited 42s in line for its lease"). Nothing to do: it ran
-  once there was room, and its run time does not include the wait.
-- **Refused: "machine busy for 300s: cargo test (session cc-...) holds 8 slots; ...; queued
-  #1. The command did not run."** It waited its turn for five minutes and none came. The
-  message names what holds the machine and where your command stood in line. Do not retry
-  straight away. Do lighter work (read code, edit, run one test), or check `leasehold
-  status`, then run it again.
+- **"pytest waited 42s in line for its lease"**: the wait was not the command being slow.
+- **"granted 4 slots; run it with at most 4 jobs"**: if you pick the worker count, use that.
+- **Refused: "machine busy ...: cargo test (session cc-...) holds 8 slots, running 2m10s ...
+  The command did not run."** No turn came in time. Do lighter work (read code, edit, run one
+  test), for as long as "Retry in about N minutes" says when it says so, then run it again.
+  A shim or `leasehold hold` in your command says the same and exits 75.
 - **"machine busy ...; running pytest without a lease".** It ran anyway. If it was slow, that
   is why.
 

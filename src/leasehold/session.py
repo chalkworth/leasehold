@@ -13,6 +13,11 @@ that slice (a test server, a stray build) gets SIGTERM, then SIGKILL after a gra
 without changing the agent's exit code. Without containment the agent runs the same way,
 uncontained, and nothing is stopped.
 
+The agent's own timeout on a shell command goes in `LEASEHOLD_TOOL_TIMEOUT_S`
+(`leasehold.toolwait`), so that a shim inside one waits in line for less than that and the
+agent hears why a command did not run: the `tool_timeout_s` given, else the variable the caller
+set, else what leasehold knows of the agent (`toolwait.detect`).
+
 No daemon is needed to start: the shims and `hold` find one when they need it.
 """
 
@@ -26,7 +31,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, shims
+from leasehold import contain, shims, toolwait
 from leasehold.exits import EXIT_NOT_STARTED
 
 ENV_SESSION = "LEASEHOLD_SESSION"
@@ -41,11 +46,20 @@ def new_session(argv: Sequence[str]) -> str:
 
 
 def session_env(
-    env: Mapping[str, str], session: str, *, slice_: str | None, shim_dir: Path | None
+    env: Mapping[str, str],
+    session: str,
+    *,
+    slice_: str | None,
+    shim_dir: Path | None,
+    tool_timeout_s: float | None = None,
 ) -> dict[str, str]:
-    """The agent's environment: the session, its slice when contained, and the shims first on
-    PATH when there are any."""
+    """The agent's environment: the session, its slice when contained, the shims first on
+    PATH when there are any, and its tool timeout when one is known (0 or less: none)."""
     out = {**env, ENV_SESSION: session}
+    if tool_timeout_s is not None:
+        out.pop(toolwait.ENV, None)
+        if tool_timeout_s > 0:
+            out[toolwait.ENV] = f"{tool_timeout_s:g}"
     out.pop(contain.ENV_SLICE, None)
     if slice_:
         out[contain.ENV_SLICE] = slice_
@@ -73,9 +87,11 @@ def run(
     contain_mode: str = "auto",
     grace_s: float = STOP_GRACE_S,
     quiet: bool = False,
+    tool_timeout_s: float | None = None,
 ) -> int:
     """Run the agent `argv` as one session (module docstring); its exit code. `contain_mode`
-    `off` runs it uncontained whatever `contain.probe` finds."""
+    `off` runs it uncontained whatever `contain.probe` finds. `tool_timeout_s` is the agent's
+    timeout on a shell command (0: none; None: as the module docstring says)."""
     if not argv:
         _say("no command given (leasehold run [options] -- agent ...)")
         return 2
@@ -99,14 +115,21 @@ def run(
         slice_ = contain.session_slice(session, token)
         unit = f"agent-{contain.unit_part(session)[:40]}_{token}.scope"
         prefix = contain.scope_argv(unit, slice_, weight=1)
+    if tool_timeout_s is None and toolwait.timeout(env) is None:
+        tool_timeout_s = toolwait.detect(argv, env)
     if not quiet:
         shimmed = "shims on PATH" if shim_dir else "no shims (`leasehold shims install`)"
+        timed = toolwait.timeout(env) if tool_timeout_s is None else tool_timeout_s
+        if shim_dir and timed and timed > 0:
+            shimmed += f"; shims wait at most {timed * toolwait.SHARE:g}s in line"
         _say(f"session {session}: {found.describe()}; {shimmed}")
     # Caught, not ignored, in this process: the agent starts with the default dispositions (exec
     # resets caught ones), so Ctrl-C and Ctrl-\ from the terminal reach it, and not us.
     previous = {s: signal.signal(s, _pass) for s in (signal.SIGINT, signal.SIGQUIT)}
     try:
-        child_env = session_env(env, session, slice_=slice_, shim_dir=shim_dir)
+        child_env = session_env(
+            env, session, slice_=slice_, shim_dir=shim_dir, tool_timeout_s=tool_timeout_s
+        )
         try:
             child, uncontained = contain.spawn(argv, prefix, env=child_env)
         except OSError as exc:

@@ -3,9 +3,11 @@ output tells the agent and the person when a leased Bash command ends, against a
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from leasehold import claude_code
+from leasehold import busy, claude_code
 from leasehold.client import Client
 
 
@@ -63,3 +65,30 @@ def test_what_the_agent_is_told_when_a_command_ends(
         "additionalContext": told,
     }
     assert "not a test failure" in reply.output["systemMessage"]
+
+
+@pytest.mark.parametrize("waits", [False, True], ids=["granted at once", "granted after a wait"])
+def test_what_the_agent_is_told_before_a_command_starts(daemon, tmp_path, monkeypatch, waits):
+    monkeypatch.setattr(busy, "WAIT_NOTED_S", 0.2)
+    client = Client(daemon.path)
+    env = {"XDG_RUNTIME_DIR": str(tmp_path), "HOME": str(tmp_path)}
+    event = {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_2",
+        "session_id": "s1",
+        "tool_input": {"command": "pytest -q"},
+    }
+    if waits:
+        held = client.acquire(
+            kind="work", weight=2, ttl_s=30, wait_s=0, labels={"cmd": "cargo test"},
+            session="other",
+        )["lease"]["lease_id"]  # fmt: skip
+        threading.Timer(0.6, client.release, [held]).start()
+    reply = claude_code.pre(event, client, env=env, watch_pid=None, spawn=no_renewer)
+    context = reply.output["hookSpecificOutput"]["additionalContext"]
+    assert "granted 2 slots" in context and "2 jobs" in context
+    if waits:
+        assert "behind cargo test (session other)" in context
+        assert "behind cargo test (session other)" in reply.output["systemMessage"]
+    else:
+        assert "systemMessage" not in reply.output

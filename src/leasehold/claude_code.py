@@ -18,8 +18,13 @@ asked for as a range: from its least up to the rule's `hook_ceiling`, both ends 
 (`leasehold.admission.alone`), served by the daemon. The request waits in line for its least
 and is granted a size as any range is. The note records the size granted, its job count and
 thread count, so a PATH shim the command runs through (under `leasehold run`) sizes it to the
-grant. A range granted less than its most also tells the agent the size, as context it reads
-before the command runs; a fixed weight tells it nothing.
+grant. The agent is told the size too, as context it reads before the command runs, so that
+it can run the command with that many jobs where no shim does it.
+
+A command that waited at least `busy.WAIT_NOTED_S` in line says so as it starts, both to the
+person and to the agent, with the lease it waited behind: its wait is not the command's own
+run time. The wait is `wait_s` whatever `LEASEHOLD_TOOL_TIMEOUT_S` says (`leasehold.toolwait`):
+it happens before the command starts, outside the Bash tool's clock.
 
 Each Claude Code session is its own leasehold session: one user's agents take turns with each
 other, and with that user's other work, as `admission` rotates sessions. A session's sub-agents
@@ -49,7 +54,6 @@ import json
 import os
 import re
 import signal
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +61,7 @@ from pathlib import Path
 from leasehold import busy, handoff, hooknotes, host, measure, programs, shell, verdict, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_UNAVAILABLE
-from leasehold.hold import lease_request, wait_for_grant
+from leasehold.hold import Waited, lease_request, wait_for_grant
 from leasehold.proctable import scan
 
 #: Lease ids are `cc.` and the tool call's id; sessions `cc-` and the Claude Code session's.
@@ -68,9 +72,6 @@ SESSION_PREFIX = "cc-"
 #: end is never reported loses its lease soon after it must have ended.
 BASH_MAX_S = 600.0
 MARGIN_S = 60.0
-#: A command that waited at least this long for its lease says so when it starts, so a slow
-#: start is not mistaken for a slow command.
-WAIT_NOTED_S = 5.0
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]")
 
 
@@ -145,13 +146,19 @@ def _threads(
         return None
 
 
-def _granted(program: str, weight: int, least: int, most: int) -> dict:
-    """What the agent reads before a command granted `weight` of the range `least`-`most`, less
-    than its most: the size to run it at."""
-    text = (
-        f"leasehold: {program} was granted {weight} of {weights.text(least, most)} slots; "
-        f"size it to {weight} jobs (or run the agent under `leasehold run`)"
+def _granted(program: str, weight: int, least: int, most: int, jobs: int) -> str:
+    """What the agent reads before a command granted `weight` slots (of the range `least`-`most`
+    when that is a range) runs: the job count to run it with."""
+    slots = f"{weight} of {weights.text(least, most)}" if most > least else str(weight)
+    noun = "slot" if slots == "1" else "slots"
+    return (
+        f"leasehold: {program} was granted {slots} {noun}; run it with at most {jobs} "
+        f"{'job' if jobs == 1 else 'jobs'} (or run the agent under `leasehold run`)."
     )
+
+
+def _context(text: str) -> dict:
+    """Context the agent reads before the command runs."""
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}}
 
 
@@ -244,18 +251,20 @@ def pre(
         rule=rule.key,
         repo=_repository(event) if rule.key is not None else None,
     ) | {"lease_id": lid}
-    asked = time.monotonic()
-    code, answer = wait_for_grant(client, request, settings.wait_s, reply.log.append)
-    waited = time.monotonic() - asked
+    waited = Waited()
+    code, answer = wait_for_grant(client, request, settings.wait_s, reply.log.append, waited=waited)
     if code is None:
-        if waited >= WAIT_NOTED_S:
-            reply.output = _message(f"{found.program} waited {waited:.0f}s in line for its lease")
         lease = answer["lease"]
         granted = int(lease["weight"])
         top = int(lease.get("max_weight") or granted)
-        if granted < top:  # a range granted below its most: the agent sizes the command
-            low = int(lease.get("min_weight") or granted)
-            reply.output = (reply.output or {}) | _granted(found.program, granted, low, top)
+        low = int(lease.get("min_weight") or granted)
+        jobs = int(lease.get("jobs") or granted)
+        told = [_granted(found.program, granted, low, top, jobs)]
+        if waited.seconds >= busy.WAIT_NOTED_S:
+            line = busy.waited(found.program, waited.seconds, waited.behind)
+            reply.output = {"systemMessage": line}
+            told.insert(0, line)
+        reply.output = (reply.output or {}) | _context(" ".join(told))
         argv = handoff.keeper_argv(
             str(client.path), lid, ttl_s=float(answer["lease"]["ttl_s"]),
             max_hold_s=max_hold(event), watch_pid=watch_pid,
@@ -265,7 +274,6 @@ def pre(
         except OSError as exc:
             pid = None
             reply.log.append(f"cannot start the renewer, the lease ends in one TTL: {exc}")
-        jobs = int(lease.get("jobs") or lease["weight"])
         noted = hooknotes.write(
             directory,
             lid,
@@ -287,9 +295,9 @@ def pre(
             reply.log.append(f"no lease kept: cannot note it in {directory}")
         return reply
     if code == EXIT_BUSY:
-        why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
+        why, todo = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
         if settings.when_busy == "deny":
-            reply.output = _deny(f"leasehold: {why}. {busy.ADVICE}")
+            reply.output = _deny(f"leasehold: {why}. {todo}")
         else:
             reply.output = _message(f"{why}; running {found.program} without a lease")
         return reply
