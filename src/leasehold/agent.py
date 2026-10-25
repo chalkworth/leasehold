@@ -674,12 +674,12 @@ class MachineAgent:
             )
             limit = lease_memory_limit(self.config.ceiling.memory, self.limits.memory_bytes)
             return _never(lease_id, f"{what} is more than {limit}")
-          
+
         # Learned after the [ceiling] check, which is for declared memory only: a learned
         # figure is no limit on the command, so it never refuses one.
         learned, learned_runs = self._learned_for(req, user)
         if learned is not None and self.learn == "on":
-          per_slot = learned
+            per_slot = learned
         item = LedgerItem(
             scope=SCOPE,
             item_id=lease_id,
