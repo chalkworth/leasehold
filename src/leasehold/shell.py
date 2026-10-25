@@ -118,6 +118,9 @@ class Rule:
     #: The most an agent hook asks under the rule: what its range alone would be granted on
     #: an idle machine (`admission.alone`), as the daemon serves it; None when it does not say.
     hook_ceiling: int | None = None
+    #: The hard cap on a command's memory when contained, as the daemon serves it: a size such
+    #: as `123b`, or `off`; None when the rule sets none.
+    memory_max: str | None = None
 
     def __post_init__(self) -> None:
         if self.max_weight is None or self.max_weight < self.weight:
@@ -138,7 +141,7 @@ class Rule:
             memory=None if per_slot else row.get("memory"), never=row.get("never"),
             threads=_threads(row.get("threads")), max_weight=_count(row.get("max_weight")),
             memory_per_slot=per_slot or None, ceiling=_count(row.get("ceiling")),
-            hook_ceiling=_count(row.get("hook_ceiling")),
+            hook_ceiling=_count(row.get("hook_ceiling")), memory_max=row.get("memory_max"),
         )  # fmt: skip
 
     def matches(self, program: str, args: Sequence[str]) -> bool:

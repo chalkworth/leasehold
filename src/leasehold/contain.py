@@ -10,8 +10,10 @@ command in a transient scope of the user manager instead, with
   systemd's default weight, and each `leasehold run` session slice with the other sessions
   equally. A hard `CPUQuota` of `weight` CPUs is set only when asked for (`hard_cpu`);
 * `MemoryHigh` when the lease names a memory size: past it the kernel throttles and reclaims
-  the scope's memory. It is soft: it never kills, and it bounds nothing outright (`MemoryMax` is
-  never set), so a command can still pass it, and the machine can still run out of memory.
+  the scope's memory. It is soft: it never kills, and it bounds nothing outright, so a command
+  can still pass it, and the machine can still run out of memory;
+* a hard cap only when one is asked for (`memory_max`): `MemoryMax` with no swap, past which the
+  kernel kills the whole command.
 
 Scopes sit in `leasehold.slice`. `leasehold run` gives each agent session a slice of its own
 (`leasehold-<session>.slice`, named to its commands in `LEASEHOLD_SLICE`), so the agent's scope
@@ -25,8 +27,16 @@ before the command has run, and the command is then started uncontained instead.
 Containment is used only where it cannot take a command from someone else's control: the caller
 must itself run in the user's own part of the tree (`/user.slice/user-<uid>.slice/`, a login
 session or the user manager). A command started from a system service, a CI runner's job or an
-operator's slice stays where it is, under that service's limits and clean-up. Anywhere it is not
-used, `probe` says why, and the lease works as before ("advisory").
+operator's slice stays where it is, under that service's limits and clean-up. So does a command
+whose caller runs under a `memory.max` that the scope would leave behind (`cgroup.escaped`):
+Claude Code's `CLAUDE_CODE_TOOL_MEMORY_LIMIT` group, or the scope of a capped command that runs
+`hold` itself. Anywhere it is not used, `probe` says why, and the lease works as before
+("advisory").
+
+A lease's scope can also be given a hard cap (`memory_max`; the properties come from
+`leasehold.host`): then it is started without `--collect`, so that once it has ended systemd
+still says whether the OOM killer ended it (`cap_result`), and `spawn` sets its
+`memory.oom.group` from inside, so the kernel kills all of it at once.
 """
 
 from __future__ import annotations
@@ -42,7 +52,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from leasehold.units import memory_to_bytes
+from leasehold import cgroup
+from leasehold.units import memory_to_bytes, size
 
 #: Systemd's own default CPUWeight, the weight of one slot.
 WEIGHT_PER_SLOT = 100
@@ -53,6 +64,8 @@ ENV = "LEASEHOLD_CONTAIN"
 #: The session slice `leasehold run` made, for the scopes of the commands under it.
 ENV_SLICE = "LEASEHOLD_SLICE"
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.]")
+#: How `probe`'s reason starts when the caller runs under a memory limit a scope would escape.
+UNDER_LIMIT = "caller under a memory limit"
 
 
 @dataclass(frozen=True)
@@ -93,6 +106,16 @@ def probe(
     home = f"/user.slice/user-{uid}.slice/"
     if not path.startswith(home):
         return Containment(False, f"caller in {path or 'an unknown cgroup'}, not a user session")
+    target = "/" + root_slice_cgroup(uid)
+    if is_session_slice(env.get(ENV_SLICE) or ""):
+        target += "/" + env[ENV_SLICE]
+    kept = cgroup.escaped(cgroup_root, path, target)
+    if kept is not None:
+        return Containment(
+            False,
+            f"{UNDER_LIMIT} of {size(kept.limit_bytes)} ({kept.cgroup}): a scope would take "
+            "the command out from under it, so commands stay there",
+        )
     manager = cgroup_root / home.strip("/") / f"user@{uid}.service"
     try:
         delegated = set((manager / "cgroup.subtree_control").read_text().split())
@@ -157,19 +180,17 @@ def scope_argv(
     weight: int,
     memory: str | None = None,
     hard_cpu: bool = False,
+    cap: Sequence[str] = (),
 ) -> list[str]:
     """The `systemd-run` prefix that starts a command in scope `unit` of `slice_`, sized to a
-    lease of `weight` slots (and `memory`, a size such as `4g`, when given)."""
-    argv = [
-        "systemd-run",
-        "--user",
-        "--scope",
-        "--quiet",
-        "--collect",
-        f"--unit={unit}",
-        f"--slice={slice_}",
-    ]
-    for prop in scope_properties(weight=weight, memory=memory, hard_cpu=hard_cpu):
+    lease of `weight` slots (and `memory`, a size such as `4g`, when given), with the unit
+    properties `cap` of a hard memory cap (`leasehold.host`) when given. A capped scope is
+    kept once it fails, for `cap_result` to read."""
+    argv = ["systemd-run", "--user", "--scope", "--quiet"]
+    if not cap:
+        argv.append("--collect")
+    argv += [f"--unit={unit}", f"--slice={slice_}"]
+    for prop in [*scope_properties(weight=weight, memory=memory, hard_cpu=hard_cpu), *cap]:
         argv += ["-p", prop]
     return [*argv, "--"]
 
@@ -217,6 +238,58 @@ def update_scope(
     if done.returncode != 0:
         return f"cannot resize {unit}: {done.stderr.strip() or f'exit {done.returncode}'}"
     return None
+
+
+#: The properties that take a scope's lease limits off: the weight of one slot, and no CPU or
+#: memory limit.
+NEUTRAL = (
+    f"CPUWeight={WEIGHT_PER_SLOT}",
+    "CPUQuota=",
+    "MemoryHigh=infinity",
+    "MemoryMax=infinity",
+    "MemorySwapMax=infinity",
+)
+
+
+def neutral_scope(unit: str) -> str | None:
+    """Take the lease's limits off the scope `unit`, which outlives its lease (a server its
+    command left running): `NEUTRAL`, until it ends. Best effort: why it could not be done,
+    or None."""
+    argv = ["systemctl", "--user", "set-property", "--runtime", unit, *NEUTRAL]
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"cannot reset {unit}: {exc}"
+    if done.returncode != 0:
+        return f"cannot reset {unit}: {done.stderr.strip() or f'exit {done.returncode}'}"
+    return None
+
+
+def cap_result(
+    unit: str, wait_s: float = 3.0, cgroup_root: Path = Path("/sys/fs/cgroup")
+) -> str | None:
+    """How systemd says the capped scope `unit` ended (`Result`: `oom-kill` when the OOM
+    killer ended a process of it), once its command has ended; the scope is then forgotten
+    (`reset-failed`). An emptied scope is waited for, up to `wait_s`, until systemd has seen
+    it end; one that still holds processes (a server the command left) is not, and is
+    `success` unless an OOM kill already failed it. None when systemd cannot be asked, or no
+    longer knows the scope."""
+    deadline = time.monotonic() + wait_s
+    try:
+        while True:
+            shown = _systemctl("show", "-p", "LoadState", "-p", "ActiveState", "-p", "Result", unit)
+            props = dict(line.partition("=")[::2] for line in shown.stdout.splitlines())
+            if shown.returncode != 0 or props.get("LoadState") == "not-found":
+                return None
+            if props.get("ActiveState") in ("failed", "inactive") or time.monotonic() > deadline:
+                break
+            if _populated(unit, cgroup_root):
+                break
+            time.sleep(0.05)
+        _systemctl("reset-failed", unit)
+    except CleanupError:
+        return None
+    return props.get("Result") or None
 
 
 class CleanupError(RuntimeError):
@@ -296,15 +369,21 @@ def oom_reset_code() -> str:
     )
 
 
-#: Run in the scope by `spawn`: say the scope exists on the pipe it is handed, reset the OOM
-#: score (`oom_reset_code`), then become the command. Exit 127, as a shell would, when the
-#: command cannot be run.
+#: Run in the scope by `spawn`: with `whole` as its second argument, set the scope's
+#: `memory.oom.group` where it can, so the OOM killer ends every process in it together; say
+#: the scope exists on the pipe it is handed; reset the OOM score (`oom_reset_code`); then
+#: become the command. Exit 127, as a shell would, when the command cannot be run.
 _TRAMPOLINE = (
     "import os,sys\n"
+    "try:\n"
+    " if sys.argv[2]=='whole':\n"
+    "  g=open('/proc/self/cgroup').read().split('0::',1)[1].split('\\n')[0]\n"
+    "  open('/sys/fs/cgroup'+g+'/memory.oom.group','w').write('1')\n"
+    "except (OSError,IndexError): pass\n"
     "fd=int(sys.argv[1]); os.write(fd,b'x'); os.close(fd)\n"
     + oom_reset_code()
-    + "try: os.execvp(sys.argv[2],sys.argv[2:])\n"
-    "except OSError as e: sys.stderr.write(f'{sys.argv[2]}: {e}\\n'); os._exit(127)\n"
+    + "try: os.execvp(sys.argv[3],sys.argv[3:])\n"
+    "except OSError as e: sys.stderr.write(f'{sys.argv[3]}: {e}\\n'); os._exit(127)\n"
 )
 #: How long `spawn` waits for a scope before it gives up on it.
 SCOPE_TIMEOUT_S = 30.0
@@ -316,17 +395,24 @@ class Cancelled(Exception):
 
 
 def spawn(
-    argv: Sequence[str], prefix: Sequence[str] | None, *, cancel_fd: int | None = None, **popen
+    argv: Sequence[str],
+    prefix: Sequence[str] | None,
+    *,
+    cancel_fd: int | None = None,
+    whole: bool = False,
+    **popen,
 ) -> tuple[subprocess.Popen, str | None]:
     """Start `argv` (with `subprocess.Popen`'s `popen` arguments) in the scope `prefix` makes,
-    or as is when there is no prefix. When the scope cannot be made, the command has not run,
-    and it is started as is instead. When `cancel_fd` turns readable before the scope is made,
+    or as is when there is no prefix; with `whole`, a scope the OOM killer ends whole
+    (`memory.oom.group`). When the scope cannot be made, the command has not run, and it is
+    started as is instead. When `cancel_fd` turns readable before the scope is made,
     raises `Cancelled`. The process, and why it is not contained when a scope was asked for and
     could not be made (None otherwise)."""
     if not prefix:
         return subprocess.Popen(list(argv), **popen), None
     read_end, write_end = os.pipe()
-    trampoline = [sys.executable, "-I", "-S", "-c", _TRAMPOLINE, str(write_end), *argv]
+    mode = "whole" if whole else "-"
+    trampoline = [sys.executable, "-I", "-S", "-c", _TRAMPOLINE, str(write_end), mode, *argv]
     original_pass_fds = popen.pop("pass_fds", ())
     try:
         passed = (*original_pass_fds, write_end)

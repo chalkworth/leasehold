@@ -71,6 +71,30 @@ def limit(
     return lowest
 
 
+def escaped(
+    cgroup_root: Path, inside: str, target: str, files: tuple[str, ...] = ("memory.max",)
+) -> MemoryLimit | None:
+    """The lowest memory limit (in `files`) on `inside` or a cgroup above it that is not also
+    above `target`: the limit a process in `inside` would leave behind if it were moved into
+    `target`. None when there is none (or `cgroup_root` is not cgroup v2)."""
+    if not (cgroup_root / "cgroup.controllers").is_file():
+        return None
+    here, there = PurePosixPath(inside), PurePosixPath(target)
+    if not (here.is_absolute() and there.is_absolute()) or ".." in here.parts + there.parts:
+        return None
+    shared = {there, *there.parents}
+    lowest: MemoryLimit | None = None
+    for group in (here, *here.parents):
+        if group in shared:
+            break
+        base = cgroup_root / str(group).lstrip("/")
+        for name in files:
+            value = _bytes(_read(base / name))
+            if value is not None and (lowest is None or value < lowest.limit_bytes):
+                lowest = MemoryLimit(value, str(group))
+    return lowest
+
+
 def used(cgroup_root: Path, cgroup: str) -> int | None:
     """The memory everything under `cgroup` uses now, in bytes: `memory.current` less the
     inactive file cache (`inactive_file` in `memory.stat`), which the kernel reclaims first

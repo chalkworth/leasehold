@@ -113,8 +113,37 @@ here.
   and behind which lease, where only the person was told before. It also tells the agent the
   job count for every leased command, a fixed weight included. A shim and `hold` print the same
   waited line on stderr once a command waited 5 s or more.
+- An opt-in hard cap on a command's memory, `memory_max`: `hold --memory-max 8g`, a
+  `[[commands.rule]]`'s `memory_max`, `[commands] memory_max` for every leased command whose
+  rule sets none (default `"off"`), and `memory_max=` on `Lease.popen` and `Lease.run`. It
+  takes a size, a share of the machine's memory such as `"50%"`, or `"off"`. On Linux the
+  command's scope gets `MemoryMax` at the cap, `MemorySwapMax=0` and `memory.oom.group`, so
+  the kernel kills the whole command past it. The command keeps its own exit code, and the
+  memory verdict names the cap: `leasehold: pytest was stopped by leasehold's cap of 8.0 GiB
+  for this command: its largest process, python (pid 41233), had 7.6 GiB.` A cap that cannot
+  hold (no scope, no lease, macOS) is said before the command runs, and `Command.uncapped`
+  says why. A bad `memory_max` is a config error, and a bad `--memory-max` exits 2.
+- The verdict's `kind` can be `cap`, and it has `largest`, the largest of the command's
+  processes as `(pid, name, bytes)` when leasehold saw it near the cap.
+- `leasehold.host` says how a cap works on this platform: `memory_cap()` gives `how` (`exact`
+  on Linux, `none` with a reason elsewhere until macOS gets a polled cap), `cap_properties()`
+  the scope's properties, and `cap_ended()` whether the OOM killer ended a capped scope.
+- `leasehold doctor` has a `memory_max` line that says how a cap works here, and warns when the
+  config sets a cap that cannot hold. The status object's `contain` has `memory_max` (the
+  default cap in bytes, or null) and `memory_cap` (`how` and `reason`). `GET /v1/commands`
+  serves each rule's `memory_max` in bytes, `"off"` or null, and a grant's `contain` carries
+  the default cap.
+- When a contained command ends and leaves a process running in its scope (a build server),
+  `hold` takes the lease's limits off the scope and says so: `pytest left java running (pid
+  81234, 532 MiB) in its scope; it no longer has the lease's limits`.
 
 ### Changed
+
+- A command whose caller runs under a `memory.max` that its scope would not be under (Claude
+  Code's `CLAUDE_CODE_TOOL_MEMORY_LIMIT` group, or the scope of a capped command that runs
+  `hold` itself) is no longer moved into a scope of its own. It stays under that limit, keeps
+  its lease, and `leasehold doctor` says so. Before, its scope took it out from under the
+  limit.
 
 - `busy.told` returns the reason and the advice as a pair. `hold.wait_for_grant` takes
   `waited`, a `hold.Waited` it fills in with how long the request waited and the lease ahead of

@@ -37,6 +37,8 @@ CASES = {
         {},
     ),
     "until without maintenance": (["--until", "07:00"], True, 1, "are for --kind maintenance", {}),
+    "a cap that is no size": (["--memory-max", "lots"], True, 2, "give a size such as", {}),
+    "a cap with no daemon": (["--memory-max", "1g"], False, 0, "no memory cap of 1.0 GiB", {}),
     "no daemon": ([], False, 0, "running without a lease", {}),
     "no daemon, fail": (["--if-unavailable", "fail"], False, 69, "is a daemon running?", {}),
 }  # fmt: skip
@@ -147,30 +149,64 @@ def test_a_range_whose_jobs_take_tokens_becomes_elastic(daemon):
 WRITE_512M = """echo 0 > /proc/self/oom_score_adj; exec "$1" -c "b = b'x' * (512 << 20)" """
 
 
+#: case: (hold's options, whether the command's scope goes in a session slice held to 64 MiB
+#: with no swap, what the memory verdict says).
+OOM_CASES = {
+    "a limit above it": ([], True, "OOM killer"),
+    "its own cap": (["--memory-max", "64m"], False, "leasehold's cap of 64 MiB for this command"),
+}
+
+
 @pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
-def test_a_command_the_oom_killer_ends_is_named(daemon):
-    # A session slice, as `leasehold run` makes, held to 64 MiB with no swap: the command's
-    # scope goes in it, and the OOM killer ends a command that writes 512 MiB.
+@pytest.mark.parametrize(("options", "slice_", "says"), OOM_CASES.values(), ids=OOM_CASES.keys())
+def test_a_command_the_oom_killer_ends_is_named(daemon, options, slice_, says):
+    # A session slice is what `leasehold run` makes: the command's scope goes in it.
     capped = contain.session_slice("oomtest", os.urandom(3).hex())
     limits = ["--runtime", capped, "MemoryMax=64M", "MemorySwapMax=0"]
-    subprocess.run(["systemctl", "--user", "set-property", *limits], check=True)
+    if slice_:
+        subprocess.run(["systemctl", "--user", "set-property", *limits], check=True)
     try:
         done = cli(
-            daemon.path, "hold", "--", "sh", "-c", WRITE_512M, "sh", sys.executable,
-            env={**CHILD_ENV, contain.ENV_SLICE: capped},
+            daemon.path, "hold", *options, "--", "sh", "-c", WRITE_512M, "sh", sys.executable,
+            env={**CHILD_ENV, contain.ENV_SLICE: capped} if slice_ else CHILD_ENV,
         )  # fmt: skip
         peak_available = (
             Path("/sys/fs/cgroup") / contain.root_slice_cgroup() / "memory.peak"
         ).is_file()
     finally:
-        subprocess.run(["systemctl", "--user", "stop", capped], check=False)
-        subprocess.run(["systemctl", "--user", "revert", capped], check=False, capture_output=True)
+        if slice_:
+            subprocess.run(["systemctl", "--user", "stop", capped], check=False)
+            revert = ["systemctl", "--user", "revert", capped]
+            subprocess.run(revert, check=False, capture_output=True)
     assert done.returncode == 128 + signal.SIGKILL  # the command's own
     last = done.stderr.splitlines()[-1]  # the memory verdict
     assert last.startswith("leasehold: ") and "not a test failure" in last
-    assert "leasehold counted no memory for it" in done.stderr
+    assert says in last
+    # A command its own cap stopped is told to change, not to declare more memory.
+    assert ("leasehold counted no memory for it" in done.stderr) == slice_
     if peak_available:
-        assert "Declare at least --memory " in done.stderr
+        assert ("Declare at least --memory " in done.stderr) == slice_
+
+
+@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+def test_a_command_under_a_memory_limit_stays_there_and_its_leftovers_lose_their_limits(daemon):
+    # Run from inside a scope held to 1 GiB, as Claude Code's tool memory limit holds its
+    # commands, the command stays in that scope, so a cap of its own does not hold.
+    outer = f"lh-outer-{os.urandom(3).hex()}.scope"
+    inside = ["systemd-run", "--user", "--scope", "--quiet", f"--unit={outer}"]
+    inside += ["-p", "MemoryMax=1G"]
+    done = subprocess.run(
+        [*inside, sys.executable, "-m", "leasehold", "--socket", str(daemon.path), "hold",
+         "--memory-max", "64m", "--", "cat", "/proc/self/cgroup"],
+        env=CHILD_ENV, capture_output=True, text=True, timeout=30, check=False,
+    )  # fmt: skip
+    assert done.returncode == 0
+    assert done.stdout.strip().endswith(f"/{outer}")
+    assert "no memory cap of 64 MiB on cat: caller under a memory limit of 1.0 GiB" in done.stderr
+    # A server the command starts outlives it in its scope, without the lease's cap.
+    started = cli(daemon.path, "hold", "--memory-max", "64m", "--", "sh", "-c", "setsid sleep 2 &")
+    assert started.returncode == 0
+    assert "left sleep running (pid " in started.stderr
 
 
 @pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")

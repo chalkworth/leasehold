@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-from leasehold import contain, discovery, machine, paths, upgrade
+from leasehold import contain, discovery, host, machine, paths, upgrade, verdict
 from leasehold.admission import alone, gib
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.commands import HEAVY_WEIGHT, default_rules
@@ -349,9 +349,59 @@ def check_contain(config, env: Mapping[str, str], probe=contain.probe) -> Check:
     found = probe(env=env)
     if found.enforced:
         return Check("contain", "ok", f"{found.describe()}: commands run in scopes sized to leases")
+    if found.reason.startswith(contain.UNDER_LIMIT):
+        agent = env.get(verdict.AGENT_LIMIT_ENV)
+        if agent:
+            detail = (
+                f"Claude Code's tool memory limit ({agent}) is on: leasehold leaves commands in "
+                f"its cgroup and reports its kills ({found.reason})"
+            )
+        else:
+            detail = f"{found.reason}; leasehold reports the kills of that limit"
+        return Check("contain", "ok", detail)
     fix = next((f for start, f in _CONTAIN_FIXES if found.reason.startswith(start)), None)
     detail = f"{found.describe()}; a lease counts its command but does not hold it back"
     return Check("contain", "warn", detail, fix or "see Containment in docs/reference.md")
+
+
+def _caps_set(config) -> str | None:
+    """Where the config sets a hard cap on commands' memory, in words; None where it sets
+    none."""
+    if config is None:
+        return None
+    said = []
+    if config.commands.memory_max != "off":
+        said.append(f"[commands] memory_max = {config.commands.memory_max}")
+    rules = [r for r in config.commands.rule if r.memory_max not in (None, "off")]
+    if rules:
+        said.append(f"{len(rules)} rule{'s' if len(rules) > 1 else ''} set one")
+    return ", and ".join(said) or None
+
+
+def check_memory_cap(
+    config, env: Mapping[str, str], probe=contain.probe, cap: host.Cap | None = None
+) -> Check:
+    """Whether a hard cap on one command's memory (`memory_max`) holds for commands `hold`
+    starts here (`host.memory_cap`, and a scope to set it on), and whether the config sets one.
+    A cap that is set but cannot hold is a warning."""
+    cap = host.memory_cap() if cap is None else cap
+    wanted = _caps_set(config)
+    where = f"; {wanted}" if wanted else "; none is set (off unless asked for)"
+    level = "warn" if wanted else "ok"
+    fix = "see memory_max in docs/reference.md" if wanted else None
+    if cap.how == "none":
+        detail = f"no per-command memory cap here: {cap.reason}{where}"
+        return Check("memory_max", level, detail, fix)
+    if config is not None and config.contain.mode == "off":
+        why = '[contain] mode = "off"'
+    else:
+        found = probe(env=env)
+        why = None if found.enforced else found.reason
+    if why is not None:
+        detail = f"caps do not hold: commands get no scope here ({why}){where}"
+        return Check("memory_max", level, detail, fix)
+    detail = f"{cap.how}: past its cap the kernel kills a command whole (MemoryMax){where}"
+    return Check("memory_max", "ok", detail)
 
 
 def check_oom_score(roots: Roots) -> Check | None:
@@ -635,6 +685,7 @@ def run(
     checks.append(check_proc(roots, resolved))
     checks += check_cgroups(roots, resolved)
     checks.append(check_contain(resolved, env))
+    checks.append(check_memory_cap(resolved, env))
     oom = check_oom_score(roots)
     if oom is not None:
         checks.append(oom)

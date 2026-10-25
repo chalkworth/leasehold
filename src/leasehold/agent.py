@@ -27,6 +27,7 @@ from leasehold import (
     __version__,
     contain,
     estimate,
+    host,
     maintenance,
     observe,
     outcomes,
@@ -46,7 +47,7 @@ from leasehold.load import LoadReader, available, some_avg10
 from leasehold.machine import MachineConfig, lease_memory_limit
 from leasehold.net import MemoryNet
 from leasehold.proctable import Proc
-from leasehold.units import declared_to_bytes, memory_to_bytes
+from leasehold.units import CAP_OFF, cap_to_bytes, declared_to_bytes, memory_to_bytes
 
 #: The ledger scope observed processes' leases are filed under; no client may name it.
 OBSERVED_SCOPE = "leasehold.observed"
@@ -741,7 +742,7 @@ class MachineAgent:
             return {
                 "status": "granted",
                 "lease": lease,
-                "contain": self.config.contain.model_dump(),
+                "contain": self.contain_settings(),
                 "elastic": self.config.elastic.model_dump(),
             }
         if isinstance(outcome, Queued):
@@ -1014,6 +1015,22 @@ class MachineAgent:
             },
         }
 
+    def _cap(self, value: str | None) -> str | None:
+        """A configured `memory_max` as clients take it: `off`, a size in bytes (`123b`), or
+        None for None. A share of the machine's memory is worked out here."""
+        if value is None or value == CAP_OFF:
+            return value
+        return f"{cap_to_bytes(value, self.memory_bytes)}b"
+
+    def contain_settings(self) -> dict:
+        """`[contain]` as a grant hands it to the client that runs the command, with
+        `memory_max`, the hard cap on a command whose rule sets none (`[commands] memory_max`;
+        None: off)."""
+        default = self._cap(self.config.commands.memory_max)
+        return self.config.contain.model_dump() | {
+            "memory_max": None if default == CAP_OFF else default
+        }
+
     def commands(self) -> dict:
         """Which commands take a lease, for agent hooks and shims to match against: each rule
         with its pool named and its weight and `max_weight` each cut to the most one lease
@@ -1026,7 +1043,8 @@ class MachineAgent:
         `memory`, its least weight's worth, for clients from before memory per slot. A rule no
         lease could ever be granted for (`MachineConfig.never_reason`, which judges its least
         weight) is served at its own weights with `never`, the reason: it still matches its
-        commands, and hooks and shims refuse them rather than take a lighter rule's lease."""
+        commands, and hooks and shims refuse them rather than take a lighter rule's lease. A
+        rule's `memory_max` is served in bytes (`123b`), or `off`, or None when it sets none."""
         settings = self.config.commands
         policy = self.policy()
         rules = []
@@ -1035,6 +1053,7 @@ class MachineAgent:
                 "pool": self.config.rule_pool(rule),
                 "source": src,
                 "max_weight": rule.most,
+                "memory_max": self._cap(rule.memory_max),
             }
             reason = self.config.never_reason(rule, policy, self.memory_bytes)
             if reason is not None:
@@ -1084,6 +1103,7 @@ class MachineAgent:
             queue=listing["queue"],
             maintenance=self.maintenance(),
             memory_net=None if self.net is None else self.net.status(),
+            contain=self.contain_settings() | {"memory_cap": vars(host.memory_cap())},
             now=self._clock(),
             version=__version__,
         )

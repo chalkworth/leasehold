@@ -808,14 +808,23 @@ PATH shims print the same line.
 leasehold: the kernel's OOM killer ended pytest (peak 13.9 GiB) when the machine ran out of memory. This is not a test failure. Run it again only after the other heavy work has finished, with fewer workers.
 ```
 
-The verdict is certain when the command's scope counted the OOM kill. It then names the
-`memory.max` above the command when one was set (a session slice, say), in place of the
-machine. A command that ended by SIGKILL while the machine counted an OOM kill gets a verdict
+When the command's own [hard cap](#a-hard-cap-memory_max) ended it, the verdict names the cap,
+and the largest of its processes when leasehold saw it near the cap:
+
+```
+leasehold: pytest was stopped by leasehold's cap of 8.0 GiB for this command: its largest process, python (pid 41233), had 7.6 GiB. This is not a test failure. Do not run it again unchanged: run fewer workers or a narrower selection, find what allocates, or raise its memory_max.
+```
+
+The verdict is certain when the command's scope counted the OOM kill, or systemd says the OOM
+killer ended its capped scope. It names the command's own cap when that was the tightest limit
+on it, else the `memory.max` above the command when one was set (a session slice, say), in
+place of the machine. A command that ended by SIGKILL while the machine counted an OOM kill gets a verdict
 that says "most likely", since the kill counted may have been another process's. This works
 contained or not, on Linux only for now: other systems get no verdict.
 
-For a contained command the OOM killer reached, the line before the verdict gives the
-command's peak, the memory leasehold counted for it, and a `--memory` about 15% above the peak.
+For a contained command the OOM killer reached, other than at its own cap, the line before
+the verdict gives the command's peak, the memory leasehold counted for it, and a `--memory`
+about 15% above the peak.
 That peak is at most what the command was let use before the kill, so declare at least that
 much.
 
@@ -835,21 +844,38 @@ the lease, so the lease holds the command back instead of only counting it:
   CPUs (`CPUQuota`); it is off by default, and `leasehold doctor` warns while it is.
 - `hold --memory 4g`, or a rule's `memory`, sets `MemoryHigh`: past it the kernel throttles the
   command and reclaims its memory. It is soft. It never kills, and it does not bound the
-  command outright: nothing sets `MemoryMax`, and the machine can still run out of memory.
+  command outright, so the machine can still run out of memory.
   The same size is what [memory admission](#memory) counts before the command starts, and the
   [memory guard](#memory-guard) is what stops new work starting while memory is short.
+- `hold --memory-max 8g`, or a rule's `memory_max`, sets a [hard cap](#a-hard-cap-memory_max).
+  It is off unless asked for.
 
 The scope is `lease-<id>.scope` in `leasehold.slice`, or in the slice of the `leasehold run`
 session it was started from. Every process the command starts stays in it. If the user manager
 refuses the scope or does not answer within 30 s, the command has not run yet; it then runs
 uncontained, and `hold` says so.
 
+A command can leave a process running in its scope after it ends: a build server such as
+Bazel's or Gradle's, started in a session of its own. Once the command ends, `hold` takes the
+lease's limits off the scope (its weight goes back to one slot's, and its `MemoryHigh`,
+`MemoryMax` and `CPUQuota` go), so the server does not keep a cap meant for one command, and
+says so:
+
+```
+leasehold hold: bazel left java running (pid 81234, 532 MiB) in its scope; it no longer has the lease's limits
+```
+
 It is used when the daemon's `[contain] mode` is `auto` (the default) and the caller runs in your
 own session (anything under `/user.slice/user-<uid>.slice/`) with a systemd user manager that
 answers and is delegated the cpu and memory controllers, the default on current Debian, Ubuntu
 and Fedora.
 A command started from a system service, a CI runner's job or an operator's slice is left where
-it is, under that service's limits and clean-up. Elsewhere, or with `LEASEHOLD_CONTAIN=off`, the
+it is, under that service's limits and clean-up. So is a command whose caller runs under a
+`memory.max` that its scope would not be under: Claude Code's `CLAUDE_CODE_TOOL_MEMORY_LIMIT`
+group, or the scope of a capped command that runs `hold` itself. Moving it would take it out
+from under that limit. It keeps its lease, and its memory verdict still names that limit
+(`leasehold doctor` says "Claude Code's tool memory limit (4G) is on: leasehold leaves
+commands in its cgroup and reports its kills"). Elsewhere, or with `LEASEHOLD_CONTAIN=off`, the
 command runs as before and the lease is advisory. `leasehold doctor` says which applies.
 
 While a contained command runs, its client reads the scope's cgroup files about once a second
@@ -880,6 +906,39 @@ contained command's outcome, with no rule. The ledger keeps the newest 50 outcom
 user, rule and repository, none older than 30 days, and keeps them when it is rebuilt for a new
 schema. With `[memory] learn = "on"`, a request that declares no memory counts what its rule's
 past runs in its repository used (see [Learned memory](#learned-memory)).
+
+#### A hard cap: `memory_max`
+
+A hard cap is opt-in. With one, a runaway command is stopped at its cap instead of taking the
+machine's memory:
+
+- `hold --memory-max 8g` (a size, a share of the machine's memory such as `50%`, or `off`);
+- a `[[commands.rule]]`'s `memory_max`, for the commands it matches, through `hold` and the
+  [PATH shims](#path-shims);
+- `[commands] memory_max`, for every leased command whose rule sets none (default `off`);
+- `lease.run(argv, memory_max="8g")` from [Python](#running-a-command-under-the-lease).
+
+The first of these that is given wins, and `off` at any of them sets none. On Linux the
+command's scope gets `MemoryMax` at the cap and `MemorySwapMax=0`, so a runaway cannot push
+its memory out to swap on the way, and its `memory.oom.group` is set, so the kernel kills
+every process of the command at once, not one worker at a time. The command keeps its own
+exit code (137), and the [memory verdict](#hold) names the cap. A cap that is set too low
+kills work that would have finished, which is why none is set by default.
+
+A cap needs the command's scope. Where `hold` cannot make one (no systemd user manager,
+`[contain] mode = "off"`, no daemon, or a caller under someone else's memory limit, as above),
+it says so before the command runs, and runs it uncapped:
+
+```
+leasehold hold: no memory cap of 8.0 GiB on pytest: the daemon has [contain] mode = "off"
+```
+
+macOS has no per-command memory limit that a user can set without root. There a cap will be
+polled: leasehold will read the command's memory and kill it past the cap. Until that is
+built, a cap asked for on macOS is not enforced, and `hold` says so. `leasehold doctor`'s
+`memory_max` line says how a cap works on this machine (`exact`, `polled` or none, and why),
+and warns when the config sets a cap that cannot hold. The status object says the same under
+`contain.memory_cap`.
 
 ### Sizing the command to its lease
 
@@ -1165,6 +1224,9 @@ manager that stops the command if it still runs on leaving. The command:
   for the weight granted (`threads` sets the thread count as `--threads` does);
 - runs in the lease's systemd scope where the daemon and this process allow one, as under
   `hold` ([containment](#containment)); `contain=False` runs it as is;
+- with `memory_max` (a size such as `"8g"`, a share such as `"50%"`, or `"off"`; default the
+  daemon's `[commands] memory_max`), is killed whole past that [cap](#a-hard-cap-memory_max).
+  `Command.uncapped` says why a cap asked for does not hold here, and is None when it holds;
 - with `jobserver=True`, gets a make jobserver, and a range is [elastic](#elastic-leases)
   unless `elastic=False`;
 - is stopped with its group, SIGTERM then SIGKILL after `grace` seconds (30), when a `lend`
@@ -1177,9 +1239,10 @@ uncontained command is never `oom_killed`.
 
 Once any command ends, `Command.memory` is the memory verdict on it, and `lease.memory` the
 one on the last command the lease ran: None when memory did not end it, as far as leasehold can
-tell, else an object with `kind` (`kernel`, or `agent_cap` for Claude Code's own memory
-limit), `certain`, `program`, `peak_bytes`, `limit_bytes`, `person` (what happened) and `agent`
-(that, and what to do next). Both texts are the line `hold` prints, and say "not a test
+tell, else an object with `kind` (`cap` for the command's own cap, `kernel`, or `agent_cap`
+for Claude Code's own memory limit), `certain`, `program`, `peak_bytes`, `limit_bytes` (the
+cap, for `cap`), `largest` (the largest of its processes as `(pid, name, bytes)`, when known),
+`person` (what happened) and `agent` (that, and what to do next). Both texts are the line `hold` prints, and say "not a test
 failure".
 
 Whatever the command leaves in its group is stopped when it ends. Other keyword arguments go to
@@ -1317,12 +1380,14 @@ wait_s = 300           # how long an agent's hook or a shim waits in line (at mo
 when_busy = "deny"     # then: "deny" the command, or "run" it without a lease and say so
 # heavy_weight = 3     # the built-in build and test rules' weight (default 4)
 # light_weight = 2     # the built-in JavaScript tooling rules' weight (default 2)
+# memory_max = "50%"   # a hard cap on every leased command whose rule sets none (default "off")
 
 [[commands.rule]]
 programs = ["pytest"]
 args = "--benchmark"   # only benchmark runs
 weight = 6
 memory = "8g"          # counted against [memory]; held to this when contained (MemoryHigh)
+memory_max = "12g"     # killed whole past this when contained (MemoryMax); "off" for none
 threads = 1            # parallelism inside each process (OMP_NUM_THREADS ...); default "jobs"
 
 [[commands.rule]]
@@ -1561,8 +1626,8 @@ client for it.
 | `GET /v1/status` | | the machine: [below](#the-status-object) |
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
-| `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, and `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it); a rule no lease could ever be granted for carries `never`, the reason |
-| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic`, `rule` and `repo` (what the work's outcome will be filed under; with a rule, a request that declares no memory may count a [learned figure](#learned-memory)) | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings; the lease has `max_jobs`, the job count of its `max_weight`, and `memory_counted_bytes`, the memory admission counts for it at the weight granted), `queued` (with `position`, `blocked`, the `min_weight` and `max_weight` it waits with, as admission would cut them now, and, while a maintenance lease holds or drains the machine, `maintenance` as in [status](#the-status-object)) or `refused` (with `reason`) |
+| `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, and `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it), and `memory_max`, the rule's [hard cap](#a-hard-cap-memory_max) in bytes (`"8589934592b"`), `"off"`, or null when it sets none; a rule no lease could ever be granted for carries `never`, the reason |
+| `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic`, `rule` and `repo` (what the work's outcome will be filed under; with a rule, a request that declares no memory may count a [learned figure](#learned-memory)) | `status`: `granted` (with `lease`; `elastic`, the daemon's `[elastic]` settings; `contain`, its `[contain]` settings with `memory_max`, the `[commands] memory_max` [cap](#a-hard-cap-memory_max) in bytes or null; the lease has `max_jobs`, the job count of its `max_weight`, and `memory_counted_bytes`, the memory admission counts for it at the weight granted), `queued` (with `position`, `blocked`, the `min_weight` and `max_weight` it waits with, as admission would cut them now, and, while a maintenance lease holds or drains the machine, `maintenance` as in [status](#the-status-object)) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs`; with `ok`, `parked`: whether the [memory net](#memory-net) has its command paused |
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
 | `POST /v1/elastic` | `lease_id` | `elastic`, with the lease's `weight`, `jobs`, `target` and `target_jobs`: a held range is elastic from now on; 409 `conflict` when it is not held, 400 for a lease with no range |
@@ -1655,7 +1720,10 @@ when a field is removed or changes meaning:
   without it these are null; and `learn`, the `[memory] learn` setting (`"off"` without the
   table);
 - `contain`: the daemon's `[contain]` settings, `mode` and `hard_cpu` (whether a given caller
-  is contained is that caller's own `leasehold doctor`);
+  is contained is that caller's own `leasehold doctor`); `memory_max`, the `[commands]
+  memory_max` [cap](#a-hard-cap-memory_max) in bytes (`"8589934592b"`) or null; and
+  `memory_cap`, how a cap works on this machine: `how` (`exact`, `polled` or `none`) and,
+  for `none`, `reason`;
 - `maintenance`: the [maintenance lease](#maintenance) that holds the machine, or else the
   oldest one draining it, or null: `lease_id`, `state` (`held` or `draining`), `user`, `name`
   (its `name` label, or else its user), `reason`, `until` (its `until` label, or null) and
@@ -1710,7 +1778,7 @@ leasehold run [--session SESSION] [--leave-running] [--quiet] [--no-contain] [--
 run a command under a lease:
 
 ```
-leasehold hold [--kind {work,external,lend,maintenance}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout S|Nm|Nh] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--until HH:MM|ISO] [--reason REASON] [--grace GRACE] [--jobserver] [--elastic | --no-elastic] [--no-job-env] [--threads N|jobs] [--if-unavailable run|fail] ...
+leasehold hold [--kind {work,external,lend,maintenance}] [--pool POOL] [--weight N|MIN-MAX] [--label K=V] [--session SESSION] [--timeout S|Nm|Nh] [--ttl TTL] [--memory MEMORY] [--memory-per-slot MEMORY_PER_SLOT] [--until HH:MM|ISO] [--reason REASON] [--grace GRACE] [--jobserver] [--elastic | --no-elastic] [--no-job-env] [--threads N|jobs] [--memory-max SIZE|N%|off] [--if-unavailable run|fail] ...
 ```
 
 the machine live: slots, pressure, pools, leases, the queue and events:

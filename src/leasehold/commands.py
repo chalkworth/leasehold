@@ -28,15 +28,15 @@ from pydantic import (
 
 from leasehold import shell, weights, xdist
 from leasehold.model import Name
-from leasehold.units import declared_to_bytes
+from leasehold.units import CAP_OFF, check_cap, declared_to_bytes
 
 
 class CommandRule(BaseModel):
     """`weight` to `max_weight` slots (in `pool`, else the kind's) for a command that runs one
     of `programs` with arguments in which `args` is found, held to `memory` (or
-    `memory_per_slot` for each slot granted) when contained, each of its processes given
-    `threads` threads (`leasehold.jobs`). In the config, `weight` is a count or a `"MIN-MAX"`
-    range, which sets both."""
+    `memory_per_slot` for each slot granted) when contained, and killed whole past
+    `memory_max` when given, each of its processes given `threads` threads (`leasehold.jobs`).
+    In the config, `weight` is a count or a `"MIN-MAX"` range, which sets both."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -53,6 +53,10 @@ class CommandRule(BaseModel):
     #: Memory each slot it is granted counts, and holds it to when contained, a size such as
     #: `2g`: what a command whose memory grows with its size declares instead of `memory`.
     memory_per_slot: str | None = None
+    #: The hard cap on the command's memory when contained (`MemoryMax`), past which the kernel
+    #: kills it whole: a size such as `8g`, a share of the machine's memory such as `50%`, or
+    #: `off`. None: `[commands] memory_max`.
+    memory_max: str | None = None
     #: The size of each process's own thread pool (OpenMP, BLAS and the like): "jobs", the
     #: lease's job count, or a count of at least 1 (never more than the job count).
     threads: Literal["jobs"] | Annotated[StrictInt, Field(ge=1)] = "jobs"
@@ -83,6 +87,11 @@ class CommandRule(BaseModel):
         if value is not None:
             declared_to_bytes(value)
         return value
+
+    @field_validator("memory_max")
+    @classmethod
+    def _cap(cls, value: str | None) -> str | None:
+        return None if value is None else check_cap(value)
 
     @property
     def most(self) -> int:
@@ -164,6 +173,14 @@ class CommandSettings(BaseModel):
     #: After `wait_s`: run the command without a lease (and say so), or refuse it with a
     #: message that tells the agent the machine is busy.
     when_busy: Literal["run", "deny"] = "deny"
+    #: The hard cap on every leased command's memory when contained, where its rule sets
+    #: none: a size such as `12g`, a share of the machine's memory such as `50%`, or `off`.
+    memory_max: str = CAP_OFF
+
+    @field_validator("memory_max")
+    @classmethod
+    def _cap(cls, value: str) -> str:
+        return check_cap(value)
 
     def rules(self) -> list[tuple[str, CommandRule]]:
         """Every rule in the order they are tried, each with its source."""

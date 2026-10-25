@@ -37,7 +37,13 @@ When memory ended the command, `hold` says so as the last line on stderr, in the
 verdict's words (`leasehold.verdict`): `leasehold: ... This is not a test failure.` and what
 to do next. Its exit code stays the command's own. For a contained command the OOM killer
 reached, the line before it gives the peak, the memory leasehold counted for it and a
-`--memory` that would count more than the peak (`oom_line`).
+`--memory` that would count more than the peak (`oom_line`), unless the command's own hard cap
+ended it.
+
+`--memory-max` (or the matching rule's `memory_max`, else `[commands] memory_max`) caps a
+contained command's memory: past it the kernel kills the whole command, and the verdict names
+the cap. Where the cap cannot hold (no scope here, no lease, or a platform with no cap), `hold`
+says so before the command runs, and runs it uncapped.
 
 A lease asked for as a range (`--weight 2-4`) is sized to the weight it was granted: its job
 and thread counts, jobserver, `LEASEHOLD_WEIGHT`, `CPUWeight` and, with a memory per slot,
@@ -252,6 +258,7 @@ def hold(
     max_weight: int | None = None,
     memory_per_slot: str | None = None,
     elastic: bool | None = None,
+    memory_max: str | None = None,
 ) -> int:
     """Run `argv` under a lease of `weight` to `max_weight` slots (None: `weight`), sized to
     the weight granted (`leasehold.jobs`): the job-count and thread-count variables unless
@@ -266,7 +273,10 @@ def hold(
     client's socket as `LEASEHOLD_SOCKET`, so a `hold` or shim inside it reaches the same
     daemon. `elastic` makes a range elastic once the command's jobs take jobserver tokens
     (`leasehold.follow`; None: whenever `jobserver` is true). It needs `jobserver`: without
-    one, nothing makes the jobs follow the lease, so it exits 2."""
+    one, nothing makes the jobs follow the lease, so it exits 2.
+    `memory_max` is the command's hard cap (a size, a share of the machine's memory such as
+    `50%`, or `off`); None: the matching rule's when `hold` weighs the command, else the
+    daemon's `[commands] memory_max`."""
     if not argv:
         _say("no command given (leasehold hold [options] -- cmd ...)")
         return 2
@@ -297,6 +307,8 @@ def hold(
                     rule_key = rule.key
                     if memory is None and memory_per_slot is None:
                         memory, memory_per_slot = rule.memory, rule.memory_per_slot
+                    if memory_max is None:
+                        memory_max = rule.memory_max
                 if threads is None:
                     threads = rule.threads
             threads = "jobs" if threads is None else threads
@@ -333,7 +345,7 @@ def hold(
                 )
             if code == EXIT_UNAVAILABLE and if_unavailable == "run":
                 _say("no daemon answers; running without a lease")
-                return run_unleased(argv, grace_s=grace_s)
+                return run_unleased(argv, grace_s=grace_s, memory_max=memory_max)
             program = Path(argv[0]).name
             if code == EXIT_BUSY and client is not None:
                 if cut := toolwait.said(os.environ, timeout_s):
@@ -357,6 +369,7 @@ def hold(
                 memory_per_slot=memory_per_slot,
                 elastic=elastic,
                 rule=rule_key,
+                memory_max=memory_max,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -419,14 +432,15 @@ def run_leased(
     memory_per_slot: str | None = None,
     elastic: bool = False,
     rule: str | None = None,
+    memory_max: str | None = None,
 ) -> int:
     """`hold` once `request` is granted (`answer`): run `argv` under the lease
     (`supervise.Command`: sized to the weight granted, its thread pools to `threads`, held to
-    `memory` or `memory_per_slot` when contained, a jobserver with `jobserver`, elastic with
-    `elastic`), renewing the lease, and release it when the command ends, with what a contained
-    command used filed under `rule` (`shell.Rule.key`; None: no rule sized it); the command's
-    exit code (`_ended`), or `EXIT_REVOKED`. SIGINT, SIGTERM or SIGHUP before the command runs gives
-    the lease back and stops what was started of it."""
+    `memory` or `memory_per_slot` when contained and capped at `memory_max`, a jobserver with
+    `jobserver`, elastic with `elastic`), renewing the lease, and release it when the command
+    ends, with what a contained command used filed under `rule` (`shell.Rule.key`; None: no
+    rule sized it); the command's exit code (`_ended`), or `EXIT_REVOKED`. SIGINT, SIGTERM or
+    SIGHUP before the command runs gives the lease back and stops what was started of it."""
 
     def lost(reason: str) -> None:
         if request["kind"] not in PREEMPTIBLE:
@@ -443,15 +457,19 @@ def run_leased(
         threads=threads,
         memory_per_slot=memory_per_slot,
         elastic=elastic,
+        memory_max=memory_max,
     )
 
 
-def run_unleased(argv: Sequence[str], *, grace_s: float = 30.0) -> int:
+def run_unleased(
+    argv: Sequence[str], *, grace_s: float = 30.0, memory_max: str | None = None
+) -> int:
     """Run `argv` as `hold` runs a leased command, but with no lease, scope or job variables
     (its environment is `leasing.own_env`): its own process group (with the terminal, when
     this process has it), signals forwarded, and what it leaves in the group stopped when it
-    ends. The command's exit code (`_ended`)."""
-    return _run(leasing.Lease(), argv, grace_s=grace_s)
+    ends. The command's exit code (`_ended`). A `memory_max` asked for cannot hold without a
+    scope, which `hold` says."""
+    return _run(leasing.Lease(), argv, grace_s=grace_s, memory_max=memory_max)
 
 
 def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
@@ -478,11 +496,16 @@ def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
                 if interrupted is None:
                     if command.uncontained:
                         _say(command.uncontained)
+                    if command.uncapped:
+                        _say(command.uncapped)
                     if tty:
                         stack.enter_context(foreground(command.pid))
                     code = command.wait()
-                    if command.oom_killed and (
-                        line := oom_line(command.peak_bytes, _counted(lease))
+                    capped = command.memory is not None and command.memory.kind == "cap"
+                    if (
+                        command.oom_killed
+                        and not capped
+                        and (line := oom_line(command.peak_bytes, _counted(lease)))
                     ):
                         _say(line)
                     if command.memory is not None:

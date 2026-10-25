@@ -15,6 +15,8 @@ runs, and once more as it stops, and keeps the last value of each:
 * `oom_kill` and `high` from `memory.events`: how many processes the kernel's OOM killer ended
   in the scope, and how often the scope went past its `MemoryHigh`.
 * `usage_usec` from `cpu.stat`, the CPU time it used.
+* the largest of its processes, by resident and swapped memory (`VmRSS` and `VmSwap` in
+  `/proc/<pid>/status`), the largest seen at any read (`largest`), so that a kill can name it.
 
 A value never read is None. The meter finds the scope from the command's own cgroup
 (`/proc/<pid>/cgroup`), and reads nothing unless that is the scope it was told of.
@@ -74,6 +76,27 @@ def _read(path: Path) -> str | None:
         return None
 
 
+def members(group: Path, proc: Path = Path("/proc")) -> list[tuple[int, str, int]]:
+    """Each process in the cgroup directory `group` now (`cgroup.procs`), as (pid, name,
+    bytes), its resident and swapped memory, largest first. A process that cannot be read is
+    left out."""
+    found = []
+    for word in (_read(group / "cgroup.procs") or "").split():
+        if not word.isdigit():
+            continue
+        status = _read(proc / word / "status") or ""
+        kib = name = None
+        for line in status.splitlines():
+            key, _, value = line.partition(":")
+            if key == "Name":
+                name = value.strip()
+            elif key in ("VmRSS", "VmSwap") and value.split() and value.split()[0].isdigit():
+                kib = (kib or 0) + int(value.split()[0])
+        if name is not None and kib is not None:
+            found.append((int(word), name, kib << 10))
+    return sorted(found, key=lambda m: -m[2])
+
+
 def machine_oom_kills(proc: Path = Path("/proc")) -> int | None:
     """How many processes the OOM killer has ended on this machine since boot (`oom_kill` in
     `vmstat`); None where it cannot be read."""
@@ -101,11 +124,13 @@ def read(group: Path, last: Usage) -> Usage:
 
 
 class Meter:
-    """Reads the cgroup of process `pid` every `PERIOD_S`, from a thread of its own, while that
-    cgroup is the scope `unit`, until `stop`, or until `running` (when given) says the command
-    has ended. `usage` is what it has read so far. `started` is when, on the `time.monotonic`
-    clock, the command was started (default now). `machine_oom_kills` is how many OOM kills
-    the machine had from its start to `stop` (None: unknown)."""
+    """Reads the cgroup of process `pid` every `period_s` (default `PERIOD_S`), from a thread of
+    its own, while that cgroup is the scope `unit`, until `stop`, or until `running` (when
+    given) says the command has ended. `usage` is what it has read so far. `started` is when,
+    on the `time.monotonic` clock, the command was started (default now). `machine_oom_kills`
+    is how many OOM kills the machine had from its start to `stop` (None: unknown). `largest`
+    is the largest of its processes seen at any read, as (pid, name, bytes) (None: none
+    read)."""
 
     def __init__(
         self,
@@ -116,9 +141,12 @@ class Meter:
         proc: Path = Path("/proc"),
         started: float | None = None,
         running: Callable[[], bool] | None = None,
+        period_s: float = PERIOD_S,
     ) -> None:
         self.usage = Usage()
         self.machine_oom_kills: int | None = None
+        self.largest: tuple[int, str, int] | None = None
+        self._period_s = period_s
         self._proc = proc
         self._oom_before = machine_oom_kills(proc)
         self._started = time.monotonic() if started is None else started
@@ -141,12 +169,20 @@ class Meter:
             if self._running is not None and not self._running():
                 self._ended = time.monotonic()
                 return
-            if self._stop.wait(PERIOD_S):
+            if self._stop.wait(self._period_s):
                 return
 
     def _sample(self) -> None:
         if self._group is not None:
             self.usage = read(self._group, self.usage)
+            found = members(self._group, self._proc)
+            if found and (self.largest is None or found[0][2] > self.largest[2]):
+                self.largest = found[0]
+
+    def left(self) -> list[tuple[int, str, int]]:
+        """What is still running in the scope, largest first (`members`): what the command
+        left behind once it has ended."""
+        return [] if self._group is None else members(self._group, self._proc)
 
     def stop(self) -> float:
         """Stop reading, after one last read: the seconds from the command's start to its end,
