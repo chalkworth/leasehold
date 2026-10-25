@@ -306,7 +306,7 @@ class AdmissionPolicy:
         if whole:
             return None
         if weight > policy.max:
-            return f"weight {weight} is more than pool {pool!r}'s max {policy.max}"
+            return f"weight {weight} is more than the max {policy.max} of pool {pool!r}"
         if weight > slots:
             return f"weight {weight} is more than the {slots} slots there are"
         most = self._slots_heaviest(pool)

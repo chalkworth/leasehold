@@ -664,8 +664,8 @@ class MachineConfig(_Strict):
                 errors.append(f"standing.{item.name}: pool {item.pool!r} is not under pools")
             elif item.weight > pool.max:
                 errors.append(
-                    f"standing.{item.name}: weight {item.weight} is more than pool "
-                    f"{item.pool!r}'s max {pool.max}"
+                    f"standing.{item.name}: weight {item.weight} is more than the max "
+                    f"{pool.max} of pool {item.pool!r}"
                 )
             held_by_pool[item.pool] = held_by_pool.get(item.pool, 0) + item.weight
         for pool, total in held_by_pool.items():

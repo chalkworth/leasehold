@@ -1,7 +1,8 @@
 #!/bin/sh
 # ACTIONS_RUNNER_HOOK_JOB_COMPLETED: give back the lease job-started.sh took for this job. It
 # never fails the job: a lease it cannot release ends by itself (its renewer stops with the
-# job's Runner.Worker, and the lease one TTL later).
+# job's Runner.Worker, and the lease one TTL later). A job that ran without a lease (the daemon
+# was down or refused it) has none to give back, and the hook says so.
 set -u
 
 # shellcheck source=common.sh
@@ -10,6 +11,15 @@ set -u
 id=$(lease_id)
 if ! have_leasehold; then
 	exit 0
+fi
+
+# held: whether the daemon lists the lease. `release` succeeds for a lease that is not held, so
+# it cannot say. When the list cannot be read, try the release.
+if listing=$("$LEASEHOLD" leases --json 2>/dev/null); then
+	if ! printf '%s\n' "$listing" | grep -Fq "\"$id\""; then
+		say "job $id held no lease (it ran WITHOUT one); nothing to release"
+		exit 0
+	fi
 fi
 if "$LEASEHOLD" release "$id"; then
 	say "lease $id released"
