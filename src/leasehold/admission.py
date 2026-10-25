@@ -1038,9 +1038,10 @@ def _admit_least(
             host = policy.pools[pool].host
             if host in alone_hosts:
                 break  # an alone item already admitted here this decision has its host
-            if (head.key in policy.alone and _busy(state, policy, admits, pool)) or not fits(
-                tally, policy, pool, head.weight, head.memory, head.memory_per_slot
-            ):
+            if head.key in policy.alone and _busy(state, policy, admits, pool):
+                stopped.setdefault(pool, []).append(head)
+                break  # waiting to run alone: nothing backfills around it
+            if not fits(tally, policy, pool, head.weight, head.memory, head.memory_per_slot):
                 stopped.setdefault(pool, []).append(head)
                 if _only_short(tally, policy, pool, head) and _lets_by(policy, pool, head):
                     # It waits for the allowance; its session waits behind it, the rest may

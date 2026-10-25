@@ -952,12 +952,13 @@ class MachineAgent:
         runaway = act.choice.why == "runaway"
         paused_s = None if record is None else self._monotonic_paused(record)
         rows = {r["item_id"]: r for r in self.ledger.leases() if r["scope"] == SCOPE}
+        test = verdict.test_like(w.command)
         told = {
             "why": act.why,
             "runaway": runaway,
             "rerun": False,
             "alone": False,
-            "test": verdict.test_like(w.command),
+            "test": test,
             "paused_s": None if paused_s is None else round(paused_s, 1),
             "available_bytes": self.watchdog.status()["available_bytes"],
         }
@@ -972,7 +973,7 @@ class MachineAgent:
             self._stops[lid] = told | {
                 "rerun": rerun,
                 "alone": alone,
-                "test": told["test"] or verdict.test_like(rule),
+                "test": test or verdict.test_like(rule),
             }
             told = self._stops[lid]
         self._save_paused()
