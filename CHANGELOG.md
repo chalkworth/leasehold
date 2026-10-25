@@ -272,9 +272,25 @@ here.
 
 ### Changed
 
-- A `[memory_net]` table is a config error that names `[watchdog]`: the memory net is gone before it shipped, and the watchdog does its work.
-- A command's group stopped by SIGSTOP no longer stops `hold` with it: `hold` follows only the stops a terminal asks for (SIGTSTP, SIGTTIN, SIGTTOU), so a pause by the watchdog leaves `hold` running. When its command stops for the terminal,
-  `hold` stops itself with SIGTSTP, so Ctrl-Z works through a `hold` that runs another.
+- The memory net is gone before it shipped, and the watchdog does its work. For anyone who ran
+  a development build with it:
+  - `[memory_net]` and its keys `mode`, `overflow` and `write_per_day` are gone. A config with
+    the table is an error that names `[watchdog]`. `MachineConfig.memory_net` and
+    `MemoryNetSettings` are gone, and so is the module `leasehold.net`.
+  - The status object has no `memory_net` field, and `status.report` takes no `memory_net`.
+  - `POST /v1/renew` answers `paused` in place of `parked`, and `Lease.paused` replaces
+    `Lease.parked` in the Python API.
+  - Outcomes record `pauses` and `paused_s` in place of `parks` and `parked_s`, in the API and
+    in the ledger's outcomes table.
+  - The net's `parked` and `resumed` events are gone.
+  - The admission hold stays, as the watchdog's: `AdmissionPolicy.memory_held` keeps its name,
+    and a request it holds says `the watchdog holds new work: <why>`.
+  - `leasehold doctor` no longer checks swap and the kernel for the net.
+  - The benchmark no longer takes `net=park` or `overflow=SIZE`.
+- A command's group stopped by SIGSTOP no longer stops `hold` with it: `hold` follows only the
+  stops a terminal asks for (SIGTSTP, SIGTTIN, SIGTTOU), so a pause by the watchdog leaves
+  `hold` running. When its command stops for the terminal, `hold` stops itself with SIGTSTP,
+  so Ctrl-Z works through a `hold` that runs another.
 - `leasehold.contain` now only names scopes and slices. Making scopes (`probe`, `spawn`,
   `adopt`, `scope_argv`, `update_scope`, `neutral_scope`, `stop_slice`) moved behind
   `leasehold.host`, and `contain.Containment` is gone: ask `host.current().support("start")`.
