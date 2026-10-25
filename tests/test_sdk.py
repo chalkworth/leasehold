@@ -493,6 +493,8 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
                 if watchdog["level"] != "critical":  # it acts at critical by default
                     assert watchdog["would"] is None, name
             assert levels == [r[3] for r in readings], name
+            if name.startswith(("a heavy mapped", "the floor holds")):
+                assert "(mapped 2.5 GiB + 0.5)" in watchdog["reason"], name
             would = watchdog["would"]
             assert (would["action"], would["pid"], would["why"]) == ("pause", chosen, why), name
             assert would["spared"] == spared, name

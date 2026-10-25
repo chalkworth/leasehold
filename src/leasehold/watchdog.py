@@ -226,9 +226,12 @@ def judge(
         under = floor(limits, None)
     counts = m.swap_open()
     free = m.swap_free()
+    raised = (
+        "" if under.reason.endswith("critical_below") else f" ({under.reason.split(': ', 1)[1]})"
+    )
     swap = "" if free is None else f", {_gib(free)} of swap free"
     if counts and avail < under.critical:
-        return "critical", f"{_gib(avail)} available, under {_gib(under.critical)}{swap}"
+        return "critical", f"{_gib(avail)} available, under {_gib(under.critical)}{raised}{swap}"
     if m.stall_recent is not None and m.stall_recent > STALL_CRITICAL:
         return "critical", f"every task stalled on memory {m.stall_recent:.0f}% of the last 2 s"
     io = m.stall_io_recent
@@ -241,7 +244,7 @@ def judge(
     if m.os_level == "critical":
         return "critical", "the system says memory is critical"
     if counts and avail < under.hold:
-        return "warn", f"{_gib(avail)} available, under {_gib(under.hold)}{swap}"
+        return "warn", f"{_gib(avail)} available, under {_gib(under.hold)}{raised}{swap}"
     if m.os_level == "warn":
         return "warn", f"the system warns of memory, with {_gib(avail)} available"
     return "ok", f"{_gib(avail)} available{swap}"

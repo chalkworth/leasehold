@@ -1486,7 +1486,10 @@ size is absolute, and does not grow with RAM. The kernel's `Mapped` (in `/proc/m
 cheap stand-in for it. So the floor is `critical_below` (2 GiB), or the highest `Mapped` over
 the last `mapped_window_s` (5 minutes) plus 0.5 GiB, whichever is more. It uses the highest
 value, because `Mapped` falls as the cache is evicted, which is just when the floor matters.
-`hold_below` moves with it and stays the same distance above (1 GiB by default). Status shows
+`critical_below` is only the lowest the floor goes, and `hold_below` only sets how far the `warn`
+line sits above the floor (1 GiB by default); the lines in use are `floor_bytes` and
+`hold_line_bytes`. When `Mapped` raised the floor, the `critical` and `warn` reasons in events and
+holds say so, such as `2.8 GiB available, under 3.0 GiB (mapped 2.5 GiB + 0.5)`. Status shows
 the floor in use and why (`floor_reason`, such as `2.6 GiB: mapped 2.1 GiB + 0.5`). A file
 read with `read()` and not mapped is not in `Mapped`; the disk stall below covers that case.
 
@@ -1571,8 +1574,8 @@ Some trees are never chosen:
 [watchdog]
 mode = "on"               # "off", "watch" (decide and report, never act) or "on"
 act_at = "critical"       # "warn" or "critical": the least level at which it holds and pauses
-critical_below = "2g"     # critical under this much available memory, once it counts
-hold_below = "3g"         # warn (hold new heavy work) under this much, once it counts
+critical_below = "2g"     # the lowest floor (floor_bytes, floor_reason say the one in use)
+hold_below = "3g"         # sets the warn line's gap above the floor (hold_line_bytes)
 min_size = "auto"         # the larger of 256 MiB and 2% of memory: smaller trees are never chosen
 choose_discovered = false
 protect = []              # regular expressions searched for in a tree's command line
