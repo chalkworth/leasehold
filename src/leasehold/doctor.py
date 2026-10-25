@@ -354,6 +354,26 @@ def check_contain(config, env: Mapping[str, str], probe=contain.probe) -> Check:
     return Check("contain", "warn", detail, fix or "see Containment in docs/reference.md")
 
 
+def check_oom_score(roots: Roots) -> Check | None:
+    """Warn when this process, and so the shell it was started from, has a negative
+    `oom_score_adj`. None where the file does not exist or is not negative."""
+    try:
+        value = int((roots.proc / "self" / "oom_score_adj").read_text())
+    except (OSError, ValueError):
+        return None
+    if value >= 0:
+        return None
+    return Check(
+        "oom_score_adj",
+        "warn",
+        f"this shell has oom_score_adj {value}: leased commands are reset to 0, but commands "
+        "that are not leased, and the program that started this shell, keep it, so the kernel "
+        "will spare a runaway process under memory pressure",
+        "start the shell and its parent with oom_score_adj 0, or lease the commands that use "
+        "the most memory",
+    )
+
+
 #: A `[commands] wait_s` below this refuses most heavy commands on a busy machine before their
 #: turn comes (docs/bench.md: at 8 agents the slowest waits were about 100 s).
 SHORT_WAIT_S = 120.0
@@ -615,6 +635,9 @@ def run(
     checks.append(check_proc(roots, resolved))
     checks += check_cgroups(roots, resolved)
     checks.append(check_contain(resolved, env))
+    oom = check_oom_score(roots)
+    if oom is not None:
+        checks.append(oom)
     net = check_memory_net(resolved, roots)
     if net is not None:
         checks.append(net)

@@ -9,6 +9,9 @@ here.
 
 ### Added
 
+- `leasehold doctor` warns when this shell has a negative `oom_score_adj`. Leased commands are
+  reset to 0, but commands that are not leased keep the value, so the kernel spares them under
+  memory pressure.
 - A memory net for your own daemon, off by default: `[memory_net] mode = "park"`. When the
   contained commands under one memory limit spill into swap while the limit is near full and
   stalls on memory, the daemon parks the youngest heavy command. It freezes the command's scope
@@ -76,6 +79,10 @@ here.
 
 ### Changed
 
+- A command that `hold`, `run`, the shims or the SDK start in a scope has its `oom_score_adj`
+  raised to 0 when it inherited a lower value, so a memory limit on its scope can end it. A
+  value of 0 or more is left alone, and nothing is ever lowered. Where scopes are not used, the
+  command keeps what it inherited.
 - A lease that counts a learned figure gives `memory_bytes` and `memory_per_slot_bytes` null in
   the status object, since it declared nothing, and its outcome records no declared memory. A
   `blocked` reason names the figure as `weight 2 at its learned 1.2 GiB a slot`.
