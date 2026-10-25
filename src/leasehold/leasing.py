@@ -550,6 +550,7 @@ class Lease:
         threads: jobs.Threads = "jobs",
         memory: str | None = None,
         memory_per_slot: str | None = None,
+        memory_max: str | None = None,
         env: Mapping[str, str] | None = None,
         **popen,
     ):
@@ -558,13 +559,17 @@ class Lease:
         sized to the lease where the daemon and this caller allow one and `contain`, with a
         make jobserver when `jobserver` (a range is then elastic unless `elastic` is false). A
         revoked `lend` lease stops its group, SIGTERM then SIGKILL after `grace` seconds, and so
-        does its end. `popen` goes to `subprocess.Popen`. Raises `NotStarted`."""
+        does its end. `memory_max` caps the command's memory (a size such as `8g`, a share of
+        the machine's memory such as `50%`, or `off`; None: the daemon's `[commands]
+        memory_max`): past it the kernel kills the whole command, and `Command.memory` names
+        the cap; `Command.uncapped` says why a cap does not hold. `popen` goes to
+        `subprocess.Popen`. Raises `NotStarted`."""
         from leasehold.supervise import Command
 
         return Command(
             self, argv, jobserver=jobserver, elastic=elastic, contain=contain, grace_s=grace,
             job_env=job_env, threads=threads, memory=memory, memory_per_slot=memory_per_slot,
-            env=env, **popen,
+            memory_max=memory_max, env=env, **popen,
         )  # fmt: skip
 
     def run(self, argv: Sequence[str], **options) -> int:

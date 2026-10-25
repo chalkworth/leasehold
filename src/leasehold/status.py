@@ -222,13 +222,15 @@ def report(
     queue: list[dict],
     maintenance: dict | None = None,
     memory_net: dict | None = None,
+    contain: dict | None = None,
     now: float,
     version: str,
 ) -> dict:
     """The whole status object. `leases` and `queue` are already `public`; `maintenance` is
     the maintenance lease waiters are told about (`leasehold.maintenance.describe`), or None;
     `memory_net` the memory net's own status (`leasehold.net.MemoryNet.status`), or None when
-    it is off."""
+    it is off; `contain` how commands are contained and capped (default: `[contain]` as
+    configured)."""
     leases = with_counted(policy, leases)
     queue = with_counted(policy, queue)
     by_pool = pools(config, policy, leases, queue)
@@ -263,7 +265,7 @@ def report(
             memory_limit,
             learn,
         ),
-        "contain": config.contain.model_dump(),
+        "contain": contain if contain is not None else config.contain.model_dump(),
         "standing": standing(config),
         "observe": observing(config, leases),
         "leases": leases,

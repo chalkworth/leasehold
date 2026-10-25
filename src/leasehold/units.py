@@ -49,3 +49,44 @@ def declared_to_bytes(memory: str) -> int:
     if size == 0:
         raise ValueError(f"memory {memory!r} is 0: a command cannot be held to no memory")
     return size
+
+
+#: A hard cap (`memory_max`) that sets none.
+CAP_OFF = "off"
+_CAPS = "give a size such as '8g', a share of the machine's memory such as '50%', or off"
+
+
+def check_cap(value: str) -> str:
+    """`value` if it is a hard memory cap as the config and `hold --memory-max` take one:
+    `off`, a size such as `8g` (more than 0), or a share of the machine's memory such as `50%`
+    (more than 0%, at most 100%). Raises `ValueError` otherwise."""
+    if value == CAP_OFF:
+        return value
+    if value.endswith("%"):
+        try:
+            share = float(value[:-1])
+        except ValueError:
+            share = -1.0
+        if not 0 < share <= 100:
+            raise ValueError(f"memory_max {value!r} is not a share from 0% to 100%; {_CAPS}")
+        return value
+    try:
+        declared_to_bytes(value)
+    except ValueError as exc:
+        raise ValueError(f"memory_max: {exc}; {_CAPS}") from None
+    return value
+
+
+def cap_to_bytes(value: str | None, memory_bytes: int) -> int | None:
+    """The cap `value` (`check_cap`) in bytes on a machine of `memory_bytes`; None for `off`
+    and for None."""
+    if value is None or value == CAP_OFF:
+        return None
+    if value.endswith("%"):
+        return max(1, int(memory_bytes * float(value[:-1]) / 100))
+    return memory_to_bytes(value)
+
+
+def size(n: int) -> str:
+    """`n` bytes in GiB to one decimal, or in MiB under 1 GiB."""
+    return f"{n / 2**30:.1f} GiB" if n >= 1 << 30 else f"{n >> 20} MiB"

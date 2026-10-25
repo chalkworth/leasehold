@@ -7,12 +7,15 @@ import inspect
 import os
 import signal
 import subprocess
+import sys
 import threading
 
 import pytest
-from support import gone, until
+from support import gone, make_agent, until
 
 import leasehold
+from leasehold import contain
+from leasehold.agent import AcquireRequest
 from leasehold.client import Client
 
 
@@ -184,3 +187,25 @@ def test_a_command_killed_for_memory_says_so(daemon, oom_kills, kills, certain):
     assert (command.memory.kind, command.memory.certain) == ("kernel", certain)
     assert "not a test failure" in command.memory.agent
     assert lease.memory is command.memory
+
+
+@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+def test_a_command_past_its_own_memory_cap_is_stopped_and_told_so(daemon):
+    with leasehold.lease(socket=daemon.path) as lease:
+        over = [sys.executable, "-c", "b = b'x' * (256 << 20)"]
+        assert lease.run(over, memory_max="64m") == -signal.SIGKILL
+    assert (lease.memory.kind, lease.memory.certain, lease.memory.limit_bytes) == (
+        "cap",
+        True,
+        64 << 20,
+    )
+
+
+def test_the_daemon_hands_out_its_memory_caps_in_bytes(tmp_path):
+    # `[commands] memory_max` goes with every grant; a rule's own cap is served with the rule.
+    off = {"programs": ["pytest"], "weight": 1, "memory_max": "off"}
+    agent, _, _ = make_agent(tmp_path, commands={"memory_max": "50%", "rule": [off]})
+    granted = agent.acquire(AcquireRequest(kind="work"), user="me")
+    assert granted["contain"]["memory_max"] == f"{8 << 30}b"  # half of the machine's 16 GiB
+    assert agent.commands()["rules"][0]["memory_max"] == "off"
+    assert agent.status()["contain"]["memory_cap"]["how"] in ("exact", "none")

@@ -7,14 +7,20 @@ is for the whole machine, so the process killed may have been another one: the v
 
 A process's hard memory limit is the lowest `memory.max` on its cgroup and those above it
 (`leasehold.cgroup`).
+
+A command's own cap is `MemoryMax` on its systemd scope with `MemorySwapMax=0`, so that a
+runaway is killed rather than pushed to swap, and `memory.oom.group` (set as the scope starts,
+`leasehold.contain.spawn`), so that the whole command dies together. It holds only for a
+command in a scope (`leasehold.contain.probe` says where one can be made). Whether the OOM
+killer ended a capped command is what systemd says of its scope (`Result=oom-kill`).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from leasehold import cgroup
-from leasehold.host import Ending, Mark, sigkilled
+from leasehold import cgroup, contain
+from leasehold.host import Cap, Ending, Mark, sigkilled
 
 
 def oom_kills(proc: Path = Path("/proc")) -> int | None:
@@ -43,6 +49,18 @@ class Linux:
             return None
         found = cgroup.limit(self._cgroup_root, path, files=("memory.max",))
         return None if found is None else found.limit_bytes
+
+    def memory_cap(self) -> Cap:
+        if not (self._cgroup_root / "cgroup.controllers").is_file():
+            return Cap("none", f"no cgroup v2 at {self._cgroup_root}")
+        return Cap("exact")
+
+    def cap_properties(self, limit_bytes: int) -> list[str]:
+        return [f"MemoryMax={limit_bytes}", "MemorySwapMax=0"]
+
+    def cap_ended(self, scope: str) -> bool | None:
+        result = contain.cap_result(scope)
+        return None if result is None else result == "oom-kill"
 
     def mark(self) -> Mark:
         return Mark(oom_kills(self._proc))

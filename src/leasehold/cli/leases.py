@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from leasehold import handoff, maintenance, weights
 from leasehold.hold import hold
 from leasehold.kinds import GRANTED, KINDS, WHOLE
-from leasehold.units import declared_to_bytes
+from leasehold.units import check_cap, declared_to_bytes
 
 ENV_SESSION = "LEASEHOLD_SESSION"
 ENV_IF_UNAVAILABLE = "LEASEHOLD_IF_UNAVAILABLE"
@@ -142,6 +142,16 @@ def register(sub) -> None:
         "lease's own job count. A PATH shim inside the command may still lower them",
     )
     s.add_argument(
+        "--memory-max",
+        type=_cap,
+        metavar="SIZE|N%|off",
+        help="a hard cap on the command's memory, e.g. 8g or 50%%: past it the kernel kills the "
+        "whole command, which keeps its own exit code (137), and hold says the cap ended it. "
+        "Needs a systemd user scope (doctor's contain line); where none can be made, hold says "
+        "so and runs the command uncapped. Default: the matching [commands] rule's memory_max, "
+        "else [commands] memory_max (off unless set); off sets none",
+    )
+    s.add_argument(
         "--if-unavailable",
         default=os.environ.get(ENV_IF_UNAVAILABLE) or "run",
         metavar="run|fail",
@@ -224,6 +234,7 @@ def _hold(args, ctx) -> int:
         memory_per_slot=args.memory_per_slot,
         threads=args.threads,
         if_unavailable=args.if_unavailable,
+        memory_max=args.memory_max,
     )
 
 
@@ -268,6 +279,13 @@ def _memory(value: str) -> str:
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
     return value
+
+
+def _cap(value: str) -> str:
+    try:
+        return check_cap(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _acquire(args, ctx) -> int:
