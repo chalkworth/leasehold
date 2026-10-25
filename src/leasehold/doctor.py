@@ -494,6 +494,15 @@ def _swap_disk(sys_root: Path, name: str, kind: str) -> tuple[str, bool | None]:
     return disk.name, {"0": False, "1": True}.get(flag)
 
 
+def _kernel(proc: Path) -> tuple[int, int] | None:
+    """The running kernel's major and minor version, or None when unknown."""
+    try:
+        major, minor = (proc / "sys" / "kernel" / "osrelease").read_text().split(".")[:2]
+        return int(major), int("".join(c for c in minor if c.isdigit()) or 0)
+    except (OSError, ValueError):
+        return None
+
+
 def check_memory_net(config, roots: Roots) -> Check | None:
     """With `[memory_net] mode = "park"`, whether there is swap to park in, and, where it is
     on a disk that wears with writes, that parking writes to it."""
@@ -511,6 +520,15 @@ def check_memory_net(config, roots: Roots) -> Check | None:
             'mode = "park", but there is no swap, so nothing can be parked: a command that '
             "runs memory out is killed as without the net",
             'add swap (a swap file of a few GiB will do), or set [memory_net] mode = "off"',
+        )
+    release = _kernel(roots.proc)
+    if release is not None and release < (5, 19):
+        return Check(
+            "memory_net",
+            "warn",
+            f'mode = "park", but this kernel ({".".join(map(str, release))}) has no '
+            "memory.reclaim, which Linux 5.19 added, so nothing can be parked",
+            'run a newer kernel, or set [memory_net] mode = "off"',
         )
     cap = config.memory_net.write_per_day
     worn = []

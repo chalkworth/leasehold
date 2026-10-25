@@ -362,35 +362,47 @@ write_per_day = "16g"    # the most parking may write to swap in any 24 hours
 
 The net pauses a command by its scope, so it needs [containment](#containment), and it runs
 only in your own daemon, which can reach your scopes. A config that turns it on with `[contain]
-mode = "off"`, or for the machine's daemon, is an error. It also needs swap: without any, it
-parks nothing, `status` says why, and `leasehold doctor` warns.
+mode = "off"`, or for the machine's daemon, is an error. It also needs swap and a kernel with
+`memory.reclaim` (Linux 5.19 or later): without them, it parks nothing, `status` says why, and
+`leasehold doctor` warns.
 
 The net watches the scope of every contained command, grouped by the memory limit above it.
 That limit is the cgroup that sets the lowest `memory.max` or `memory.high` (a `leasehold run`
-session slice with a limit, the user slice, a container), or else the machine. When the net
-first sees a scope, it sets the scope's `memory.swap.max` to `overflow`, which gives a command
-room to spill while the net acts and no more. The net looks four times a second, and sooner
-when a limit's `memory.events` changes.
+session slice with a limit, the user slice, a container), or else the machine. The net looks
+four times a second, and sooner when a limit's `memory.events` changes.
 
-When a command's swap grows by 32 MiB or more within a quarter of a second, or within 4 s,
-while its limit stalls on memory for at least 5% of that time (PSI `some`), the net parks the youngest heavy
-command under that limit. Heavy means holding 256 MiB or more in memory and swap; the youngest
-is the one granted last, which has done the least work. Parking freezes the scope
-(`cgroup.freeze`), lifts its swap limit and asks the kernel to reclaim its memory
-(`memory.reclaim`), which writes it to swap. The other commands' swap limits are lifted while
-that runs, then put back. The net never parks the only heavy command under a limit, never
-within 2 s of letting one run again there, and never once parking has written `write_per_day`
-in the last 24 hours, though it still resumes what it parked. That count starts again when the
-daemon does.
+Heavy commands are those holding 256 MiB or more in memory and swap. While two or more heavy
+commands run under one limit and parking has writes left for the day, the net sets each
+running command's `memory.swap.max` to `overflow` more than the swap it holds then. That gives
+a command room to spill while the net acts, and no more. Otherwise the net sets no swap limit,
+and puts back `max` where it set one: a command it would not park swaps as freely as without
+the net.
 
-The command parked longest runs again when no other heavy command under its limit runs, when
-what the limit holds plus what the command has in swap is under 80% of the limit, or after 120
-s whatever the memory (a forced resume, after which it may be parked again). Its swap limit goes
-back to `overflow`, so it takes no more swap than it holds. It then reads its memory back, and
-it is settling until its growth, averaged over a second, has stayed under 16 MiB a second (or
-1% of what it uses) for 5 s, or for 60 s at most.
+The net parks the youngest heavy command under a limit, the one granted last, which has done
+the least work, when all of these hold:
 
-While any lease is parked or settling, no new request that counts memory starts. With no
+- the limit is near: what it holds is 90% of the limit or more, or its `memory.events` counted
+  a `high` or `max` event in the last 4 s;
+- the limit stalls on memory for at least 5% of the time (PSI `some`);
+- a command's swap grew by 32 MiB or more within a quarter of a second or within 4 s, or it has
+  used three quarters of its overflow (a command at its swap limit can spill no further, so its
+  swap stops growing).
+
+Parking freezes the scope (`cgroup.freeze`), lifts its swap limit and asks the kernel to
+reclaim its memory (`memory.reclaim`), which writes it to swap. The other commands' swap limits
+are lifted while that runs. The net never parks the only heavy command under a limit, never
+within 2 s of a park or of letting a command run again there, and never once parking has
+written `write_per_day` in the last 24 hours, though it still resumes what it parked. The
+day's count is kept with the ledger, so a restart does not reset it.
+
+The command parked longest runs again when no other heavy command under its limit runs, or
+when what the limit holds plus what the command has in swap is under 80% of the limit. Until
+then it waits, however long that is. It then reads its memory back, and it is settling until
+its growth, averaged over a second, has stayed under 16 MiB a second (or 1% of what it uses)
+for 5 s, or for 60 s at most.
+
+While any lease is parked or settling, no new request that counts memory starts, under any
+limit: a park in one `leasehold run` session holds the others too. With no
 `[memory]` table nothing is counted, so no new request starts at all. A request held this way
 waits, saying `the memory net holds new work: lease ID is parked until memory frees` (or `...
 is resuming after a park`), and blocks its pool as any request whose turn it is does; no
@@ -403,9 +415,15 @@ two would overflow the limit again.
 `leasehold.lease()` has `lease.parked`. `status` has `memory_net` ([the status
 object](#the-status-object)), events say `parked` and `resumed`, and a lease's
 [outcome](#containment) records how often it was parked (`parks`) and for how long in all
-(`parked_s`). A lease that ends while parked is let run again without settling. A scope left
-frozen by a daemon that stopped mid-park is thawed when a daemon sees it again, and a daemon
-that stops lets everything it parked run again.
+(`parked_s`). A lease that ends while parked is let run again without settling.
+
+The net keeps a record beside the ledger (`memory-net.json`) of the commands it froze, the swap
+limits it set and what it wrote to swap. A daemon that stops leaves a parked command frozen
+and puts back `max` on every swap limit it set. The next daemon with the net on takes over a
+frozen command whose lease it still holds as parked, so it waits its turn and the hold applies,
+and lets any other frozen command run. A daemon with the net off lets every command in the
+record run. Of the scopes of leases the daemon does not hold, the net touches only those in
+its record.
 
 A park costs time and disk writes: the command waits for another to end, and its memory goes to
 swap and comes back. Every write wears an SSD or NVMe disk; `write_per_day` bounds the writes,
@@ -1537,8 +1555,7 @@ when a field is removed or changes meaning:
   `"max"`), `write_per_day_bytes`, `written_day_bytes` (what parking wrote to swap in the last
   24 hours), `watched` (the scopes it watches), `parked` (each with `lease_id`, `since` and
   `memory_bytes`, what it held in memory and swap when parked), `settling` (each with
-  `lease_id` and `since`), and since the daemon started, `parks`, `forced_resumes` and
-  `written_bytes`;
+  `lease_id` and `since`), and since the daemon started, `parks` and `written_bytes`;
 - `standing`, `leases`, and `queue`, each queued item with its `position` and why it waits
   (`blocked`). Each lease and queued item has `memory_bytes` (what it declared, or null; a
   lease declaring memory per slot gives the total it was granted, its weight times the size),
