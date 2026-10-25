@@ -158,3 +158,11 @@ def test_a_command_the_oom_killer_ends_is_named(daemon):
     assert "leasehold counted no memory for it" in done.stderr
     if peak_available:
         assert "Declare at least --memory " in done.stderr
+
+
+@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+def test_a_contained_command_is_not_exempt_from_the_oom_killer(daemon):
+    # A negative value is raised to 0 and anything else is left as it was.
+    inherited = int(Path("/proc/self/oom_score_adj").read_text())
+    done = cli(daemon.path, "hold", "--", "cat", "/proc/self/oom_score_adj", env=CHILD_ENV)
+    assert done.stdout.strip() == str(max(0, inherited))

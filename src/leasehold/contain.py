@@ -277,12 +277,33 @@ def stop_slice(
     return left
 
 
-#: Run in the scope by `spawn`: say the scope exists on the pipe it is handed, then become the
-#: command. Exit 127, as a shell would, when the command cannot be run.
+_OOM_SCORE_ADJ = "/proc/self/oom_score_adj"
+
+
+def oom_reset_code() -> str:
+    """Python source, run in a contained command's process just before it becomes the command,
+    that raises a negative `oom_score_adj` to 0 and never lowers one. A command started under a
+    parent with `-1000` would otherwise be exempt from the OOM killer, so a memory limit on its
+    scope could never end it. Raising needs no privilege. Linux only: elsewhere there is nothing
+    to reset, and the source is empty."""
+    if not sys.platform.startswith("linux"):
+        return ""
+    return (
+        "try:\n"
+        f" f=open({_OOM_SCORE_ADJ!r},'r+')\n"
+        " if int(f.read())<0: f.seek(0); f.write('0'); f.flush()\n"
+        "except (OSError,ValueError): pass\n"
+    )
+
+
+#: Run in the scope by `spawn`: say the scope exists on the pipe it is handed, reset the OOM
+#: score (`oom_reset_code`), then become the command. Exit 127, as a shell would, when the
+#: command cannot be run.
 _TRAMPOLINE = (
     "import os,sys\n"
     "fd=int(sys.argv[1]); os.write(fd,b'x'); os.close(fd)\n"
-    "try: os.execvp(sys.argv[2],sys.argv[2:])\n"
+    + oom_reset_code()
+    + "try: os.execvp(sys.argv[2],sys.argv[2:])\n"
     "except OSError as e: sys.stderr.write(f'{sys.argv[2]}: {e}\\n'); os._exit(127)\n"
 )
 #: How long `spawn` waits for a scope before it gives up on it.
