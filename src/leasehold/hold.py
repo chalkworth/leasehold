@@ -472,15 +472,13 @@ def _gib(size: int) -> str:
 
 def _counted(lease: leasing.Lease) -> int | None:
     """The memory the daemon counted for `lease` at its weight now: what it counted at the grant,
-    which is the declared or learned total, or else a size per slot times the weight. None for a
-    daemon that does not say."""
+    which is the declared total, or else a size per slot (declared or learned) times the weight.
+    None for a daemon that does not say."""
     first = (lease._answer or {}).get("lease") or {}
     counted = first.get("memory_counted_bytes")
     if counted is None or not first.get("weight") or lease.weight is None:
         return None
-    if first.get("memory_from") == "learned" or (
-        first.get("memory_bytes") is not None and first.get("memory_per_slot_bytes") is None
-    ):
+    if first.get("memory_bytes") is not None and first.get("memory_per_slot_bytes") is None:
         return counted
     return counted * lease.weight // first["weight"]
 

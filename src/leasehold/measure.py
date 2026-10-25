@@ -9,6 +9,9 @@ runs, and once more as it stops, and keeps the last value of each:
   most what the final `PERIOD_S` added. None where the kernel has no such file (before 5.19).
 * `anon` from `memory.stat`, the most seen: anonymous memory, a lower bound on what the command
   needed, since `memory.peak` also counts page cache.
+* `memory.swap.peak`, the most swap the scope used, or where the kernel has no such file (before
+  6.5) the most `memory.swap.current` seen: memory of the command's that was out of RAM, which
+  neither of the two above counts.
 * `oom_kill` and `high` from `memory.events`: how many processes the kernel's OOM killer ended
   in the scope, and how often the scope went past its `MemoryHigh`.
 * `usage_usec` from `cpu.stat`, the CPU time it used.
@@ -43,6 +46,7 @@ class Usage:
 
     peak_bytes: int | None = None
     anon_bytes: int | None = None
+    swap_bytes: int | None = None
     oom_kills: int | None = None
     high_events: int | None = None
     cpu_usec: int | None = None
@@ -78,13 +82,17 @@ def machine_oom_kills(proc: Path = Path("/proc")) -> int | None:
 
 def read(group: Path, last: Usage) -> Usage:
     """`last` updated with what can be read in the cgroup directory `group` now: each value
-    read replaces the last one (for `anon_bytes`, only when it is larger), and a value that
-    cannot be read keeps the last one."""
+    read replaces the last one (for `anon_bytes` and `swap_bytes`, only when it is larger), and a
+    value that cannot be read keeps the last one."""
     events = _fields(_read(group / "memory.events"))
     anon = _fields(_read(group / "memory.stat")).get("anon")
+    swap = _number(_read(group / "memory.swap.peak"))
+    if swap is None:
+        swap = _number(_read(group / "memory.swap.current"))
     found = {
         "peak_bytes": _number(_read(group / "memory.peak")),
         "anon_bytes": anon if last.anon_bytes is None or (anon or 0) > last.anon_bytes else None,
+        "swap_bytes": swap if last.swap_bytes is None or (swap or 0) > last.swap_bytes else None,
         "oom_kills": events.get("oom_kill"),
         "high_events": events.get("high"),
         "cpu_usec": _fields(_read(group / "cpu.stat")).get("usage_usec"),

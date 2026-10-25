@@ -42,35 +42,43 @@ here.
 - The benchmark takes `net=park` (and `overflow=SIZE`) on the conditions whose jobs run in lease
   scopes, and records the net's parks and swap writes for each run.
 - Learned memory. A request that declares no memory can count what its `[commands]` rule's
-  past runs in its repository used: 115% of the weighted median of the most anonymous memory
-  of its clean runs (exit 0, no OOM kill), newer runs weighing more, raised at once when the
-  newest two are both above it, and held up by any run the OOM killer reached. A run shorter
-  than 10 seconds is sized by its `memory.peak`. There is no figure until 3 clean runs are
-  known; until then the request counts its weight times `assumed_per_slot`, as before.
-  Declared memory always wins. A figure larger than the budget beside standing memory, or than
-  `[ceiling] memory`, is cut to it, so the command runs alone rather than being refused. The
-  module is `leasehold.estimate`.
+  past runs in its repository used for each slot of weight: 115% of the weighted median of each
+  clean run's size over the weight it held, newer runs weighing more. Two big runs in a row
+  raise it at once, and a run the OOM killer reached holds it up. A run's size is the most
+  anonymous memory it used plus the most swap, so a run that spilled to swap or was parked
+  counts all it held. A run shorter than 10 seconds is sized by its `memory.peak` plus swap. A
+  clean run exited 0 and the OOM killer did not reach it. There is no figure until 3 clean runs
+  are known; until then the request counts its weight times `assumed_per_slot`, as before.
+  Declared memory always wins. The figure is counted as a declared `memory_per_slot` is, so a
+  range or an elastic lease counts more as it is granted or grows to more slots. When the
+  request's least weight at that figure would not fit the budget beside standing memory, the
+  figure is cut until it does, so the command runs alone and is not refused. `[ceiling] memory`
+  does not cut it. The module is `leasehold.estimate`.
 - `[memory] learn`: `"on"` counts the learned figure, `"shadow"` (the default) works it out and
   shows it but counts what `"off"` counts, and `"off"` works out none. Any other value is a
   config error. `init` writes `learn = "shadow"` with a comment. `leasehold doctor`'s `memory`
   check warns when `learn` is not `"off"` but `[contain] mode = "off"`, since nothing is
   measured then.
-- `POST /v1/acquire` takes optional `rule` and `repo`, and `leasehold.leasing.lease_request` takes
-  `rule` and `repo` arguments. `hold` (with no `--weight`), the shims and the Claude Code hook
-  send them. The client leaves them out for a daemon that does not take them.
+- Outcomes have `swap_bytes`: the scope's `memory.swap.peak`, or on kernels before 6.5 the most
+  `memory.swap.current` seen. `leasehold.outcomes.Outcome` and `leasehold.measure.Usage` have
+  the field.
+- `POST /v1/acquire` takes optional `rule` and `repo`, and `leasehold.leasing.lease_request`
+  takes `rule` and `repo` arguments. `hold` (with no `--weight`), the shims and the Claude Code
+  hook send them. The client leaves them out for a daemon that does not take them.
 - Each lease and queued item in the status object and `GET /v1/leases` has `memory_from`
-  (`declared`, `learned` or `assumed`), `learned_bytes` and `learned_runs`. `GET /v1/leases`
-  now gives `memory_counted_bytes` for each too. The status object's `memory` has `learn`.
-- `GET /v1/outcomes` groups have `learned_bytes` and `learned_runs`: the figure the asking
-  user's own runs give, and the clean runs behind it.
-- `leasehold leases` has a `MEMORY` column (`1.2 GiB learned (3 runs)`, `4.0 GiB assumed`), and
-  `leasehold outcomes` a `LEARNED` column.
+  (`declared`, `learned` or `assumed`), `learned_per_slot_bytes` and `learned_runs`.
+  `GET /v1/leases` now gives `memory_counted_bytes` for each too. The status object's `memory`
+  has `learn`.
+- `GET /v1/outcomes` groups have `learned_per_slot_bytes` and `learned_runs`: the figure a slot
+  the asking user's own runs give, and the clean runs behind it.
+- `leasehold leases` has a `MEMORY` column (`2.3 GiB learned (3 runs)`, `4.0 GiB assumed`), and
+  `leasehold outcomes` a `LEARNED` column (`1.2 GiB/slot`).
 
 ### Changed
 
-- A lease that counts a learned figure gives `memory_bytes` null in the status object, since it
-  declared nothing, and its outcome records no declared memory. A `blocked` reason names the
-  figure as `its learned 1.2 GiB`.
+- A lease that counts a learned figure gives `memory_bytes` and `memory_per_slot_bytes` null in
+  the status object, since it declared nothing, and its outcome records no declared memory. A
+  `blocked` reason names the figure as `weight 2 at its learned 1.2 GiB a slot`.
 - A command run through a shim now files its outcome under its rule, as `hold` does; before,
   its rule was null.
 

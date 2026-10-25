@@ -238,6 +238,8 @@ class MachineAgent:
         self.learn = config.memory.learn if config.memory is not None else "off"
         #: (user, rule, repo) to (when worked out on `_monotonic`, the learned figure).
         self._learned: dict[tuple, tuple[float, estimate.Learned]] = {}
+        #: Guards `_learned`, which request threads fill outside `_lock`.
+        self._learned_lock = threading.Lock()
         #: The memory net (`leasehold.net`), when `[memory_net]` turns it on; `net` makes it
         #: (a test gives it fake roots). The server runs its loop. With it off, whatever a net
         #: before left paused or limited is let go.
@@ -650,9 +652,6 @@ class MachineAgent:
         lease_id = req.lease_id or uuid.uuid4().hex
         memory = None if req.memory is None else memory_to_bytes(req.memory)
         per_slot = None if req.memory_per_slot is None else memory_to_bytes(req.memory_per_slot)
-        learned, learned_runs = self._learned_for(req, user)
-        if learned is not None and self.learn == "on":
-            memory = learned
         least = memory if per_slot is None else req.weight * per_slot
         # [ceiling] memory limits each lease: a per-slot size always, a total with a budget.
         limited = self.budget is not None or per_slot is not None
@@ -669,6 +668,11 @@ class MachineAgent:
                 "lease_id": lease_id,
                 "reason": f"{what} is more than {limit}",
             }
+        # Learned after the [ceiling] check, which is for declared memory only: a learned
+        # figure is no limit on the command, so it never refuses one.
+        learned, learned_runs = self._learned_for(req, user)
+        if learned is not None and self.learn == "on":
+            per_slot = learned
         item = LedgerItem(
             scope=SCOPE,
             item_id=lease_id,
@@ -682,7 +686,7 @@ class MachineAgent:
             max_weight=req.max_weight,
             memory_per_slot=per_slot,
             elastic=req.elastic,
-            learned=learned,
+            learned_per_slot=learned,
             learned_runs=learned_runs,
         )
         ttl = req.ttl_s or self.config.lease_ttl_s
@@ -751,21 +755,29 @@ class MachineAgent:
         out again after `LEARNED_TTL_S` or once a new outcome for them is kept."""
         key = (user, rule, repo)
         now = self._monotonic()
-        hit = self._learned.get(key)
+        with self._learned_lock:
+            hit = self._learned.get(key)
         if hit is not None and now - hit[0] < LEARNED_TTL_S:
             return hit[1]
         found = estimate.learn(self.ledger.outcomes_of(user, rule, repo))
-        if len(self._learned) >= 4096:
-            self._learned.clear()
-        self._learned[key] = (now, found)
+        with self._learned_lock:
+            if len(self._learned) >= 4096:
+                self._learned.clear()
+            self._learned[key] = (now, found)
         return found
 
+    def _forget_learned(self, rule: str | None, repo: str | None) -> None:
+        """Drop every user's cached figure for `rule` in `repo`: a new outcome for it is kept."""
+        with self._learned_lock:
+            for key in [k for k in self._learned if k[1:] == (rule, repo)]:
+                del self._learned[key]
+
     def _learned_for(self, req: AcquireRequest, user: str | None) -> tuple[int | None, int | None]:
-        """The learned figure for `req` and the clean runs it rests on, as `LedgerItem` keeps
-        them: (None, None) when none is worked out (learning off, memory declared, no rule, or
-        a lease of the whole machine), (None, runs) while too few runs are known. A figure is
-        never more than the budget beside standing memory, nor `[ceiling] memory`: work that
-        used more is admitted alone, not refused."""
+        """The learned figure a slot for `req` and the clean runs it rests on, as `LedgerItem`
+        keeps them: (None, None) when none is worked out (learning off, memory declared, no rule,
+        or a lease of the whole machine), (None, runs) while too few runs are known. A figure is
+        cut only so that `req`'s least weight of it fits the budget beside standing memory: such
+        work is admitted alone, not refused."""
         if (
             self.learn == "off"
             or req.memory is not None
@@ -775,13 +787,12 @@ class MachineAgent:
         ):
             return None, None
         found = self.learned(user, req.rule, req.repo)
-        if found.bytes is None:
+        if found.per_slot is None:
             return None, found.runs
-        most = self.limits.memory_bytes
-        if self.budget is not None:
-            standing = sum(self.config.standing_memory().values())
-            most = min(most, max(1, self.budget.budget - standing))
-        return min(found.bytes, most), found.runs
+        if self.budget is None:
+            return found.per_slot, found.runs
+        room = self.budget.budget - sum(self.config.standing_memory().values())
+        return min(found.per_slot, max(1, room // req.weight)), found.runs
 
     def _waiting_range(self, lease_id: str) -> dict:
         """The range the item `lease_id` waits with, as admission would cut it now
@@ -900,8 +911,7 @@ class MachineAgent:
                 parks = {"parks": 0, "parked_s": 0.0} | self.net.take(lease_id)
             if outcome is not None:
                 self.ledger.record_outcome((SCOPE, lease_id), outcome.model_dump() | parks)
-                for key in [k for k in self._learned if k[1:] == (outcome.rule, outcome.repo)]:
-                    self._learned.pop(key, None)
+                self._forget_learned(outcome.rule, outcome.repo)
             self._released.add((SCOPE, lease_id))
             self.ledger.release((SCOPE, lease_id))
             self.ledger.settle(self.policy())
@@ -965,16 +975,17 @@ class MachineAgent:
     def outcomes(self, *, user: str | None, everyone: bool = False) -> dict:
         """The outcomes kept (`Ledger.outcomes`): `user`'s, or with `everyone` every user's,
         newest first (`outcomes`), and summed up by rule and repository (`groups`,
-        `leasehold.outcomes.summarize`). Each group with a rule also has `learned_bytes` and
-        `learned_runs`: the figure `user`'s own runs there give (`learned`; None while too few
-        are known) and the clean runs behind it. A group with no rule has None for both."""
+        `leasehold.outcomes.summarize`). Each group with a rule also has
+        `learned_per_slot_bytes` and `learned_runs`: the figure a slot `user`'s own runs there
+        give (`learned`; None while too few are known) and the clean runs behind it. A group
+        with no rule has None for both."""
         rows = self.ledger.outcomes(user=user, everyone=everyone)
         groups = outcomes.summarize(rows)
         for group in groups:
             found = None
             if group["rule"] is not None:
                 found = self.learned(user, group["rule"], group["repo"])
-            group["learned_bytes"] = None if found is None else found.bytes
+            group["learned_per_slot_bytes"] = None if found is None else found.per_slot
             group["learned_runs"] = None if found is None else found.runs
         return {"groups": groups, "outcomes": rows}
 
