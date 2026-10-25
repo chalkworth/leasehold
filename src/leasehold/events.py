@@ -16,7 +16,8 @@ writing the same ledger, is reported the same way. Each event is a flat dict:
   lease's `weight` changed, from `previous_weight`), `session_started` and `session_ended`
   (`leasehold.sessions`), and `held`, `paused` and `runaway` from the watchdog
   (`leasehold.watchdog`): new heavy work would wait, the tree it would pause, or a tree found
-  running away, with `would` true when the watchdog only decided it and did nothing.
+  running away. `would` is true in `watch` mode, where the watchdog reports what it would do
+  and acts on nothing.
 
 Events live in memory only: a restarted daemon starts a new sequence, and a reader that asks
 for a `since` from before the ring's oldest event is told some were `dropped`; one that asks for

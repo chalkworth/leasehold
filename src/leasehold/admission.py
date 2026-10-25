@@ -1037,7 +1037,7 @@ def _admit_least(
             head = line[user][session][0]
             host = policy.pools[pool].host
             if host in alone_hosts:
-                break  # an alone item already admitted here this decision has its host
+                break  # an alone item admitted on this host holds it: the pool's line waits
             if head.key in policy.alone and _busy(state, policy, admits, pool):
                 stopped.setdefault(pool, []).append(head)
                 break  # waiting to run alone: nothing backfills around it

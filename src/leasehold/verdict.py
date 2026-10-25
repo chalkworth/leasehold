@@ -79,7 +79,7 @@ def stopped_todo(stop: dict) -> str:
     if stop.get("alone"):
         return "It was stopped even running alone: run it again only with fewer workers."
     if stop.get("rerun"):
-        return "It can run again as is, unless leasehold already reran it: it then runs alone."
+        return "It can run again as is. If leasehold has already rerun it, it has to run alone."
     return _AFTER_OTHERS
 
 

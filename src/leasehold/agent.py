@@ -1118,8 +1118,7 @@ class MachineAgent:
 
     def _thaw_left_frozen(self) -> None:
         """Thaw every lease scope still frozen as this daemon starts, saying so on standard
-        error: nothing is paused yet, so it is left over (from a daemon that died, or the memory
-        net of a development build)."""
+        error: nothing is paused yet, so it is left over from a daemon that died."""
         for tree in self.sessions.host.frozen_scopes():
             done = self.sessions.host.resume(tree)
             if done.how != "none":

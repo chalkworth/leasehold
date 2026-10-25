@@ -1468,8 +1468,8 @@ has `how` set to `none` and a `reason`, and its footprint is null, so it never l
 
 ### The watchdog
 
-Your own daemon judges how short of memory the machine is and acts on it, so that the machine
-never freezes. With `[watchdog] mode = "on"` it pauses the newest heavy work an agent started,
+Your own daemon judges how short of memory the machine is and acts on it, to help keep the
+machine from freezing. With `[watchdog] mode = "on"` it pauses the newest heavy work an agent started,
 stops it if pausing does not free enough, and tells the agent. `mode = "watch"` decides and
 reports what it would do, and holds, pauses or stops nothing. `mode = "off"` turns the judging
 off; sessions are still watched. `leasehold init` writes `mode = "on"`; a config with no
@@ -1521,8 +1521,8 @@ Some trees are never chosen:
 - a tree under `min_size`;
 - one the agent process runs under;
 - one made only of leasehold's own processes: `leasehold hold`, a PATH shim, a hook, the daemon.
-  A process is leasehold's when leasehold is its program, not when its arguments name
-  leasehold. In any other tree those processes are `spared`: left out of its footprint, and
+  A process is leasehold's if its program is leasehold, whatever its arguments name. In any
+  other tree those processes are `spared`: left out of its footprint, and
   left running if it were paused, with the shells they run under, up to the first other
   program. A program that runs a shim (a test run calling `make`) is paused and stopped with
   its tree, and so is a program that holds its own lease through the Python API;
