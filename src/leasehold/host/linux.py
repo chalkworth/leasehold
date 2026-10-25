@@ -518,6 +518,17 @@ class Linux(Posix):
         text = _read(self._proc / "sys" / "kernel" / "random" / "boot_id")
         return None if text is None else text.strip() or None
 
+    def frozen_scopes(self) -> list[Tree]:
+        """leasehold's lease scopes under this user's `leasehold.slice` that are frozen now,
+        each as a tree to `resume`."""
+        base = self._cgroup_root / root_slice_cgroup()
+        found = []
+        for freeze in sorted(base.glob("**/lease-*.scope/cgroup.freeze")):
+            if (_read(freeze) or "").strip() == "1":
+                group = "/" + str(freeze.parent.relative_to(self._cgroup_root))
+                found.append(Tree(root=0, group=group))
+        return found
+
     def command_line(self, proc: Proc) -> str | None:
         """The command `proc` runs, its arguments joined by spaces; None once it has ended (or
         its pid is another process's) or when it cannot be read."""

@@ -171,6 +171,10 @@ class Posix:
         not taken for one now: not readable here."""
         return None
 
+    def frozen_scopes(self) -> list[Tree]:
+        """leasehold's lease scopes that are frozen now: there are none here."""
+        return []
+
     def wakeup_fd(self) -> int | None:
         """A file descriptor that turns readable when a tree or the machine's memory changes,
         so that a loop can look again before its next tick; None: there is none here."""

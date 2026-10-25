@@ -507,7 +507,10 @@ def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
                 _say(str(exc))
                 return EXIT_NOT_STARTED
             if command is not None:
-                interrupted = relay.forward_to(command.pid)
+                # A signal that came as the command started reaches it too, as later ones do.
+                kept = relay.forward_to(command.pid)
+                if kept is not None:
+                    supervise.signal_group(command.pid, kept)
                 if interrupted is None:
                     if command.uncontained:
                         _say(command.uncontained)

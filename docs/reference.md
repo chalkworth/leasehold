@@ -1633,7 +1633,8 @@ The daemon keeps the trees it paused in `watchdog.json` beside the ledger. A dae
 lets them run first, and one that starts lets any it finds there run, so no pause outlives the
 daemon that made it. The file records each paused process with its start time, so a tree
 whose first process has gone is let run all the same, and the boot it was written in: a file
-from an earlier boot is only removed. While it acts, `leasehold serve` locks
+from an earlier boot is only removed. As it starts, the user's daemon also thaws any lease
+scope it finds frozen, and says so on standard error. While it acts, `leasehold serve` locks
 the daemon's memory in RAM (`mlockall`, with `MCL_ONFAULT` on Linux, so that memory it reserved
 and never touched takes no RAM), gives its threads small stacks, and raises its priority, where
 the user may, so that it still runs when memory is short. `leasehold doctor` warns in a

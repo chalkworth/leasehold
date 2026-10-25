@@ -75,7 +75,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from leasehold.machine import (
     LEVELS,
@@ -368,6 +368,9 @@ class Watchdog:
         self._available: list[tuple[float, int]] = []
         self._runaways: set[tuple[int, str | None]] = set()
         self._state = _State()
+        #: The level at the last reading, set once it is judged: what `short` reads, from
+        #: another thread too.
+        self._level: str | None = None
         #: What the last decision would have done: (action, tree key), or None.
         self._last: tuple[str, tuple[int, str | None] | None] | None = None
         #: The trees paused, and those resumed that have not ended, oldest pause first.
@@ -420,7 +423,7 @@ class Watchdog:
         if memory.how == "none" or memory.available is None:
             state.reason = f"the watchdog cannot see memory here: {memory.reason or 'not read'}"
             self._last = None
-            self._critical_since = self._ok_since = None
+            self._critical_since = self._ok_since = self._level = None
             return []
         state.available = memory.available
         state.swap_free = memory.swap_free()
@@ -440,6 +443,7 @@ class Watchdog:
             self._last_stop = None
         self._let_go(state)
         self._choose(state)
+        self._level = state.level
         return self._events(state)
 
     def _let_go(self, s: _State) -> None:
@@ -473,7 +477,7 @@ class Watchdog:
     def short(self) -> bool:
         """Whether memory is short, or a tree is paused: while it is, what stopping each tree
         would free is worth measuring."""
-        return self._state.level not in (None, "ok") or bool(self._paused)
+        return self._level not in (None, "ok") or bool(self._paused)
 
     def _helps(self, w: Work, why: str | None, share: float = HELPS) -> bool:
         """Whether stopping `w` would help: a runaway, or a stop that returns `share` of the
@@ -582,6 +586,11 @@ class Watchdog:
         """Paused tree `p` as last read."""
         return next((w for w in self._work if w.key == p.key), p.choice.work)
 
+    def _as_read(self, p: Paused) -> Choice:
+        """Paused tree `p`'s choice, with the tree as last read: a stop reaches the leases and
+        processes found since its pause."""
+        return replace(p.choice, work=self._now_of(p))
+
     def _events(self, s: _State) -> list[dict]:
         out = []
         v = s.victim
@@ -635,7 +644,7 @@ class Watchdog:
         paused = [p for p in self._paused.values() if p.resumed is None]
         longest = max(paused, key=lambda p: now - p.since, default=None)
         if longest is not None and now - longest.since >= self.settings.max_pause_s:
-            return [Act("stop", longest.choice, "max_pause")]
+            return [Act("stop", self._as_read(longest), "max_pause")]
         if self.outside:
             return [Act("resume", p.choice, "outside") for p in paused]
         ripe = [
@@ -649,9 +658,9 @@ class Watchdog:
             if start is not None and self._last_stop is not None:
                 start = max(start, self._last_stop)
             if runaway is not None and self._at(s.level, "warn"):
-                acts.append(Act("stop", runaway.choice, "runaway"))
+                acts.append(Act("stop", self._as_read(runaway), "runaway"))
             elif s.level == "critical" and start is not None and now - start >= KILL_AFTER_S:
-                acts.append(Act("stop", ripe[0].choice, "critical"))
+                acts.append(Act("stop", self._as_read(ripe[0]), "critical"))
         if self._at_act(s.level) and s.victim is not None and not acts:
             spaced = self._last_act is None or now - self._last_act >= STEP_S
             first = not paused and self._last_stop is None

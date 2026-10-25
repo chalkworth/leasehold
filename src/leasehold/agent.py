@@ -19,6 +19,7 @@ import json
 import os
 import pwd
 import re
+import sys
 import threading
 import time
 import uuid
@@ -49,6 +50,7 @@ from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
 from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, available, some_avg10
 from leasehold.machine import MachineConfig, lease_memory_limit
+from leasehold.paths import user_socket
 from leasehold.proctable import Proc
 from leasehold.sessions import Branch, Session, Sessions
 from leasehold.units import CAP_OFF, cap_to_bytes, declared_to_bytes, memory_to_bytes
@@ -477,6 +479,10 @@ class MachineAgent:
         )
         if config.for_user:
             self._let_recorded_run()
+            # Only the user's own daemon, on its own socket: lease scopes are the user's, and a
+            # daemon on another socket (a test's) may not thaw what that one paused.
+            if config.socket is None or config.socket == user_socket(os.environ):
+                self._thaw_left_frozen()
         self._seen = self._snapshot()
 
     def _guard_cgroups(self) -> tuple[str, ...]:
@@ -926,13 +932,16 @@ class MachineAgent:
                     f"your command {_quoted(w)} runs again after {paused_s:.0f}s paused.",
                 )
             return [{"type": EventType.RESUMED, "paused_s": round(paused_s, 1)} | about]
-        trees = self._trees.pop(w.key, None) or self._host_trees(w)
+        # What it recorded at the pause, and what the tree has gained since (a lease's scope).
+        trees = self._trees.pop(w.key, None) or []
+        groups = {t.group for t in trees}
+        trees += [t for t in self._host_trees(w) if not trees or t.group not in groups]
         done = _together([doing.kill(t, 0) for t in trees])
         if done.how == "none" and not done.empty:
             self.watchdog.failed(act)
             return []
         record = self.watchdog.stopped_tree(act)
-        leases = self._paused_leases.pop(w.key, None) or self._leases_of(w)
+        leases = self._paused_leases.pop(w.key, set()) | self._leases_of(w)
         self._close_pauses(leases)
         runaway = act.choice.why == "runaway"
         paused_s = None if record is None else self._monotonic_paused(record)
@@ -1096,6 +1105,15 @@ class MachineAgent:
                 self.sessions.host.resume(host.Tree.from_dict(tree))
         with contextlib.suppress(OSError):
             self._paused_file.unlink()
+
+    def _thaw_left_frozen(self) -> None:
+        """Thaw every lease scope still frozen as this daemon starts, saying so on standard
+        error: nothing is paused yet, so it is left over (from a daemon that died, or the memory
+        net of a development build)."""
+        for tree in self.sessions.host.frozen_scopes():
+            done = self.sessions.host.resume(tree)
+            if done.how != "none":
+                sys.stderr.write(f"leasehold: thawed {tree.group}, left frozen\n")
 
     def let_paused_run(self) -> None:
         """Let every tree the watchdog paused run again: the daemon is stopping."""
@@ -1473,9 +1491,12 @@ class MachineAgent:
                 "elastic": renewal.elastic,
             }
         if renewal.status == "ok":
-            answer["paused"] = lease_id in self._paused_ids()
-            answer["paused_for"] = self._paused_for(lease_id)
-            answer["stopped"] = self._stops.get(lease_id)
+            # Under the watchdog's lock: a renewal sent as its command is killed waits for the
+            # stop to be recorded, and so hears of it.
+            with self._watchdog_lock:
+                answer["paused"] = lease_id in self._paused_ids()
+                answer["paused_for"] = self._paused_for(lease_id)
+                answer["stopped"] = self._stops.get(lease_id)
         return answer
 
     def resize(self, lease_id: str, weight: int, *, user: str | None) -> dict:

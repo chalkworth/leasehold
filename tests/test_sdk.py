@@ -28,6 +28,7 @@ from support import (
 )
 
 import leasehold
+from leasehold import agent as agent_module
 from leasehold import claude_code, host
 from leasehold import watchdog as watchdog_module
 from leasehold.agent import AcquireRequest, MachineAgent
@@ -515,8 +516,14 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
     ]  # fmt: skip
     fake, mono = FakeHost(), Clock(0.0)
     fake.procs[100] = host.Proc(100, "100", "fake-agent", parent=1, started=1000.0, anon=GIB)
+    # The test drives every tick and reading itself, on its own clock: the daemon's own loops
+    # would read the sessions halfway through a step.
+    monkeypatch.setattr(Daemon, "_watch", lambda self: None)
     config = machine_config(
-        tmp_path, socket=str(sock_dir / "s.sock"), watchdog={"mode": "on", "agents": ["x"]}
+        tmp_path,
+        socket=str(sock_dir / "s.sock"),
+        watchdog={"mode": "on", "agents": ["x"]},
+        tick_s=3600,
     )
     agent = MachineAgent(
         config, facts=FACTS, load=FakeLoad(), monotonic=mono, platform=lambda: fake
@@ -603,16 +610,29 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         assert again["lease_id"] in held(daemon.path)
     finally:
         daemon.stop()
+
+
+@pytest.mark.parametrize(
+    ("contain", "wrapped"),
+    [
+        ("off", False),
+        pytest.param("auto", False, marks=pytest.mark.skipif(NO_SCOPE, reason="no scopes here")),
+        ("off", True),
+    ],
+)
+def test_the_watchdog_stops_a_real_command_and_spares_hold(
+    sock_dir, tmp_path, monkeypatch, contain, wrapped
+):
     # A real tree, as an agent's Bash tool runs one: `hold` under `sh -c`, its command in a scope
     # where commands get one, else not. The watchdog pauses and stops the command, never `hold`
-    # or the shells it runs under, so `hold` lives to report the stop.
+    # or the shells it runs under, so `hold` lives to report the stop. A program that runs
+    # `hold` (a test run calling a shimmed tool) holds memory of its own: it is stopped with
+    # the command, and only `hold` is spared.
     monkeypatch.setattr(watchdog_module, "AGENT_START_S", 0.0)
-    monkeypatch.setattr(watchdog_module, "KILL_AFTER_S", 1.0)
-    for contain in ["off"] if NO_SCOPE else ["off", "auto"]:
-        _stop_a_real_hold(sock_dir, tmp_path / f"real-{contain}", contain)
-    # A program that runs `hold` (a test run calling a shimmed tool) holds memory of its own: it
-    # is stopped with the command, and only `hold` is spared.
-    _stop_a_real_hold(sock_dir, tmp_path / "real-wrapped", "off", wrapped=True)
+    monkeypatch.setattr(watchdog_module, "KILL_AFTER_S", 0.5)
+    monkeypatch.setattr(agent_module, "SESSIONS_S", 0.2)
+    monkeypatch.setattr("leasehold.host.linux.TAGS_S", 0.1)
+    _stop_a_real_hold(sock_dir, tmp_path / "real", contain, wrapped=wrapped)
 
 
 class _Short(Linux):
@@ -656,9 +676,12 @@ def _stop_a_real_hold(sock_dir, where, contain: str, wrapped: bool = False) -> N
     try:
         client = Client(daemon.path)
         client.register_session("real", pid=shell.pid, agent="sh")
+        # Memory runs short once the session is seen with the leased command running: the
+        # shell, `hold` (and the program running it) and `sleep 300`.
+        whole = 4 if wrapped else 3
         until(
             lambda: any(
-                (s["processes"] or 0) >= 3 for s in client.status()["watchdog"]["sessions"]
+                (s["processes"] or 0) >= whole for s in client.status()["watchdog"]["sessions"]
             ),
             timeout=20,
         )

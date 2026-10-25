@@ -258,6 +258,9 @@ here.
   pause, resume and kill leave alone) and `members` (the processes recorded at a pause). The
   file names the boot it was written in (`host.boot_id`), and a daemon only removes one from an
   earlier boot. The host's `freeable(proc)` says what stopping a process would free.
+- The user's daemon, as it starts, thaws every lease scope it finds frozen (one a daemon that
+  died left paused, or the memory net of a development build), and says so on standard error.
+  The host's `frozen_scopes()` lists them.
 - With the watchdog on, `leasehold serve` locks the daemon's memory in RAM (`mlockall`) and
   raises its priority where the user may (`host.stay_resident`). On Linux it locks with
   `MCL_ONFAULT`, and threads started after it get a 256 KiB stack. `leasehold doctor` has a
@@ -340,6 +343,9 @@ here.
 
 ### Fixed
 
+- A SIGTERM, SIGINT or SIGHUP that reached `hold` just as its command started now reaches the
+  command too. Before, `hold` stopped the command and exited 128 plus the signal, even when
+  the command would have handled it.
 - A directory's empty or stray `.git` no longer counts as a repository. Outcomes, and the
   memory learned from them, are filed under the work tree git would find: the nearest
   directory up whose `.git` is a repository (it holds a `HEAD`) or a `gitdir:` file. Before,
