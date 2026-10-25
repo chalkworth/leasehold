@@ -25,6 +25,7 @@ import resource
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Collection, Mapping
 
@@ -52,11 +53,17 @@ _GROUP = "signals to the tree's process group: a member that left the group is n
 LOCK_AT_LEAST = 1 << 30
 #: The priority `stay_resident` asks for (a nice value), where this user may.
 NICE = -10
-#: `mlockall`'s flags on Linux (x86 and ARM) and macOS.
-_MCL_CURRENT, _MCL_FUTURE = 1, 2
+#: `mlockall`'s flags on Linux (x86 and ARM) and macOS; `MCL_ONFAULT` is Linux's own.
+_MCL_CURRENT, _MCL_FUTURE, MCL_ONFAULT = 1, 2, 4
+#: The stack each thread started after `stay_resident` gets: the default 8 MiB a thread would
+#: otherwise lock.
+STACK_BYTES = 256 << 10
 
 
 class Posix:
+    #: The flags `stay_resident` locks memory with.
+    _lock_flags = _MCL_CURRENT | _MCL_FUTURE
+
     def __init__(self, env: Mapping[str, str] | None = None) -> None:
         self._env = os.environ if env is None else env
 
@@ -211,8 +218,9 @@ class Posix:
     def stay_resident(self, *, dry: bool = False) -> Done:
         """Lock this process's memory in RAM (`mlockall`, now and for what it allocates later),
         where the user's locked-memory limit is at least `LOCK_AT_LEAST` or unlimited, and
-        raise its priority to `NICE` where the user may. `how` names what was done (`mlockall`,
-        `nice`, both, or `none` with the `reason`); with `dry`, what would be."""
+        raise its priority to `NICE` where the user may. Threads started later get a
+        `STACK_BYTES` stack. `how` names what was done (`mlockall`, `nice`, both, or `none`
+        with the `reason`); with `dry`, what would be."""
         done, why = [], []
         soft, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
         if os.geteuid() != 0 and soft != resource.RLIM_INFINITY and soft < LOCK_AT_LEAST:
@@ -223,8 +231,9 @@ class Posix:
         elif dry:
             done.append("mlockall")
         else:
+            threading.stack_size(STACK_BYTES)
             libc = ctypes.CDLL(None, use_errno=True)
-            if libc.mlockall(_MCL_CURRENT | _MCL_FUTURE) == 0:
+            if libc.mlockall(self._lock_flags) == 0:
                 done.append("mlockall")
             else:
                 why.append(f"mlockall failed: {os.strerror(ctypes.get_errno())}")

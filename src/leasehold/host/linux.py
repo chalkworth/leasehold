@@ -74,7 +74,7 @@ from leasehold.host import (
     signal_group,
     systemd,
 )
-from leasehold.host.posix import Posix
+from leasehold.host.posix import MCL_ONFAULT, Posix
 
 #: The variables that name the session a process belongs to, and the lease it runs under.
 SESSION_ENV = b"LEASEHOLD_SESSION"
@@ -148,6 +148,10 @@ def _cap_or_kernel(tree: Tree) -> str:
 
 
 class Linux(Posix):
+    #: Pages are locked as they are first touched, so that what was reserved and never used
+    #: (thread stacks, arenas) takes no RAM.
+    _lock_flags = Posix._lock_flags | MCL_ONFAULT
+
     def __init__(
         self,
         env: Mapping[str, str] | None = None,
@@ -298,17 +302,25 @@ class Linux(Posix):
 
     def _pids(self, tree: Tree) -> list[int]:
         """The pids of the tree's processes now: its cgroup's, with those of the cgroups under
-        it, or else its root (while its fence holds) and the root's descendants."""
+        it, or else its root (while its fence holds) and the root's descendants; and each of its
+        recorded `members` whose fence still holds."""
         if tree.group is not None:
             base = self._cgroup_root / tree.group.lstrip("/")
             files = [base / "cgroup.procs"]
             with contextlib.suppress(OSError):
                 files += sorted(base.rglob("*/cgroup.procs"))
             words = [w for f in files for w in (_read(f) or "").split()]
-            return [int(w) for w in words if w.isdigit()]
-        if tree.fence is not None and self._fence(tree.root) != tree.fence:
-            return []
-        return [tree.root, *self._descendants(tree.root)]
+            found = [int(w) for w in words if w.isdigit()]
+        elif tree.root and (tree.fence is None or self._fence(tree.root) == tree.fence):
+            found = [tree.root, *self._descendants(tree.root)]
+        else:
+            found = []
+        known = set(found)
+        for pid, fence in tree.members:
+            if pid not in known and (fence is None or self._fence(pid) == fence):
+                found.append(pid)
+                known.add(pid)
+        return found
 
     def members(self, tree: Tree) -> list[Proc]:
         """The tree's live processes, largest first. A process that cannot be read is left
@@ -626,16 +638,26 @@ class Linux(Posix):
             os.close(fd)
         return Done(how)
 
+    def _cgroup_kill(self, tree: Tree) -> bool:
+        """Kill every process of the tree's kernel group at once, frozen or not (`cgroup.kill`).
+        Whether it could."""
+        assert tree.group is not None
+        try:
+            (self._cgroup_root / tree.group.lstrip("/") / "cgroup.kill").write_text("1")
+        except OSError:
+            return False
+        return True
+
     def _each(self, tree: Tree, sig: int, *, stopped: bool | None = None) -> list[int]:
-        """Signal `sig` to the tree's group (unless its keeper is in it) and to each member but
-        its keeper; with `stopped` set, only to members whose state is not already that. The
-        pids signalled."""
+        """Signal `sig` to the tree's group (unless its keeper is in it, or it spares any) and
+        to each member but its keeper and those it spares; with `stopped` set, only to members
+        whose state is not already that. The pids signalled."""
         pgid = self._group(tree)
-        if pgid is not None:
+        if pgid is not None and not tree.spare:
             signal_group(pgid, sig)
         sent = []
         for pid in self._pids(tree):
-            if pid == tree.keeper:
+            if pid == tree.keeper or pid in tree.spare:
                 continue
             if stopped is not None:
                 stat = self._stat(pid)
@@ -675,6 +697,8 @@ class Linux(Posix):
         if not self._pids(tree):
             return Done("signal", empty=True)
         if grace_s <= 0:
+            if tree.group is not None and not tree.spare and self._cgroup_kill(tree):
+                return Done("cgroup.kill")
             self._each(tree, signal.SIGKILL)
             return Done("signal")
         self._each(tree, signal.SIGTERM)

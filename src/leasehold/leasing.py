@@ -294,6 +294,12 @@ def child_env(
 
 #: The fields of a renewal's answer that say what the lease holds now.
 _HELD = ("weight", "min_weight", "max_weight", "pool", "jobs")
+#: Why the watchdog chose a command to pause, as `hold` says it (a renewal's `paused_for`).
+_PAUSED_FOR = {
+    "newest": ", as the newest heavy work,",
+    "runaway": ", as its memory grows fastest,",
+    "large": ", as the largest heavy work,",
+}
 
 
 class Lease:
@@ -438,7 +444,7 @@ class Lease:
                 last_ok = time.monotonic()
             if verdict == "ok" and not pending:
                 self._take(renewal)
-                self._heard_paused(bool(renewal.get("paused")))
+                self._heard_paused(bool(renewal.get("paused")), renewal.get("paused_for"))
                 if follower is not None:
                     follower.heard(renewal)
                     follower.step()
@@ -475,15 +481,16 @@ class Lease:
                     )
                     return
 
-    def _heard_paused(self, paused: bool) -> None:
+    def _heard_paused(self, paused: bool, why: str | None = None) -> None:
         if paused == self.paused:
             return
         self.paused = paused
         if paused:
             self._paused_at = time.monotonic()
+            chosen = _PAUSED_FOR.get(why or "", "")
             self._say(
-                "memory is short: the command is paused, as the newest heavy work, until "
-                "memory frees. Nothing is lost; it continues where it stopped"
+                f"memory is short: the command is paused{chosen} until memory frees. Nothing "
+                "is lost; it continues where it stopped"
             )
         else:
             took = time.monotonic() - getattr(self, "_paused_at", time.monotonic())

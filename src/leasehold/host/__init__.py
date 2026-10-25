@@ -135,7 +135,10 @@ class Tree:
     service manager (a systemd unit) and `group` where the kernel keeps it (a cgroup path,
     such as `/user.slice/.../lease-x.scope`).
     `cap_bytes` is its own hard memory cap, and `limit_bytes` the lowest hard memory limit on
-    it or above it as read when it was made (None: none)."""
+    it or above it as read when it was made (None: none). `pause`, `resume` and `kill` never
+    signal a process in `spare`, and also reach each of `members` (pid, fence) still alive:
+    the processes a pause stopped, so that they run again even once the root has gone and they
+    have another parent."""
 
     root: int
     fence: str | None = None
@@ -145,6 +148,8 @@ class Tree:
     group: str | None = None
     cap_bytes: int | None = None
     limit_bytes: int | None = None
+    spare: tuple[int, ...] = ()
+    members: tuple[tuple[int, str | None], ...] = ()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -152,7 +157,10 @@ class Tree:
     @classmethod
     def from_dict(cls, data: dict) -> Tree:
         names = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in names})
+        found = {k: v for k, v in data.items() if k in names}
+        found["spare"] = tuple(int(p) for p in found.get("spare") or ())
+        found["members"] = tuple((int(p), f) for p, f in found.get("members") or ())
+        return cls(**found)
 
 
 @dataclass(frozen=True)

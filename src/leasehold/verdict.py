@@ -17,6 +17,7 @@ certain, and whether to run it again as is.
 
 from __future__ import annotations
 
+import re
 import signal
 from dataclasses import dataclass
 
@@ -49,6 +50,37 @@ class Verdict:
     agent: str
     largest: tuple[int, str, int] | None = None
     watchdog: dict | None = None
+
+
+#: A command line or rule that runs tests.
+_TESTS = re.compile(
+    r"(^|[\s/,])(pytest|py\.test|jest|vitest|playwright|mocha|tox|nox|ctest|rspec|phpunit)"
+    r"(\s|,|$)|(^|\s)test(\s|$)"
+)
+
+
+def test_like(text: str | None) -> bool:
+    """Whether `text` (a command line, or a rule's key) runs tests."""
+    return bool(text) and _TESTS.search(text or "") is not None
+
+
+def stopped_note(stop: dict) -> str:
+    """What a stop by the watchdog was not: a test failure, for tests (`stop["test"]`); else,
+    unless the command ran away, a failure of the command."""
+    if stop.get("test"):
+        return NOT_A_FAILURE
+    return "" if stop.get("runaway") else "This is not a failure of your command."
+
+
+def stopped_todo(stop: dict) -> str:
+    """What to do after a stop by the watchdog."""
+    if stop.get("runaway"):
+        return "It grew without bound: do not run it again unchanged; find what allocates."
+    if stop.get("alone"):
+        return "It was stopped even running alone: run it again only with fewer workers."
+    if stop.get("rerun"):
+        return "It can run again as is, unless leasehold already reran it: it then runs alone."
+    return _AFTER_OTHERS
 
 
 def _signal_name(sig: int) -> str:
@@ -85,14 +117,9 @@ def describe(
         first = f" after {paused:.0f}s paused" if paused is not None else ""
         person = (
             f"leasehold: {program} was stopped{first} by leasehold's watchdog to keep the "
-            f"machine responsive, as memory ran short. {NOT_A_FAILURE}"
-        )
-        if stop.get("runaway"):
-            todo = "It grew without bound: do not run it again unchanged; find what allocates."
-        elif stop.get("rerun"):
-            todo = "It can run again as is, unless leasehold already reran it: it then runs alone."
-        else:
-            todo = _AFTER_OTHERS
+            f"machine responsive, as memory ran short. {stopped_note(stop)}"
+        ).strip()
+        todo = stopped_todo(stop)
         return Verdict(
             "leasehold", True, program, peak_bytes, None, person, f"{person} {todo}",
             watchdog=dict(stop),

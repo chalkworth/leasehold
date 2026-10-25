@@ -293,13 +293,17 @@ LARGE_SHARE = 0.25
 ACT_AT = "critical"
 #: `max_pause_s`: a tree paused this long is stopped, so a long peer cannot keep it paused.
 MAX_PAUSE_S = 900.0
-#: Command lines never chosen, besides `[watchdog] protect`: the agents themselves, and MCP
-#: servers, which start with their agent.
+#: Command lines never chosen, besides `[watchdog] protect`, matched against each process of
+#: a tree: the agents themselves (and agents they start), MCP servers, which start with their
+#: agent, and the browsers and editors an agent opens for the person.
 PROTECT = (
-    r"(^|/)(claude|codex|gemini|cursor-agent|aider)(\s|$)",
+    r"^(\S*/)?(claude|codex|gemini|cursor-agent|aider|opencode|goose)(\s|$)",
     r"@modelcontextprotocol/",
     r"(^|[\s/])mcp[-_]server",
-    r"(^|\s)uvx\s+mcp-",
+    r"^(\S*/)?(npx|uvx|bunx|pnpx|node|bun|deno|python3?)(\s+-\S+)*\s+\S*mcp",
+    r"^(\S*/)?uv\s+run(\s+-\S+)*\s+\S*mcp",
+    r"^(\S*/)?(xdg-open|code|code-insiders|cursor|codium|zed|chromium|chromium-browser|chrome"
+    r"|google-chrome|google-chrome-stable|firefox|firefox-esr)(\s|$)",
 )
 #: The watchdog's levels, least first.
 LEVELS = ("ok", "warn", "critical")

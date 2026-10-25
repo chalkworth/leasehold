@@ -24,16 +24,20 @@ knowing is never reported as `ok`, and the watchdog never acts on it.
 
 **What it does** at `act_at` and above (`critical` by default), with `mode = "on"`:
 
-* it **holds** new heavy work (`held`), and keeps holding while any tree it paused is still
-  running, resumed or not, until that tree ends: a resumed tree reads its memory back, and new
-  work would take the room it needs;
-* it **pauses** the first tree in line, and the next one after `STEP_S` only while available
-  memory is still falling (by `FALLING` since the last pause);
-* it **stops** (SIGKILL at once: a stopped process does not act on SIGTERM) the newest paused
-  tree, a runaway first, once the level has been `critical` for `KILL_AFTER_S` since the
-  episode began or since the last stop; a paused runaway or large tree `KILL_AFTER_S` after its
-  pause, whatever the level; and any tree paused for `max_pause_s`;
-* it **resumes** the tree paused longest once the level has been `ok` for `SETTLE_S`, and, while
+* it holds new heavy work (`held`), and keeps holding while a tree it paused is paused, and
+  after it runs again until it ends or settles (`FLAT_S` flat at `ok` with room for it, or
+  `max_pause_s` after it ran again): a resumed tree reads its memory back, and new work would
+  take the room it needs;
+* it pauses the first tree in line, and the next one after `STEP_S` only while available
+  memory is still falling (by `FALLING` over the last `STEP_S`);
+* it stops (SIGKILL at once: a stopped process does not act on SIGTERM) a tree paused for at
+  least `KILL_AFTER_S`: the newest, once the level has been `critical` for `KILL_AFTER_S` since
+  the episode began or since the last stop; a paused runaway while the level is at least
+  `warn`; and any tree paused for `max_pause_s`. One at a time: `STOP_CHECK_S` after a stop it
+  checks that available memory came back by half what the tree held. When it did not, the
+  shortage is outside the sessions (`outside`), and until the level is `ok` again the watchdog
+  only holds new work;
+* it resumes the tree paused longest once the level has been `ok` for `SETTLE_S`, and, while
   available memory counts, once what is available less the tree's growth before its pause over
   `LEAD_S` is at least `hold_below`; then the next, `SETTLE_S` later.
 
@@ -41,17 +45,19 @@ In `watch` mode it does none of this: `would` says what it would do now (`hold`,
 the tree), and the events it would send carry `would: true`.
 
 **Which tree.** A tree is one of a session's (`leasehold.sessions.Branch`). First a
-**runaway**: the tree growing fastest over the last `WINDOW_S` seconds, when it grows by at
-least `RUNAWAY_MIN_GROWTH` a second and accounts for at least `RUNAWAY_SHARE` of the growth of
-all the sessions' trees; or a tree holding more than `RUNAWAY_OVER` times what its leases
-declared or learned. Then a **large** tree, holding `LARGE_SHARE` of the machine's memory or
-more, the largest first. Then the **newest**, by its root's start, across all sessions. A tree
-running a command again alone after the watchdog stopped it (`Work.alone`) comes last.
+runaway: a tree growing by at least `RUNAWAY_MIN_GROWTH` a second over each of the last two
+`WINDOW_S` windows, that either holds more than `RUNAWAY_OVER` times what its leases declared
+or learned, or grows by at least `RUNAWAY_SHARE` of the machine's fall in available memory.
+Then a large tree, holding `LARGE_SHARE` of the machine's memory or more, the largest first.
+Then the newest, by its root's start, across all sessions. A tree of a hook session that is not
+a tool's command (`Work.tool`), and a tree running a command again alone after the watchdog
+stopped it (`Work.alone`), come last.
 
 **Never chosen:** a tree under `min_size`; one that holds the agent process (a launcher the agent
 runs under); one made only of leasehold's own processes (`hold`, the shims, the hooks, the
 daemon); one whose command line matches a built-in or `[watchdog] protect` pattern (agents and
-MCP servers); one whose root started within `AGENT_START_S` of its agent (servers that start
+MCP servers, browsers and editors), tried against each of its processes; one whose root
+started within `AGENT_START_S` of its agent (servers that start
 with the session); and, unless `choose_discovered`, any tree of a session found by name, which
 never asked to join. leasehold's own processes in a tree (`spared`) are left out of its
 footprint, and left running when it is paused; a command that holds its own lease through the
@@ -76,9 +82,10 @@ from leasehold.machine import (
 
 #: The seconds over which a tree's growth is measured.
 WINDOW_S = 5.0
-#: A runaway grows by at least this many bytes a second ...
+#: A runaway grows by at least this many bytes a second over two windows in a row ...
 RUNAWAY_MIN_GROWTH = 20 << 20
-#: ... and by at least this share of all the sessions' trees' growth.
+#: ... and by at least this share of the machine's fall in available memory (or past
+#: `RUNAWAY_OVER`).
 RUNAWAY_SHARE = 0.5
 #: A tree holding more than this many times what its leases declared or learned is a runaway.
 #: Real builds and test runs repeat their peaks to within about 10%, so twice is far beyond.
@@ -98,9 +105,16 @@ COMMAND_CHARS = 200
 #: fallen by `FALLING` bytes since: pausing more while memory is flat pauses everything.
 STEP_S = 2.0
 FALLING = 50 << 20
-#: How long the level stays `critical` (or a paused runaway or large tree stays paused) before
-#: the watchdog stops a paused tree.
+#: How long a tree stays paused, and the level `critical`, before the watchdog stops it.
 KILL_AFTER_S = 5.0
+#: How long after a stop it checks that memory came back: a killed process frees its memory in
+#: well under a second.
+STOP_CHECK_S = 2.0
+#: A tree that runs again holds new work until its footprint has been flat this long.
+FLAT_S = 30.0
+#: Why new work waits once a stop freed too little.
+OUTSIDE = "memory is short outside leasehold's sessions"
+
 #: How long the level stays `ok` before a paused tree runs again, and between two resumes.
 SETTLE_S = 10.0
 #: A resumed tree is given room for this many seconds of the growth it had before its pause.
@@ -174,7 +188,15 @@ class Work:
     leasehold's own processes in it (`spared`) left out; `leasehold` is True when it has no
     other process. `expected` is what its leases declared or learned (None: nothing). `leases`
     are the leases its processes run under; `alone` is True when it runs a command again alone
-    after the watchdog stopped it."""
+    after the watchdog stopped it.
+
+    What acting on it touches: `members`, the (pid, fence) of each process it would pause or
+    stop; `spare`, the processes it never signals (leasehold's own, and the shells that wait
+    for them, so that `hold` lives to report the stop); and `scopes`, the kernel groups of its
+    leases, paused and stopped as a whole. `lines` are its processes' command lines, each
+    tried against the protect patterns. `tool` is False for a tree of a hook session that is
+    neither under a tool shell nor in a lease's scope (a server its agent started), which is
+    chosen only when nothing else is."""
 
     session: str
     source: str
@@ -191,6 +213,11 @@ class Work:
     expected: int | None = None
     leases: tuple[str, ...] = ()
     alone: bool = False
+    members: tuple[tuple[int, str | None], ...] = ()
+    spare: tuple[int, ...] = ()
+    scopes: tuple[str, ...] = ()
+    lines: tuple[str, ...] = ()
+    tool: bool = True
 
     @property
     def key(self) -> tuple[int, str | None]:
@@ -227,11 +254,14 @@ class Choice:
 @dataclass
 class Paused:
     """A tree the watchdog paused (`choice`), since `since`, and, once it runs again, since
-    when (`resumed`): it holds new work until it ends."""
+    when (`resumed`): it holds new work until it ends, or until it has settled (`flat_since`,
+    when its footprint last moved by `FALLING`; `footprint`, what it was then)."""
 
     choice: Choice
     since: float
     resumed: float | None = None
+    flat_since: float | None = None
+    footprint: int | None = None
 
     @property
     def key(self) -> tuple[int, str | None]:
@@ -241,7 +271,7 @@ class Paused:
 @dataclass(frozen=True)
 class Act:
     """What the watchdog decided to do now: `pause`, `resume` or `stop` the tree of `choice`,
-    with `why` in words (for a stop: `critical`, `runaway`, `large` or `max_pause`)."""
+    with `why` in words (for a stop: `critical`, `runaway` or `max_pause`)."""
 
     action: str
     choice: Choice
@@ -252,22 +282,39 @@ class Act:
         return self.choice.work
 
 
-def _rate(samples: list[tuple[float, int]]) -> float | None:
-    """Bytes a second from the oldest sample kept to the newest (None: under two, or no time
-    between them)."""
-    if len(samples) < 2 or samples[-1][0] <= samples[0][0]:
-        return None
-    (t0, v0), (t1, v1) = samples[0], samples[-1]
-    return (v1 - v0) / (t1 - t0)
+def _at_or_before(samples: list[tuple[float, int]], when: float) -> tuple[float, int] | None:
+    """The newest sample taken at or before `when`."""
+    found = None
+    for sample in samples:
+        if sample[0] > when:
+            break
+        found = sample
+    return found
+
+
+def _rates(samples: list[tuple[float, int]], now: float) -> tuple[float | None, float | None]:
+    """Bytes a second over the last `WINDOW_S`, and over the `WINDOW_S` before it (each None
+    where the samples do not reach back that far)."""
+    if not samples:
+        return None, None
+    last = samples[-1]
+    mid = _at_or_before(samples, now - WINDOW_S)
+    if mid is None or last[0] <= mid[0]:
+        return None, None
+    recent = (last[1] - mid[1]) / (last[0] - mid[0])
+    first = _at_or_before(samples, mid[0] - WINDOW_S)
+    if first is None or mid[0] <= first[0]:
+        return recent, None
+    return recent, (mid[1] - first[1]) / (mid[0] - first[0])
 
 
 def _keep(samples: list[tuple[float, int]], now: float, value: int) -> None:
-    """Add a sample, keeping the newest one at least `WINDOW_S` old as the window's start."""
+    """Add a sample, keeping two windows back (`_rates`)."""
     if samples and samples[-1][0] == now:
         samples[-1] = (now, value)
     else:
         samples.append((now, value))
-    while len(samples) > 2 and samples[1][0] <= now - WINDOW_S:
+    while len(samples) > 2 and samples[1][0] <= now - 2 * WINDOW_S - IDLE_S:
         del samples[0]
 
 
@@ -297,6 +344,8 @@ class Watchdog:
         self._protect = [re.compile(p) for p in (*PROTECT, *settings.protect)]
         self._work: list[Work] = []
         self._growth: dict[tuple[int, str | None], list[tuple[float, int]]] = {}
+        #: Available memory as read, two windows back: how fast the machine is falling.
+        self._available: list[tuple[float, int]] = []
         self._runaways: set[tuple[int, str | None]] = set()
         self._state = _State()
         #: What the last decision would have done: (action, tree key), or None.
@@ -308,11 +357,17 @@ class Watchdog:
         #: When the level last turned `critical` and `ok` (None: it is not at that level).
         self._critical_since: float | None = None
         self._ok_since: float | None = None
-        #: When the last tree was paused, with what was available then, and the last stopped.
-        self._last_pause: tuple[float, int] | None = None
+        #: When the last tree was paused or stopped, and the last stopped (this episode).
+        self._last_act: float | None = None
         self._last_stop: float | None = None
-        #: Whether new work was held at the last reading.
-        self._holding = False
+        #: After a stop: (when, available then, the tree's footprint), until it is seen whether
+        #: memory came back (`STOP_CHECK_S`).
+        self._check: tuple[float, int, int] | None = None
+        #: Whether the shortage is outside the sessions: a stop freed too little. Nothing more
+        #: is stopped or paused until the level is `ok` again.
+        self.outside = False
+        #: Why new work was held at the last reading (None: it was not).
+        self._holding: str | None = None
         self.stopped: deque[dict] = deque(maxlen=STOPPED_KEPT)
 
     # --- readings ----------------------------------------------------------------------------
@@ -321,23 +376,28 @@ class Watchdog:
         """The sessions' trees as just read, at `now`. The trees it paused that have ended
         since, which hold nothing any more."""
         self._work = list(trees)
-        seen = set()
+        seen = {}
         for w in trees:
-            seen.add(w.key)
+            seen[w.key] = w
             _keep(self._growth.setdefault(w.key, []), now, w.footprint)
-        for gone in set(self._growth) - seen:
+        for gone in set(self._growth) - set(seen):
             del self._growth[gone]
-        self._runaways &= seen
+        self._runaways &= set(seen)
         self._skip = set()
         ended = [p for k, p in self._paused.items() if k not in seen]
         for p in ended:
             del self._paused[p.key]
+        for p in self._paused.values():
+            fp = seen[p.key].footprint
+            if p.resumed is not None and (p.footprint is None or abs(fp - p.footprint) >= FALLING):
+                p.footprint, p.flat_since = fp, now
         return ended
 
     def observe(self, memory: Memory) -> list[dict]:
         """Judge the machine at `memory`: the events the decision gives. In watch mode they say
         what would be done (new heavy work would be held, a tree would now be paused), each with
-        `would` true; acting, that a tree is newly a runaway, and that new work is now held."""
+        `would` true; acting, that a tree is newly a runaway, and that new work is now held, or
+        held for another reason."""
         state = _State(now=memory.now)
         self._state = state
         if memory.how == "none" or memory.available is None:
@@ -350,19 +410,66 @@ class Watchdog:
         state.swap_open = memory.swap_open()
         state.stall_recent = memory.stall_recent
         state.level, state.reason = judge(memory, self.limits)
+        _keep(self._available, memory.now, memory.available)
         if state.level != "critical":
             self._critical_since = None
         elif self._critical_since is None:
             self._critical_since = memory.now
         if state.level != "ok":
             self._ok_since = None
-        elif self._ok_since is None:
-            self._ok_since = memory.now
+        else:
+            if self._ok_since is None:
+                self._ok_since = memory.now
+            self.outside, self._last_stop, self._check = False, None, None
+        self._settle_stop(state)
+        self._let_go(state)
         self._choose(state)
         return self._events(state)
 
+    def _settle_stop(self, s: _State) -> None:
+        """`STOP_CHECK_S` after a stop, whether it freed memory: if available memory did not
+        come back by half what the tree held, the shortage is outside the sessions."""
+        if self._check is None or s.available is None:
+            return
+        when, before, held = self._check
+        if s.now - when < STOP_CHECK_S:
+            return
+        self._check = None
+        if s.available - before < held // 2:
+            self.outside = True
+
+    def _let_go(self, s: _State) -> None:
+        """Stop holding new work for a tree that runs again once it has settled: its footprint
+        flat for `FLAT_S` while the level is `ok` with room for it, or `max_pause_s` after it
+        ran again, whichever comes first."""
+        for p in list(self._paused.values()):
+            if p.resumed is None:
+                continue
+            growth = _rates(self._growth.get(p.key, []), s.now)[0] or 0.0
+            room = (
+                not s.swap_open
+                or s.available is None
+                or s.available >= self.limits.hold_below + max(0.0, growth) * LEAD_S
+            )
+            settled = (
+                s.level == "ok"
+                and room
+                and p.flat_since is not None
+                and s.now - p.flat_since >= FLAT_S
+            )
+            if settled or s.now - p.resumed >= self.settings.max_pause_s:
+                del self._paused[p.key]
+
+    def _at(self, level: str | None, least: str) -> bool:
+        return level is not None and LEVELS.index(level) >= LEVELS.index(least)
+
     def _at_act(self, level: str | None) -> bool:
-        return level is not None and LEVELS.index(level) >= LEVELS.index(self.settings.act_at)
+        return self._at(level, self.settings.act_at)
+
+    def _falling(self, s: _State) -> bool:
+        """Whether available memory fell by `FALLING` over the last `STEP_S`."""
+        then = _at_or_before(self._available, s.now - STEP_S)
+        return then is not None and s.available is not None and s.available < then[1] - FALLING
 
     # --- choosing ----------------------------------------------------------------------------
 
@@ -374,8 +481,8 @@ class Watchdog:
             return "leasehold"
         if w.source == "auto" and not self.settings.choose_discovered:
             return "discovered"
-        line = w.command or w.name
-        if any(p.search(line) for p in self._protect):
+        lines = w.lines or (w.command or w.name,)
+        if any(p.search(line) for line in lines for p in self._protect):
             return "protected"
         if (
             w.started is not None
@@ -387,11 +494,25 @@ class Watchdog:
             return "small"
         return None
 
+    def _runaway(self, w: Work, fall: float | None) -> float | None:
+        """`w`'s growth when it runs away: growing by `RUNAWAY_MIN_GROWTH` a second over two
+        windows in a row, and either holding over `RUNAWAY_OVER` times what its leases expect or
+        growing by `RUNAWAY_SHARE` of the machine's fall in available memory. A tree growing
+        while something else takes the memory is not one."""
+        recent, earlier = _rates(self._growth.get(w.key, []), self._state.now)
+        if recent is None or earlier is None:
+            return None
+        if min(recent, earlier) < RUNAWAY_MIN_GROWTH:
+            return None
+        over = bool(w.expected) and w.footprint > RUNAWAY_OVER * (w.expected or 0)
+        share = fall is not None and fall > 0 and recent >= RUNAWAY_SHARE * fall
+        return recent if over or share else None
+
     def _choose(self, s: _State) -> None:
         if s.level == "ok":
             return
-        rates = {w.key: _rate(self._growth.get(w.key, [])) for w in self._work}
-        total = sum(max(0.0, r) for r in rates.values() if r is not None)
+        fall = _rates(self._available, s.now)[0]
+        fall = None if fall is None else -fall
         found: list[Work] = []
         for w in self._work:
             if w.key in self._paused or w.key in self._skip:
@@ -402,32 +523,29 @@ class Watchdog:
             else:
                 s.passed_over[why] = s.passed_over.get(why, 0) + 1
         s.candidates = len(found)
-        first = [w for w in found if not w.alone] or found
+        first = (
+            [w for w in found if not w.alone and w.tool]
+            or [w for w in found if not w.alone]
+            or found
+        )
 
-        def growth(w: Work) -> float:
-            return rates.get(w.key) or 0.0
+        def growth(w: Work) -> float | None:
+            return _rates(self._growth.get(w.key, []), s.now)[0]
 
-        runaways = [w for w in first if w.expected and w.footprint > RUNAWAY_OVER * w.expected]
-        fastest = max(first, key=growth, default=None)
-        if (
-            fastest is not None
-            and growth(fastest) >= RUNAWAY_MIN_GROWTH
-            and growth(fastest) >= RUNAWAY_SHARE * total
-        ):
-            runaways.append(fastest)
+        runaways = [(r, w) for w in first if (r := self._runaway(w, fall)) is not None]
         large = [w for w in first if w.footprint >= self.limits.large]
         if runaways:
-            w = max(runaways, key=lambda w: (growth(w), w.footprint))
-            s.victim = Choice(w, "runaway", rates.get(w.key))
+            _, w = max(runaways, key=lambda rw: (rw[0], rw[1].footprint))
+            s.victim = Choice(w, "runaway", growth(w))
         elif large:
             w = max(large, key=lambda w: w.footprint)
-            s.victim = Choice(w, "large", rates.get(w.key))
+            s.victim = Choice(w, "large", growth(w))
         elif first:
             w = max(first, key=lambda w: (w.started or 0.0, w.pid))
-            s.victim = Choice(w, "newest", rates.get(w.key))
+            s.victim = Choice(w, "newest", growth(w))
         if not self._at_act(s.level):
             return
-        if s.victim is not None:
+        if s.victim is not None and not self.outside:
             s.would = {"action": "pause"} | s.victim.public()
         else:
             s.would = {"action": "hold"}
@@ -440,9 +558,15 @@ class Watchdog:
             out.append({"type": "runaway", "would": not self.acting, "level": s.level} | v.public())
         if self.acting:
             why = self.held()
-            if why is not None and not self._holding:
-                out.append({"type": "held", "would": False, "level": s.level, "reason": why})
-            self._holding = why is not None
+            began = why is not None and (
+                self._holding is None or (self.outside and OUTSIDE not in self._holding)
+            )
+            if began:
+                out.append(
+                    {"type": "held", "would": False, "level": s.level, "reason": why}
+                    | {"outside": self.outside}
+                )
+            self._holding = why
             return out
         if s.would is None:
             self._last = None
@@ -465,7 +589,13 @@ class Watchdog:
     def decide(self) -> list[Act]:
         """What to do now, at the last reading: nothing in watch mode, or with no level. The
         caller does each through the host and reports it (`paused`, `resumed`, `stopped_tree`,
-        or `failed`)."""
+        or `failed`).
+
+        A tree is stopped only `KILL_AFTER_S` after its pause, and one at a time: after a stop,
+        nothing more is stopped until `STOP_CHECK_S` shows whether memory came back, and nothing
+        more is paused unless available memory is still falling. Once a stop freed too little,
+        the shortage is outside the sessions (`outside`): for the rest of the episode new work
+        is held, and nothing is paused or stopped."""
         s = self._state
         if not self.acting or s.level is None:
             return []
@@ -473,27 +603,24 @@ class Watchdog:
         acts: list[Act] = []
         paused = [p for p in self._paused.values() if p.resumed is None]
         newest_first = sorted(paused, key=lambda p: -p.since)
-        for p in newest_first:
-            if p.choice.why in ("runaway", "large") and now - p.since >= KILL_AFTER_S:
-                acts.append(Act("stop", p.choice, p.choice.why))
-            elif now - p.since >= self.settings.max_pause_s:
-                acts.append(Act("stop", p.choice, "max_pause"))
-        chosen = {a.work.key for a in acts}
-        if s.level == "critical" and self._critical_since is not None:
-            start = max(self._critical_since, self._last_stop or self._critical_since)
-            left = [p for p in newest_first if p.key not in chosen]
-            if now - start >= KILL_AFTER_S and left:
-                first = next((p for p in left if p.choice.why == "runaway"), left[0])
-                acts.append(Act("stop", first.choice, "critical"))
-        if self._at_act(s.level) and s.victim is not None:
-            last = self._last_pause
-            falling = (
-                last is not None
-                and now - last[0] >= STEP_S
-                and s.available is not None
-                and s.available < last[1] - FALLING
-            )
-            if not paused or falling:
+        ripe = [p for p in newest_first if now - p.since >= KILL_AFTER_S]
+        may_stop = not self.outside and self._check is None
+        if may_stop and ripe:
+            runaway = next((p for p in ripe if p.choice.why == "runaway"), None)
+            longest = max(ripe, key=lambda p: now - p.since)
+            start = self._critical_since
+            if start is not None and self._last_stop is not None:
+                start = max(start, self._last_stop)
+            if runaway is not None and self._at(s.level, "warn"):
+                acts.append(Act("stop", runaway.choice, "runaway"))
+            elif s.level == "critical" and start is not None and now - start >= KILL_AFTER_S:
+                acts.append(Act("stop", ripe[0].choice, "critical"))
+            elif now - longest.since >= self.settings.max_pause_s:
+                acts.append(Act("stop", longest.choice, "max_pause"))
+        if self._at_act(s.level) and s.victim is not None and not self.outside and not acts:
+            spaced = self._last_act is None or now - self._last_act >= STEP_S
+            first = not paused and self._last_stop is None
+            if first or (spaced and self._check is None and self._falling(s)):
                 acts.append(Act("pause", s.victim, s.victim.why))
         if s.level == "ok" and paused and self._ok_since is not None:
             oldest = min(paused, key=lambda p: p.since)
@@ -511,24 +638,28 @@ class Watchdog:
         """`act`'s tree is paused now."""
         s = self._state
         self._paused[act.work.key] = Paused(act.choice, s.now)
-        self._last_pause = (s.now, s.available or 0)
+        self._last_act = s.now
 
     def resumed(self, act: Act) -> Paused:
-        """`act`'s tree runs again; it holds new work until it ends."""
+        """`act`'s tree runs again; it holds new work until it ends or settles."""
         p = self._paused[act.work.key]
-        p.resumed = self._state.now
-        self._ok_since = self._state.now
+        now = self._state.now
+        p.resumed = p.flat_since = now
+        p.footprint = act.work.footprint
+        self._ok_since = now
         return p
 
     def stopped_tree(self, act: Act) -> Paused | None:
         """`act`'s tree was stopped: no longer paused (its pause, if it had one), and not chosen
         again."""
-        self._last_stop = self._state.now
+        s = self._state
+        self._last_stop = self._last_act = s.now
+        self._check = (s.now, s.available or 0, act.work.footprint)
         self._skip.add(act.work.key)
         p = self._paused.pop(act.work.key, None)
         record = act.choice.public() | {"stopped_for": act.why}
         if p is not None:
-            record["paused_s"] = round(self._state.now - p.since, 1)
+            record["paused_s"] = round(s.now - p.since, 1)
         self.stopped.append(record)
         return p
 
@@ -540,19 +671,21 @@ class Watchdog:
         """Why new heavy work waits now, in words; None while it does not, and in watch mode."""
         if not self.acting:
             return None
+        s = self._state
+        if self.outside:
+            return f"{OUTSIDE}: {s.reason}"
         waiting = [p for p in self._paused.values() if p.resumed is None]
         if waiting:
             return f"{_tree(waiting[-1].choice.work)} is paused until memory frees"
         if self._paused:
             p = list(self._paused.values())[-1]
-            return f"{_tree(p.choice.work)} was paused, and new work waits until it ends"
-        s = self._state
+            return f"{_tree(p.choice.work)} was paused, and new work waits until it settles"
         if self._at_act(s.level):
             return f"memory is short: {s.reason}"
         return None
 
     def paused_trees(self) -> list[Paused]:
-        """The trees paused or resumed and not ended, oldest pause first."""
+        """The trees paused or resumed and not settled or ended, oldest pause first."""
         return list(self._paused.values())
 
     # --- reporting ---------------------------------------------------------------------------
@@ -602,6 +735,7 @@ class Watchdog:
             "victim": None if s.victim is None else s.victim.public(),
             "would": s.would,
             "held": self.held(),
+            "outside": self.outside,
             "paused": paused,
             "stopped": list(self.stopped),
         }

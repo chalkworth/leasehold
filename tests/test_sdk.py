@@ -15,6 +15,7 @@ from dataclasses import replace
 
 import pytest
 from support import (
+    CHILD_ENV,
     FACTS,
     NO_SCOPE,
     Clock,
@@ -28,8 +29,10 @@ from support import (
 
 import leasehold
 from leasehold import claude_code, host
+from leasehold import watchdog as watchdog_module
 from leasehold.agent import AcquireRequest, MachineAgent
 from leasehold.client import ApiError, Client
+from leasehold.host.linux import Linux
 from leasehold.host.posix import Posix
 from leasehold.server import Daemon
 
@@ -351,13 +354,20 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
             (101, 100, 60, "make -j8", [1, 1, 1, 1]),
             (102, 100, 120, "python3 -m pytest -n 4", [1, 1, 1, 1]),
         ], (102, "newest", [])),
-        ("a runaway by its own growth, before a newer tree", [
-            (8, calm, 0, "ok"), (6, calm, 0, "ok"), (4, calm, 0, "ok"),
+        ("a runaway by its own growth, over two windows, before a newer tree", [
+            (8, calm, 0, "ok"), (6.5, calm, 0, "ok"), (5, calm, 0, "ok"), (3.5, calm, 0, "ok"),
             (1.5, calm, 0, "critical"),
         ], [
-            (101, 100, 60, "cargo test", [1, 2, 3, 4]),
-            (102, 100, 120, "pytest -n 4", [1, 1, 1, 1]),
+            (101, 100, 60, "cargo test", [1, 2, 3, 4, 5]),
+            (102, 100, 120, "pytest -n 4", [1, 1, 1, 1, 1]),
         ], (101, "runaway", [])),
+        ("no runaway that grows slower than memory falls elsewhere", [
+            (12, calm, 0, "ok"), (10, calm, 0, "ok"), (7.5, calm, 0, "ok"), (5, calm, 0, "ok"),
+            (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "pytest -n 4", [1, 1.1, 1.2, 1.3, 1.4]),
+            (102, 100, 120, "make -j8", [1, 1, 1, 1, 1]),
+        ], (102, "newest", [])),
         ("a tree over a quarter of memory, before a newer tree", [
             (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
         ], [
@@ -380,12 +390,14 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
         ("never a protected tree", [
             (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
         ], [
-            (101, 100, 60, "pytest -n 4", [1, 1]),
+            (101, 100, 60, "sh -c pytest -n 4 >/tmp/code", [1, 1]),  # a path is no program
             (102, 100, 120, "node my-dev-server.js", [2, 2]),  # [watchdog] protect
             (103, 100, 5, "python -m some_lsp", [2, 2]),  # started with its agent
             (104, 100, 90, "npx -y @modelcontextprotocol/server-x", [2, 2]),
             (105, 100, 100, "sleep 60", [0.1, 0.1]),  # under min_size
             (108, 100, 110, "leasehold mcp", [0.4, 0.4]),  # only leasehold's own
+            (109, 100, 115, "sh -c open-docs", [0.1, 0.1]),
+            (110, 109, 116, "/usr/bin/firefox --new-tab x", [2, 2]),  # any member counts
         ], (101, "newest", [])),
         ("never a session found by name", [
             (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
@@ -451,20 +463,30 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
 
 
 def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, monkeypatch):
-    # Acting: at critical it pauses the newest tree, then after 5 s still critical stops it,
-    # then pauses the next; once memory has been fine for a while the oldest paused runs again,
-    # and new work waits until it ends. Each step: (available GiB, trees alive, what the host
-    # was told to do, what is paused, why new work waits).
+    # Acting: at critical it pauses the newest tree, and stops it once it has been paused, and
+    # the level critical, for 5 s. The next is paused only while memory falls again. Once memory
+    # has been fine for a while the oldest paused runs again, and new work waits until it has
+    # been flat for 30 s. A stop that frees nothing means the shortage is elsewhere: nothing
+    # more is paused or stopped. Each step: (available GiB, trees alive, what the host was told
+    # to do, what is paused, why new work waits).
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    paused_now, settling = "is paused until memory frees", "new work waits until it settles"
     steps = [
         (6, [101, 102], [], [], None),
-        (1.5, [101, 102], [("pause", 102)], [102], "is paused until memory frees"),
-        (1.5, [101, 102], [], [102], "is paused until memory frees"),
+        (1.5, [101, 102], [("pause", 102)], [102], paused_now),
+        (1.5, [101, 102], [], [102], paused_now),
         (1.5, [101, 102], [("kill", 102)], [], "memory is short"),
-        (1.5, [101], [("pause", 101)], [101], "is paused until memory frees"),
-        *[(10, [101], [], [101], "is paused until memory frees")] * 4,
-        (10, [101], [("resume", 101)], [101], "new work waits until it ends"),
-        (10, [], [], [], None),
+        (2.5, [101], [], [], None),  # the stop freed memory
+        (1.5, [101], [("pause", 101)], [101], paused_now),  # falling again
+        *[(10, [101], [], [101], paused_now)] * 4,
+        (10, [101], [("resume", 101)], [101], settling),
+        *[(10, [101], [], [101], settling)] * 11,
+        (10, [101], [], [], None),  # flat for 30 s
+        (1.5, [101, 103], [("pause", 103)], [103], paused_now),
+        (1.5, [101, 103], [], [103], paused_now),
+        (1.5, [101, 103], [("kill", 103)], [], "memory is short"),
+        (1.5, [101], [], [], "outside leasehold's sessions"),  # the stop freed nothing
+        (1.5, [101], [], [], "outside leasehold's sessions"),
     ]  # fmt: skip
     fake, mono = FakeHost(), Clock(0.0)
     fake.procs[100] = host.Proc(100, "100", "fake-agent", parent=1, started=1000.0, anon=GIB)
@@ -486,6 +508,7 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         trees = {
             101: ("make -j8", 60, None),
             102: ("python3 -m pytest -n 4", 120, lid),
+            103: ("cargo build", 130, None),
         }
         for n, (free, alive, told, paused, why) in enumerate(steps):
             for pid in set(fake.procs) - {100} - set(alive):
@@ -524,9 +547,10 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
                 client.release(waiting["lease_id"])
             if n == 3:
                 stopped = client.renew(lid)["stopped"]
-                assert (stopped["why"], stopped["runaway"], stopped["rerun"]) == (
+                assert (stopped["why"], stopped["runaway"], stopped["rerun"], stopped["test"]) == (
                     "critical",
                     False,
+                    True,
                     True,
                 )
                 (record,) = watchdog["stopped"]
@@ -534,8 +558,16 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         events = [(e["type"], e.get("pid")) for e in client.events()["events"]]
         assert [e for e in events if e[0] in ("paused", "resumed", "stopped")] == [
             ("paused", 102), ("stopped", 102), ("paused", 101), ("resumed", 101),
+            ("paused", 103), ("stopped", 103),
         ]  # fmt: skip
-        # The rule's next command runs alone: it waits while another lease is held.
+        reply = claude_code.Reply()
+        claude_code.tell({"session_id": "mine"}, os.environ, reply, "post")
+        assert "outside leasehold's sessions" in reply.output["systemMessage"]
+        # Once memory is fine, the rule's next command runs alone: it waits while another lease
+        # is held.
+        fake.available = 10 * GIB
+        mono.now += 2.5
+        agent.watch_memory()
         again = client.acquire(kind="work", weight=1, ttl_s=60, wait_s=0, **pytest)
         assert again["status"] == "queued"
         assert again["blocked"].startswith("it runs alone"), again["blocked"]
@@ -543,4 +575,62 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         agent.tick()
         assert again["lease_id"] in held(daemon.path)
     finally:
+        daemon.stop()
+    # A real tree, as an agent's Bash tool runs one: `hold` under `sh -c`, its command in a scope
+    # where commands get one, else not. The watchdog pauses and stops the command, never `hold`
+    # or the shells it runs under, so `hold` lives to report the stop.
+    monkeypatch.setattr(watchdog_module, "AGENT_START_S", 0.0)
+    monkeypatch.setattr(watchdog_module, "KILL_AFTER_S", 1.0)
+    for contain in ["off"] if NO_SCOPE else ["off", "auto"]:
+        _stop_a_real_hold(sock_dir, tmp_path / f"real-{contain}", contain)
+
+
+class _Short(Linux):
+    """This machine, with its memory read as short once `low` is set."""
+
+    low = False
+
+    def pressure(self) -> host.Pressure:
+        return host.Pressure(
+            "exact", available=(1 if self.low else 8) * GIB, total=16 * GIB, swap_total=0,
+            swap_used=0, stall_full_recent=0.0,
+        )  # fmt: skip
+
+
+def _stop_a_real_hold(sock_dir, where, contain: str) -> None:
+    real = _Short()
+    where.mkdir()
+    config = machine_config(
+        where,
+        socket=str(sock_dir / "r.sock"),
+        watchdog={"mode": "on", "agents": [], "min_size": "1k"},
+    )
+    daemon = Daemon(
+        config, MachineAgent(config, facts=FACTS, load=FakeLoad(), platform=lambda: real)
+    )
+    daemon.start()
+    hold = f"{sys.executable} -m leasehold --socket {daemon.path} hold -- sleep 300"
+    tool = f"sh -c '{hold} 2>{where}/said; echo $? >{where}/code'; sleep 60"
+    env = {**CHILD_ENV} | ({"LEASEHOLD_CONTAIN": "off"} if contain == "off" else {})
+    shell = subprocess.Popen(["sh", "-c", tool], env=env, start_new_session=True)
+    code = where / "code"
+    try:
+        client = Client(daemon.path)
+        client.register_session("real", pid=shell.pid, agent="sh")
+        until(
+            lambda: any(
+                (s["processes"] or 0) >= 3 for s in client.status()["watchdog"]["sessions"]
+            ),
+            timeout=20,
+        )
+        real.low = True
+        until(code.exists, timeout=30)
+        assert code.read_text().strip() == "137", contain
+        said = (where / "said").read_text()
+        assert "leasehold's watchdog" in said, said
+        assert shell.poll() is None, contain  # the agent's shell runs on
+        (stopped,) = client.status()["watchdog"]["stopped"]
+        assert stopped["stopped_for"] == "critical"
+    finally:
+        os.killpg(shell.pid, signal.SIGKILL)
         daemon.stop()

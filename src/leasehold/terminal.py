@@ -72,15 +72,15 @@ def _stopped(pid: int) -> bool:
 @contextlib.contextmanager
 def follow_stops(pid: int) -> Iterator[None]:
     """While inside, when the command `pid` (a group leader) stops for the terminal (job
-    control: SIGTSTP, SIGTTIN or SIGTTOU), take the terminal back and stop this process; once
-    continued, continue the command, with the terminal if this process is in the foreground
-    again."""
+    control: SIGTSTP, SIGTTIN or SIGTTOU), take the terminal back and stop this process with
+    SIGTSTP, which a `hold` this one runs under follows in turn; once continued, continue the
+    command, with the terminal if this process is in the foreground again."""
 
     def on_child(_sig, _frame) -> None:
         if not _stopped(pid):
             return
         take_back(pid)
-        os.kill(os.getpid(), signal.SIGSTOP)
+        os.kill(os.getpid(), signal.SIGTSTP)
         if owned():
             hand_to(pid)
         else:

@@ -465,11 +465,22 @@ def post(event: Mapping, client: Client, *, env: Mapping[str, str]) -> Reply:
     noted = hooknotes.noted(directory, lid)
     hooknotes.stop(directory, lid)
     collected = attach.collect(directory, lid)
+    stopped = None
+    with contextlib.suppress(Unavailable, ApiError):
+        # Whether the daemon's watchdog stopped it: that verdict reaches the agent here, once.
+        renewal = client.renew(lid)
+        stopped = renewal.get("stopped") if renewal.get("status") == "ok" else None
     with contextlib.suppress(Unavailable, ApiError):
         # One never taken, or already gone, is no error.
         client.release(lid, _outcome(event, collected))
-    found = None if noted is None else _memory(event, *noted, collected=collected, env=env)
     program = noted[0] if noted else "the command"
+    if stopped is not None:
+        found = verdict.describe(
+            host.Ending("leasehold", "certain", how="exact"), program,
+            status=exit_code(event) or 137, watchdog=stopped,
+        )  # fmt: skip
+    else:
+        found = None if noted is None else _memory(event, *noted, collected=collected, env=env)
     said = []
     if collected is not None and collected.attached is None:
         reply.log.append(f"{program} was not contained: {collected.reason}")
