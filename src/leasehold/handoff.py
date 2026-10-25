@@ -16,6 +16,10 @@ when the lease is released, revoked or unknown to the daemon, when `--watch-pid`
 gone (pid *and* birth time, so a reused pid does not count), or after `--max-hold` seconds
 whatever happens. Killing the renewer ends the lease the same way. Without `--keep`, a lease
 lives one TTL unless something else renews it.
+
+`keep --attach` is the renewer of a lease an agent's hook offered to the command's shell
+(`leasehold.attach`): it also adopts that shell by scan when it does not attach itself, measures
+the lease's scope, and when stopped by SIGTERM writes what the scope used for the hook's `post`.
 """
 
 from __future__ import annotations
@@ -23,11 +27,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 
+from leasehold import attach
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
 from leasehold.hold import wait_for_grant
@@ -87,12 +93,16 @@ def keeper_argv(
     ttl_s: float,
     max_hold_s: float,
     watch_pid: int | None,
+    attach: bool = False,
 ) -> list[str]:
-    """The `keep` command `acquire --keep` starts, with this interpreter."""
+    """The `keep` command `acquire --keep` starts, with this interpreter; with `attach`, the
+    renewer of a lease offered to an agent's command (`keep --attach`)."""
     argv = [sys.executable, "-m", "leasehold", "--socket", socket, "keep", lease_id]
     argv += ["--ttl", f"{ttl_s:g}", "--max-hold", f"{max_hold_s:g}"]
     if watch_pid is not None:
         argv += ["--watch-pid", str(watch_pid)]
+    if attach:
+        argv.append("--attach")
     return argv
 
 
@@ -193,10 +203,33 @@ def acquire_main(client: Client, socket: str, args) -> int:
     return 0
 
 
+class _Stopped(Exception):
+    pass
+
+
+def _stopped(_sig, _frame) -> None:
+    raise _Stopped
+
+
 def keep_main(client: Client, args) -> int:
-    reason = keep(
-        client, args.lease_id, ttl_s=args.ttl, max_hold_s=args.max_hold, watch_pid=args.watch_pid
-    )
+    watcher = None
+    if getattr(args, "attach", False):
+        watcher = attach.Watcher(args.lease_id, os.environ, args.watch_pid)
+        signal.signal(signal.SIGTERM, _stopped)
+    try:
+        reason = keep(
+            client,
+            args.lease_id,
+            ttl_s=args.ttl,
+            max_hold_s=args.max_hold,
+            watch_pid=args.watch_pid,
+        )
+    except _Stopped:
+        reason = "told to stop"
+    finally:
+        if watcher is not None:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            watcher.finish()
     with contextlib.suppress(OSError):
         _say(f"stopped renewing {args.lease_id} (pid {os.getpid()}): {reason}")
     return 0

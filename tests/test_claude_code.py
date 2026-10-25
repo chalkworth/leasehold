@@ -1,14 +1,19 @@
 """The Claude Code hook's contract with the agent (`leasehold.claude_code`): what its JSON
 output tells the agent and the person when a leased Bash command ends, against a real daemon,
-and what the built-in rules weigh the commands it sees."""
+where the command runs and what it is measured to use, and what the built-in rules weigh the
+commands it sees."""
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 
-from leasehold import busy, claude_code, commands
+from leasehold import busy, claude_code, commands, contain
 from leasehold.client import Client
 from leasehold.commands import CommandSettings
 
@@ -134,3 +139,84 @@ def test_what_a_command_line_weighs():
     settings = CommandSettings()
     found = {line: commands.match(settings, line) for line in WEIGHTS}
     assert {line: m and m.rule.weight for line, m in found.items()} == WEIGHTS
+
+
+#: A worker that the OOM killer ends: pytest goes on, and exits 1.
+_WORKER = (
+    f"{sys.executable} -c 'import subprocess, sys; "
+    'subprocess.run([sys.executable, "-c", "b = bytearray(512 << 20)"])\'; exit 1'
+)
+#: case: (what the `pytest` the agent runs does, the memory limit on the scope Claude Code
+#: runs the command's shell in, or on the slice the lease's scope goes in (None: none), whether
+#: the shell is moved into the lease's scope, and the end of what the agent is told after it
+#: ends; None: nothing).
+ATTACH = {
+    "in a login session": ("exec sleep 1.2", None, True, None),
+    "under Claude Code's memory limit": ("exec sleep 0.2", ("scope", "1G"), False, None),
+    "a worker killed under a limit above it": (
+        _WORKER,
+        ("slice", "64M"),
+        True,
+        "when the memory limit above it (64 MiB) ran out, and pytest exited 1. This is not a "
+        "test failure. Run it with fewer workers, or raise that limit.",
+    ),
+}
+
+
+@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+@pytest.mark.parametrize(("body", "limit", "moved", "told"), ATTACH.values(), ids=ATTACH.keys())
+def test_a_leased_command_runs_in_its_lease_scope(
+    daemon, tmp_path, monkeypatch, body, limit, moved, told
+):
+    # Claude Code's part is played here: the session's env file is run in the command's shell,
+    # before `eval` of the command.
+    real = Path(os.environ["XDG_RUNTIME_DIR"])
+    (tmp_path / "systemd").symlink_to(real / "systemd")  # the user manager, for the probe
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))  # the notes, for the renewer too
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "pytest").write_text(f"#!/bin/sh\ncat /proc/self/cgroup\n{body}\n")
+    (bin_ / "pytest").chmod(0o755)
+    slice_ = contain.session_slice("attach", os.urandom(3).hex())
+    if limit is not None and limit[0] == "slice":
+        props = [f"MemoryMax={limit[1]}", "MemorySwapMax=0"]
+        subprocess.run(["systemctl", "--user", "set-property", "--runtime", slice_, *props])
+        monkeypatch.setenv(contain.ENV_SLICE, slice_)
+    env = dict(os.environ, HOME=str(tmp_path), CLAUDE_ENV_FILE=str(tmp_path / "env.sh"))
+    claude_code.start({"session_id": "s1"}, env)
+    client = Client(daemon.path)
+    event = {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_3",
+        "session_id": "s1",
+        "tool_input": {"command": "pytest -q"},
+    }
+    claude_code.pre(event, client, env=env, watch_pid=os.getpid())
+    script = (tmp_path / "env.sh").read_text() + ": && eval 'pytest -q' < /dev/null"
+    shell = ["bash", "-c", script]
+    if limit is not None and limit[0] == "scope":
+        outer = f"lh-cc-{os.urandom(3).hex()}.scope"
+        shell = ["systemd-run", "--user", "--scope", "--quiet", f"--unit={outer}"]
+        shell += ["-p", f"MemoryMax={limit[1]}", "bash", "-c", script]
+    try:
+        ran = subprocess.run(
+            shell, env=dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}"),
+            capture_output=True, text=True, timeout=60, check=False,
+        )  # fmt: skip
+        hook = "PostToolUse" if ran.returncode == 0 else "PostToolUseFailure"
+        ended = event | {"hook_event_name": hook, "error": f"Exit code {ran.returncode}\n"}
+        reply = claude_code.post(ended, client, env=env)
+    finally:
+        subprocess.run(["systemctl", "--user", "stop", slice_], check=False)
+    assert ran.stdout.splitlines()[0].endswith("/lease-cc.toolu_3.scope") == moved
+    outcomes = client.outcomes()["outcomes"]
+    assert bool(outcomes) == moved
+    if moved:
+        assert outcomes[0]["peak_bytes"] > 0
+        assert outcomes[0]["exit_status"] == ran.returncode
+    context = (reply.output or {}).get("hookSpecificOutput", {}).get("additionalContext")
+    if told is None:
+        assert context is None
+    else:
+        assert context.startswith("leasehold: the kernel's OOM killer ended a process of pytest")
+        assert told in context

@@ -213,14 +213,17 @@ def lease_unit(lease_id: str) -> str:
     return f"lease-{unit_part(lease_id)}.scope"
 
 
-def lease_argv(lease_id: str, env: Mapping[str, str] | None = None, **sizes) -> list[str]:
-    """`scope_argv` for a lease's command: `lease_unit`, in the slice `leasehold run` named in
-    `LEASEHOLD_SLICE`, else in `leasehold.slice`."""
+def lease_slice(env: Mapping[str, str] | None = None) -> str:
+    """The slice a lease's scope goes in: the one `leasehold run` named in `LEASEHOLD_SLICE`,
+    else `leasehold.slice`."""
     env = os.environ if env is None else env
     slice_ = env.get(ENV_SLICE) or ""
-    if not is_session_slice(slice_):
-        slice_ = ROOT_SLICE
-    return scope_argv(lease_unit(lease_id), slice_, **sizes)
+    return slice_ if is_session_slice(slice_) else ROOT_SLICE
+
+
+def lease_argv(lease_id: str, env: Mapping[str, str] | None = None, **sizes) -> list[str]:
+    """`scope_argv` for a lease's command: `lease_unit`, in `lease_slice`."""
+    return scope_argv(lease_unit(lease_id), lease_slice(env), **sizes)
 
 
 def update_scope(
@@ -238,6 +241,76 @@ def update_scope(
     if done.returncode != 0:
         return f"cannot resize {unit}: {done.stderr.strip() or f'exit {done.returncode}'}"
     return None
+
+
+#: How `adopt` sends each property `scope_properties` and a cap give over D-Bus: its name
+#: there, its type, and its value there from the `systemctl` one.
+_DBUS = {
+    "CPUWeight": ("CPUWeight", "t", int),
+    "CPUQuota": ("CPUQuotaPerSecUSec", "t", lambda v: int(v.rstrip("%")) * 10_000),
+    "MemoryHigh": ("MemoryHigh", "t", int),
+    "MemoryMax": ("MemoryMax", "t", int),
+    "MemorySwapMax": ("MemorySwapMax", "t", int),
+}
+_MANAGER = ["org.freedesktop.systemd1", "/org/freedesktop/systemd1"]
+_MANAGER += ["org.freedesktop.systemd1.Manager"]
+
+
+def _busctl(*args: str) -> subprocess.CompletedProcess:
+    argv = ["busctl", "--user", "call", *_MANAGER, *args]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
+
+
+def adopt(
+    pids: Sequence[int],
+    unit: str,
+    slice_: str,
+    props: Sequence[str] = (),
+    *,
+    oom_continue: bool = True,
+    wait_s: float = 2.0,
+    proc: Path = Path("/proc"),
+) -> str | None:
+    """Move the running processes `pids` into a new scope `unit` of `slice_` with the unit
+    properties `props` (as `scope_properties` and `leasehold.host.cap_properties` give them),
+    or into `unit` as it is when it exists already. This is what `systemd-run --scope` asks of
+    the user manager for its own pid (`StartTransientUnit` with `PIDs`), asked for processes
+    that are already running; the user manager has the system manager move a process out of a
+    login session's scope. With `oom_continue`, an OOM kill of one process in the scope leaves
+    the others running (`OOMPolicy=continue`, where systemd knows it), so that the command
+    ends as it would have outside it. Why the processes could not be moved, or None once each
+    of them that still runs is seen in the scope, or `wait_s` has passed."""
+    if shutil.which("busctl") is None:
+        return "busctl is not installed"
+    pids = [int(p) for p in pids]
+    listed = ["au", str(len(pids)), *map(str, pids)]
+    existing = _busctl("GetUnit", "s", unit).returncode == 0
+    if existing:
+        done = _busctl("AttachProcessesToUnit", "ssau", unit, "", *listed[1:])
+    else:
+        sent = [("PIDs", *listed), ("Slice", "s", slice_), ("Description", "s", unit)]
+        for prop in props:
+            name, _, value = prop.partition("=")
+            dbus, kind, convert = _DBUS[name]
+            sent.append((dbus, kind, str(convert(value))))
+        oom = [("OOMPolicy", "s", "continue")] if oom_continue else []
+        for extra in (oom, []) if oom else ([],):
+            flat = [word for item in [*sent, *extra] for word in item]
+            done = _busctl(
+                "StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail",
+                str(len(sent) + len(extra)), *flat, "0",
+            )  # fmt: skip
+            if done.returncode == 0 or "OOMPolicy" not in done.stderr:
+                break  # a systemd from before scopes had an OOMPolicy is asked again without
+    if done.returncode != 0:
+        return f"cannot move pids into {unit}: {done.stderr.strip() or done.returncode}"
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        homes = [cgroup.own_cgroup(proc, str(pid)) for pid in pids]
+        if all(home is None or home.endswith("/" + unit) for home in homes):
+            return None
+        time.sleep(0.005)
+    return f"{unit} was made, but its processes were not seen in it within {wait_s:g}s"
 
 
 #: The properties that take a scope's lease limits off: the weight of one slot, and no CPU or

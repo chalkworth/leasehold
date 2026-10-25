@@ -88,6 +88,7 @@ source_modules =
     leasehold.host
     leasehold.verdict
     leasehold.toolwait
+    leasehold.attach
 forbidden_modules =
     leasehold.admission
     leasehold.ledger

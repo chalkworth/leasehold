@@ -156,9 +156,32 @@ here.
   runs next to another agent's full suite.
 - Built-in rules for `just test`, `just build` and `just check`, and for test tools run
   through a package manager (`pnpm vitest`, `yarn jest`).
+- The Claude Code plugin runs each leased Bash command in its lease's scope. Its
+  `SessionStart` hook, `leasehold hook claude-code start` (new), adds one line to the
+  session's `CLAUDE_ENV_FILE`. Claude Code runs that line in each command's shell before the
+  command, and for a command with a lease it moves the shell into `lease-cc.<id>.scope`. The
+  command is then measured and its outcome recorded, a rule's `memory` and `memory_max` apply
+  to it, and the memory verdict is certain when its scope counted the kill. That includes a
+  command that goes on after one of its processes is killed, such as pytest exiting 1 after
+  an xdist worker died. A command with no lease pays for one directory test (about 0.05 ms);
+  a leased one, about 0.2 s before it starts. A shell under a `memory.max` someone else set
+  (Claude Code's `CLAUDE_CODE_TOOL_MEMORY_LIMIT` cgroup) is never moved. On macOS no line is
+  added, and a leased command is only counted.
+- `leasehold keep --attach`: the renewer of a lease offered to an agent's command. When no
+  shell claims the lease, it finds the command's shell among the agent's descendants and moves
+  it into the scope. A command moved this way gets the verdict and the cap, but its outcome is
+  not recorded, since what it used before the move was not counted.
+- `leasehold.attach`, the same mechanism for other agent harnesses: `offer` a lease from a
+  pre-command hook, source the lines `env_lines` gives in the command's shell, and `collect`
+  in the post-command hook. `python -m leasehold.attach PID` is what the lines run.
+- `leasehold.host.adopt` and `leasehold.host.adoption`: put running processes in a tree of
+  their own sized to a lease (a systemd user scope on Linux), and say whether that can be done
+  here. The fallback host, macOS included, adopts nothing and says why.
 
 ### Changed
 
+- The Claude Code plugin's `hooks/prefilter.sh start` now also runs the Python hook once per
+  session, to add the attach line to `CLAUDE_ENV_FILE`.
 - A command whose caller runs under a `memory.max` that its scope would not be under (Claude
   Code's `CLAUDE_CODE_TOOL_MEMORY_LIMIT` group, or the scope of a capped command that runs
   `hold` itself) is no longer moved into a scope of its own. It stays under that limit, keeps

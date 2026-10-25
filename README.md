@@ -69,7 +69,8 @@ leases hold 4; pool work holds 12 of 12; this needs 4; gave up its place in line
 command did not run. Do lighter work first, then run it again.
 ```
 
-In Claude Code, the plugin does the same through a hook, without the shims:
+In Claude Code, the plugin does the same through a hook, without the shims, and runs each
+leased command in its lease's scope:
 
 ```
 /plugin marketplace add chalkworth/leasehold
