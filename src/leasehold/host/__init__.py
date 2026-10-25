@@ -58,6 +58,9 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Protocol
 
+#: The seconds over which `Pressure.stall_full_recent` is measured, at least.
+STALL_WINDOW_S = 2.0
+
 #: The operations `capabilities` reports on, in the order `doctor` lists them. `memory_hard` is
 #: a hard cap on a tree's memory, given to `start` or `adopt` in `TreeSpec.cap_bytes`.
 OPERATIONS = (
@@ -205,10 +208,13 @@ class Pressure:
     without paging hard, of `total`; `swap_used` of `swap_total`; `level` the OS's own scale
     (`ok`, `warn` or `critical`; None where it has none, as on Linux); `stall` and `stall_full`
     the share of the last ten seconds tasks stalled on memory, measured as `stall_how` says
-    (`psi` on Linux); `swapins_per_s` the pages read back from swap a second since the last
-    reading by this host (None on the first); `compressed` the memory held compressed (zswap).
-    `how` is `exact` when the kernel gave it, `none` with a `reason` when nothing could be
-    read. Each value is None when not known."""
+    (`psi` on Linux); `stall_full_recent` the share of the last `STALL_WINDOW_S` seconds or so
+    in which every task stalled (from the kernel's running total, so it does not lag as the
+    ten-second average does; None on this host's first reading); `swapins_per_s` the pages
+    read back from swap a second since the last reading by this host (None on the first);
+    `compressed` the memory held compressed (zswap). Shares are percentages. `how` is `exact`
+    when the kernel gave it, `none` with a `reason` when nothing could be read. Each value is
+    None when not known."""
 
     how: str = "none"
     reason: str | None = None
@@ -219,6 +225,7 @@ class Pressure:
     level: str | None = None
     stall: float | None = None
     stall_full: float | None = None
+    stall_full_recent: float | None = None
     stall_how: str | None = None
     swapins_per_s: float | None = None
     compressed: int | None = None

@@ -15,9 +15,10 @@ writing the same ledger, is reported the same way. Each event is a flat dict:
   `pool_max` (`pool`, `max`, `overridden`), `lend_switch` (`open`), `resized` (an elastic
   lease's `weight` changed, from `previous_weight`), `parked` and `resumed` (the memory net,
   `leasehold.net`, paused the lease's command and moved its memory to swap, or let it run
-  again), `session_started` and `session_ended` (`leasehold.sessions`), and `paused` and
-  `runaway` from the watchdog (`leasehold.watchdog`): the tree it would pause, or a tree found
-  running away, with `would` true when the watchdog only decided it and did nothing.
+  again), `session_started` and `session_ended` (`leasehold.sessions`), and `held`, `paused`
+  and `runaway` from the watchdog (`leasehold.watchdog`): new heavy work would wait, the tree
+  it would pause, or a tree found running away, with `would` true when the watchdog only
+  decided it and did nothing.
 
 Events live in memory only: a restarted daemon starts a new sequence, and a reader that asks
 for a `since` from before the ring's oldest event is told some were `dropped`; one that asks for
@@ -49,6 +50,7 @@ class EventType(StrEnum):
     RESIZED = "resized"
     PARKED = "parked"
     RESUMED = "resumed"
+    HELD = "held"
     PAUSED = "paused"
     RUNAWAY = "runaway"
     SESSION_STARTED = "session_started"

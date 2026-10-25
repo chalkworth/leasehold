@@ -277,14 +277,17 @@ def test_a_session_is_watched_with_its_footprint_and_an_agent_is_found_by_name(s
 
 
 class FakeHost(Posix):
-    """A machine whose processes and available memory a test sets: `procs` by pid, each with
-    its anonymous memory and start time, `commands` by pid, and `available`."""
+    """A machine whose processes and memory a test sets: `procs` by pid, each with its
+    anonymous memory and start time, `commands` by pid, `available`, `swap` (total and free)
+    and `stall` (the recent share every task stalled)."""
 
     def __init__(self) -> None:
         super().__init__()
         self.procs: dict[int, host.Proc] = {}
         self.commands: dict[int, str] = {}
         self.available = 12 << 30
+        self.swap = (0, 0)
+        self.stall = 0.0
 
     def support(self, operation: str) -> host.Support:
         if operation in ("members", "pressure", "session_processes"):
@@ -308,7 +311,11 @@ class FakeHost(Posix):
         return [p for p in dict(self.procs).values() if p.name in names]
 
     def pressure(self) -> host.Pressure:
-        return host.Pressure("exact", available=self.available, total=16 << 30)
+        total, free = self.swap
+        return host.Pressure(
+            "exact", available=self.available, total=16 << 30, swap_total=total,
+            swap_used=total - free, stall_full_recent=self.stall,
+        )  # fmt: skip
 
     def command_line(self, proc: host.Proc) -> str | None:
         return self.commands.get(proc.pid, proc.name)
@@ -317,31 +324,63 @@ class FakeHost(Posix):
 GIB = 1 << 30
 
 
-def test_the_watchdog_says_which_tree_it_would_pause(sock_dir, tmp_path):
-    # Two agents: 100 registers, 200 is only found by name. Each tree is (pid, parent, start
-    # after its agent in s, command, anonymous GiB at each reading); available GiB per reading.
+def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
+    # On a 16 GiB machine, two agents: 100 registers, 200 is only found by name. Each reading is
+    # (available GiB, swap total and free GiB, the recent stall %, the level it gives); each
+    # tree (pid, parent, start after its agent in s, command, anonymous GiB at each reading).
+    calm, swap = (0, 0), (8, 6)
     cases = [
-        ("the newest", [10, 6, 2, 0.4], [
+        ("the newest", [
+            (10, calm, 0, "ok"), (6, calm, 0, "ok"), (2.5, calm, 0, "warn"),
+            (1.5, calm, 0, "critical"),
+        ], [
             (101, 100, 60, "make -j8", [1, 1, 1, 1]),
+            (102, 100, 120, "python3 -m pytest -n 4", [1, 1, 1, 1]),
+        ], (102, "newest", [])),
+        ("a runaway by its own growth, before a newer tree", [
+            (8, calm, 0, "ok"), (6, calm, 0, "ok"), (4, calm, 0, "ok"),
+            (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "cargo test", [1, 2, 3, 4]),
             (102, 100, 120, "pytest -n 4", [1, 1, 1, 1]),
-        ], 102, "newest"),
-        ("a runaway before a newer tree", [6, 4.5, 3, 1.5, 0.4], [
-            (101, 100, 60, "cargo test", [1, 2, 3, 4.5, 6]),
-            (102, 100, 120, "pytest -n 4", [1, 1, 1, 1, 1]),
-        ], 101, "runaway"),
-        ("never a protected tree", [6, 2, 0.4], [
-            (101, 100, 60, "pytest -n 4", [1, 1, 1]),
-            (102, 100, 120, "node my-dev-server.js", [2, 2, 2]),  # [watchdog] protect
-            (103, 100, 5, "python -m some_lsp", [2, 2, 2]),  # started with its agent
-            (104, 100, 90, "npx -y @modelcontextprotocol/server-x", [2, 2, 2]),
-            (105, 100, 100, "sleep 60", [0.1, 0.1, 0.1]),  # under min_size
-        ], 101, "newest"),
-        ("never a session found by name", [6, 2, 0.4], [
-            (101, 100, 60, "pytest -n 4", [1, 1, 1]),
-            (201, 200, 120, "cargo build", [3, 3, 3]),
-        ], 101, "newest"),
+        ], (101, "runaway", [])),
+        ("a tree over a quarter of memory, before a newer tree", [
+            (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "bazel build //...", [5, 5]),
+            (102, 100, 120, "pytest -n 4", [1, 1]),
+        ], (101, "large", [])),
+        ("with swap free, only stalls are critical", [
+            (6, swap, 0, "ok"), (1.5, swap, 0, "ok"), (1.5, swap, 30, "critical"),
+        ], [
+            (101, 100, 60, "make -j8", [1, 1, 1]),
+            (102, 100, 120, "pytest -n 4", [1, 1, 1]),
+        ], (102, "newest", [])),
+        ("leasehold's own process is spared, the command is not", [
+            (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "pytest -n 4", [1, 1]),
+            (106, 100, 120, "leasehold hold -- make -j8", [0.05, 0.05]),
+            (107, 106, 121, "make -j8", [1, 1]),
+        ], (106, "newest", [106])),
+        ("never a protected tree", [
+            (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "pytest -n 4", [1, 1]),
+            (102, 100, 120, "node my-dev-server.js", [2, 2]),  # [watchdog] protect
+            (103, 100, 5, "python -m some_lsp", [2, 2]),  # started with its agent
+            (104, 100, 90, "npx -y @modelcontextprotocol/server-x", [2, 2]),
+            (105, 100, 100, "sleep 60", [0.1, 0.1]),  # under min_size
+            (108, 100, 110, "leasehold mcp", [0.4, 0.4]),  # only leasehold's own
+        ], (101, "newest", [])),
+        ("never a session found by name", [
+            (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
+        ], [
+            (101, 100, 60, "pytest -n 4", [1, 1]),
+            (201, 200, 120, "cargo build", [3, 3]),
+        ], (101, "newest", [])),
     ]  # fmt: skip
-    for n, (name, available, trees, chosen, why) in enumerate(cases):
+    for n, (name, readings, trees, (chosen, why, spared)) in enumerate(cases):
         fake, mono = FakeHost(), Clock(0.0)
         for pid in (100, 200):
             fake.procs[pid] = host.Proc(
@@ -360,24 +399,32 @@ def test_the_watchdog_says_which_tree_it_would_pause(sock_dir, tmp_path):
         daemon.start()
         try:
             Client(daemon.path).register_session("mine", pid=100, agent="fake-agent")
-            for step, free in enumerate(available):
+            levels = []
+            for step, (free, (total, unused), stall, _) in enumerate(readings):
                 for pid, parent, after, command, sizes in trees:
                     fake.procs[pid] = host.Proc(
                         pid, str(pid), command.split()[0], parent=parent,
                         started=1000.0 + after, anon=int(sizes[step] * GIB),
                     )  # fmt: skip
                     fake.commands[pid] = command
-                fake.available = int(free * GIB)
+                fake.available, fake.stall = int(free * GIB), stall
+                fake.swap = (total * GIB, unused * GIB)
                 mono.now += 2.5
                 agent.tick()
                 agent.watch_memory()
-            watchdog = Client(daemon.path).status()["watchdog"]
-            assert watchdog["level"] == "critical", name
+                watchdog = Client(daemon.path).status()["watchdog"]
+                levels.append(watchdog["level"])
+                if watchdog["level"] == "warn":
+                    assert watchdog["would"] == {"action": "hold"}, name
+            assert levels == [r[3] for r in readings], name
             would = watchdog["would"]
             assert (would["action"], would["pid"], would["why"]) == ("pause", chosen, why), name
+            assert would["spared"] == spared, name
             events = Client(daemon.path).events()["events"]
-            paused = [e for e in events if e["type"] == "paused"]
-            assert [(e["pid"], e["would"]) for e in paused] == [(chosen, True)], name
+            paused = [(e["pid"], e["would"]) for e in events if e["type"] == "paused"]
+            assert paused == [(chosen, True)], name
+            held = [e["would"] for e in events if e["type"] == "held"]
+            assert held == ([True] if "warn" in levels else []), name
         finally:
             daemon.stop()
     # Where the host cannot read the machine's memory, there is no level, and status says why.

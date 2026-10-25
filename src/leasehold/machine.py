@@ -304,60 +304,58 @@ class MemoryNetSettings(_Strict):
 DEFAULT_AGENTS = ("claude", "codex", "gemini", "cursor-agent", "aider")
 
 
-# The watchdog's defaults (`leasehold.watchdog`), in one place. Each `auto` size is the larger
-# of a floor and a share of the machine's memory. They are starting points from a
-# simulator, which has no model of page cache or stalls; watch mode is how they are checked on
-# real machines before the watchdog acts.
+# The watchdog's defaults (`leasehold.watchdog`), in one place. They are the rule a tier-1
+# simulation of the measured build and test profiles recommends: model predictions, not yet
+# measured on real machines. Watch mode is how they are checked there before the watchdog acts.
 _GIB = 1 << 30
-#: `pause_below = "auto"`: under this much available memory the level is `warn`.
-PAUSE_BELOW = (3 * _GIB // 2, 0.10)
-#: `kill_below = "auto"`: under this much it is `critical`, the last resort before a freeze.
-KILL_BELOW = (_GIB // 2, 0.04)
-#: `resume_above = "auto"` is `pause_below` and this much more.
-RESUME_GAP = (_GIB, 0.05)
-#: `min_size = "auto"`: a smaller tree is never chosen.
-MIN_SIZE = (_GIB // 4, 0.02)
-#: `lead_s`: `warn` once available memory would reach `kill_below` this soon at its fall rate.
-LEAD_S = 15.0
-#: `act_at`: the least level at which the watchdog acts, once it may act.
-ACT_AT = "critical"
-#: The share of the last ten seconds in which every task stalled on memory (PSI `full avg10`,
-#: a percentage) that makes the level `critical` by itself.
+#: `critical_below`: under this much available memory, with little swap free, the level is
+#: `critical`, the last resort before a freeze. An absolute size: what matters is the file
+#: cache the machine needs hot, plus the fall during one reaction, neither of which grows with
+#: RAM.
+CRITICAL_BELOW = "2g"
+#: `hold_below`: under this much, with little swap free, the level is `warn`, where new heavy
+#: work would be held and nothing running is touched.
+HOLD_BELOW = "3g"
+#: Available memory counts only once swap is nearly full: with no swap, or with less swap free
+#: than the larger of these (bytes, share of swap). While the kernel swaps, it keeps available
+#: memory near a floor that says nothing of a freeze.
+SWAP_FREE = (_GIB, 0.10)
+#: Every task stalled on memory for more than this share (a percentage) of the last couple of
+#: seconds (`host.Pressure.stall_full_recent`) makes the level `critical` by itself.
 STALL_CRITICAL = 20.0
-#: Command lines never chosen, besides `[watchdog] protect`: the agents themselves, MCP servers
-#: (which start with their agent) and leasehold's own processes.
+#: `min_size = "auto"`: the larger of these (bytes, share of RAM); a smaller tree is never chosen.
+MIN_SIZE = (_GIB // 4, 0.02)
+#: Without a runaway, a tree holding at least this share of RAM is chosen before the newest.
+LARGE_SHARE = 0.25
+#: `act_at`: the least level at which the watchdog would pause or stop work.
+ACT_AT = "critical"
+#: Command lines never chosen, besides `[watchdog] protect`: the agents themselves, and MCP
+#: servers, which start with their agent.
 PROTECT = (
     r"(^|/)(claude|codex|gemini|cursor-agent|aider)(\s|$)",
     r"@modelcontextprotocol/",
     r"(^|[\s/])mcp[-_]server",
     r"(^|\s)uvx\s+mcp-",
-    r"(^|[\s/])leasehold(\s|$)",
 )
 #: The watchdog's levels, least first.
 LEVELS = ("ok", "warn", "critical")
 
 
-def _auto(value: str, default: tuple[int, float], memory_bytes: int) -> int:
-    if value != "auto":
-        return memory_to_bytes(value)
-    floor, share = default
-    return max(floor, int(memory_bytes * share))
-
-
 @dataclass(frozen=True)
 class WatchdogLimits:
-    """The `[watchdog]` sizes in bytes for one machine (`WatchdogSettings.limits`)."""
+    """The `[watchdog]` sizes in bytes for one machine (`WatchdogSettings.limits`): `large` is
+    `LARGE_SHARE` of its memory."""
 
-    pause_below: int
-    kill_below: int
-    resume_above: int
+    critical_below: int
+    hold_below: int
     min_size: int
+    large: int
 
 
 class WatchdogSettings(_Strict):
     """The `[watchdog]` table: the agent sessions the daemon watches (`leasehold.sessions`), and
     how the watchdog judges the machine's memory (`leasehold.watchdog`). It decides and reports
-    what it would do; it never pauses or stops anything yet."""
+    what it would do; it never holds, pauses or stops anything yet."""
 
     #: `watch` judges the machine's memory and says what it would do (`would`) without acting;
     #: `off` does neither. Sessions are watched either way.
@@ -366,13 +364,12 @@ class WatchdogSettings(_Strict):
     #: running one is watched as a session of its own (`auto-<pid>`), unless it is already
     #: part of one. Empty: only sessions that register are watched. A user's own daemon only.
     agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
-    #: Sizes (`2g`), or `auto` for the defaults above.
-    pause_below: str = "auto"
-    kill_below: str = "auto"
-    resume_above: str = "auto"
+    #: Sizes (`2g`); `min_size` may also be `auto`.
+    critical_below: str = CRITICAL_BELOW
+    hold_below: str = HOLD_BELOW
     min_size: str = "auto"
-    lead_s: float = Field(LEAD_S, gt=0)
-    #: `warn` or `critical`: below this level the watchdog only watches, even once it may act.
+    #: `warn` or `critical`: below this level the watchdog would only hold new work, even once
+    #: it may act.
     act_at: Literal["warn", "critical"] = ACT_AT
     #: Whether trees of sessions found by name (`auto-<pid>`), which never asked to join, may be
     #: chosen. They are watched and reported either way.
@@ -389,7 +386,13 @@ class WatchdogSettings(_Strict):
                 raise ValueError(f"{name!r} is not a program name")
         return value
 
-    @field_validator("pause_below", "kill_below", "resume_above", "min_size")
+    @field_validator("critical_below", "hold_below")
+    @classmethod
+    def _size(cls, value: str) -> str:
+        memory_to_bytes(value)
+        return value
+
+    @field_validator("min_size")
     @classmethod
     def _auto_or_size(cls, value: str) -> str:
         if value != "auto":
@@ -406,21 +409,25 @@ class WatchdogSettings(_Strict):
                 raise ValueError(f"{pattern!r} is not a regular expression: {exc}") from None
         return value
 
+    @model_validator(mode="after")
+    def _ordered(self) -> WatchdogSettings:
+        if memory_to_bytes(self.critical_below) >= memory_to_bytes(self.hold_below):
+            raise ValueError("watchdog: critical_below must be under hold_below")
+        return self
+
     def limits(self, memory_bytes: int) -> WatchdogLimits:
-        """The sizes in bytes for a machine of `memory_bytes`. Raises `ValueError` unless
-        `kill_below` < `pause_below` < `resume_above`."""
-        pause = _auto(self.pause_below, PAUSE_BELOW, memory_bytes)
-        kill = _auto(self.kill_below, KILL_BELOW, memory_bytes)
-        if self.resume_above == "auto":
-            resume = pause + _auto("auto", RESUME_GAP, memory_bytes)
+        """The sizes in bytes for a machine of `memory_bytes`."""
+        if self.min_size == "auto":
+            floor, share = MIN_SIZE
+            min_size = max(floor, int(memory_bytes * share))
         else:
-            resume = memory_to_bytes(self.resume_above)
-        if not kill < pause < resume:
-            raise ValueError(
-                "watchdog: kill_below must be under pause_below, and pause_below under "
-                f"resume_above (here {kill}, {pause} and {resume} bytes)"
-            )
-        return WatchdogLimits(pause, kill, resume, _auto(self.min_size, MIN_SIZE, memory_bytes))
+            min_size = memory_to_bytes(self.min_size)
+        return WatchdogLimits(
+            memory_to_bytes(self.critical_below),
+            memory_to_bytes(self.hold_below),
+            min_size,
+            int(memory_bytes * LARGE_SHARE),
+        )
 
 
 class ElasticSettings(_Strict):
