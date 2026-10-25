@@ -113,9 +113,36 @@ here.
   and behind which lease, where only the person was told before. It also tells the agent the
   job count for every leased command, a fixed weight included. A shim and `hold` print the same
   waited line on stderr once a command waited 5 s or more.
+- `[commands]` rules weigh a command by its arguments. A rule's `[[commands.rule.case]]`
+  entries each have `args` (a regular expression), `weight` (a count, or 0 for no lease) and an
+  optional `note`. The first case whose `args` match gives the weight; with none matching, the
+  rule's own weight applies, so arguments leasehold does not recognise never weigh less. A rule
+  also takes a `note`. `GET /v1/commands` serves each rule's `case` list, with each weight
+  clamped like the rule's. A command a case weighs is filed under its rule's programs and the
+  case's `args` (the outcome's `rule`). `leasehold.shell.Case`, `Rule.cases`, `Rule.note`, `Rule.weighed`,
+  `shell.explain` and `shell.explain_programs` are new; `shell.match` and
+  `shell.match_programs` return None for a command a case gives no lease.
+- The built-in rules have cases. Help, version, listings and dry runs take no lease
+  (`pytest --version`, `pytest --collect-only`, `cargo build --help`, `npm test -- --help`,
+  `tsc --version`, `jest --listTests`, `make -n`, `ninja -t clean`), and so do `make clean`,
+  `bazel info`, `bazel query`, `bazel shutdown` and `bazel clean`. A pytest run on named tests
+  (a node id, or a `-k` selection that does not start with `not`) and `go test -run NAME` in
+  named packages weigh 1. A pytest run with xdist workers, a serial `pytest -q`, `cargo run`
+  and anything else keep their weight. On the default 6 slots, an agent's single test now
+  runs next to another agent's full suite.
+- Built-in rules for `just test`, `just build` and `just check`, and for test tools run
+  through a package manager (`pnpm vitest`, `yarn jest`).
 
 ### Changed
 
+- jest, vitest, playwright and tsc, and `npm test` and `npm run build` (with pnpm, yarn and
+  bun), now weigh `heavy_weight` (4) instead of `light_weight` (2): they use every core they are
+  given, and agents report them among the heaviest commands they run. `light_weight` now covers
+  package installs, webpack and vite. pytest and py.test have a built-in rule of their own,
+  apart from tox and nox, so their outcomes are filed under `py.test, pytest`.
+- `leasehold commands` lists each rule's cases. `leasehold commands --test` names the case a
+  command matched, and exits 1 when it runs without a lease, a case of no lease included;
+  `--json` then prints that case with `weight` 0 and its `note`.
 - `busy.told` returns the reason and the advice as a pair. `hold.wait_for_grant` takes
   `waited`, a `hold.Waited` it fills in with how long the request waited and the lease ahead of
   it.

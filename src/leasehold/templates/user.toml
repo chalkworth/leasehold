@@ -73,8 +73,9 @@ headroom = "keep"        # the pools' headroom it leaves free: "keep", "leave-on
 wait_s = 300             # how long a command waits in line for its lease...
 when_busy = "deny"       # ...then: "deny" it with the reason, or "run" it without a lease
 
-# The built-in rules weigh 4 slots (builds and test runs: pytest, cargo, make, ...) and 2
-# (JavaScript tooling: npm test, jest, tsc, ...), in slots and in jobs.
+# The built-in rules weigh 4 slots (builds and test runs: pytest, cargo, make, npm test,
+# jest, tsc, ...) and 2 (installs and bundlers: npm install, webpack, vite), in slots and in
+# jobs. Help, version, listings and `make clean` take no lease; a named test weighs 1.
 # $heavy_note
 $opt_in
 # [[commands.rule]]
