@@ -13,7 +13,8 @@ has one (a systemd scope on Linux). The operations:
 * `members(tree)` are its live processes and `footprint(tree)` what it costs the machine in
   memory; `pressure()` is one reading of the machine's memory; `session_processes(session)` is
   everything an agent session started, and `named(names)` the user's processes whose program is
-  one of `names` (how agent sessions nobody registered are found).
+  one of `names` (how agent sessions nobody registered are found). `command_line(proc)` is the
+  command a process runs, as one line.
 * `pause(tree)` stops every process in it from running, and `resume(tree)` lets them run again.
   A tree's `keeper` (the process that started it and waits for it) is never paused. `kill(tree,
   grace_s)` sends SIGTERM, and SIGCONT so that a paused member sees it, then SIGKILL to what is
@@ -57,6 +58,9 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Protocol
 
+#: The seconds over which `Pressure.stall_full_recent` is measured, at least.
+STALL_WINDOW_S = 2.0
+
 #: The operations `capabilities` reports on, in the order `doctor` lists them. `memory_hard` is
 #: a hard cap on a tree's memory, given to `start` or `adopt` in `TreeSpec.cap_bytes`.
 OPERATIONS = (
@@ -96,7 +100,8 @@ class Proc:
     """One live process. `fence` is the platform's token for it (None: the platform has none),
     `name` its program, `bytes` its resident and swapped memory (None: not read), `anon` the
     anonymous memory it has resident and `swap` what it has in swap (None: not read), `parent`
-    its parent's pid and `parent_fence` that parent's token as read now. In `session_processes`,
+    its parent's pid and `parent_fence` that parent's token as read now, and `started` when it
+    started, in wall-clock seconds (None: not known). In `session_processes`,
     `role` is `agent`, `tool`, `lease` or `orphan`, and `basis` how it was found to belong to
     the session: `slice`, `lineage` or `env`."""
 
@@ -110,6 +115,7 @@ class Proc:
     basis: str | None = None
     anon: int | None = None
     swap: int | None = None
+    started: float | None = None
 
 
 @dataclass(frozen=True)
@@ -202,10 +208,13 @@ class Pressure:
     without paging hard, of `total`; `swap_used` of `swap_total`; `level` the OS's own scale
     (`ok`, `warn` or `critical`; None where it has none, as on Linux); `stall` and `stall_full`
     the share of the last ten seconds tasks stalled on memory, measured as `stall_how` says
-    (`psi` on Linux); `swapins_per_s` the pages read back from swap a second since the last
-    reading by this host (None on the first); `compressed` the memory held compressed (zswap).
-    `how` is `exact` when the kernel gave it, `none` with a `reason` when nothing could be
-    read. Each value is None when not known."""
+    (`psi` on Linux); `stall_full_recent` the share of the last `STALL_WINDOW_S` seconds or so
+    in which every task stalled (from the kernel's running total, so it does not lag as the
+    ten-second average does; None on this host's first reading); `swapins_per_s` the pages
+    read back from swap a second since the last reading by this host (None on the first);
+    `compressed` the memory held compressed (zswap). Shares are percentages. `how` is `exact`
+    when the kernel gave it, `none` with a `reason` when nothing could be read. Each value is
+    None when not known."""
 
     how: str = "none"
     reason: str | None = None
@@ -216,6 +225,7 @@ class Pressure:
     level: str | None = None
     stall: float | None = None
     stall_full: float | None = None
+    stall_full_recent: float | None = None
     stall_how: str | None = None
     swapins_per_s: float | None = None
     compressed: int | None = None
@@ -328,6 +338,8 @@ class Host(Protocol):
     def session_processes(self, session: SessionRef) -> list[Proc]: ...
 
     def named(self, names: Collection[str]) -> list[Proc]: ...
+
+    def command_line(self, proc: Proc) -> str | None: ...
 
     def wakeup_fd(self) -> int | None: ...
 

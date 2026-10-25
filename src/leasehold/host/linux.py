@@ -19,8 +19,9 @@ the kernel reclaims first, `memory.peak`, `memory.stat`, `memory.swap.*`, `memor
 (`VmRSS` and `VmSwap`). A tree without one is its root's descendants, found through procfs
 (`/proc/<pid>/task/*/children`), its footprint the sum of theirs (`polled`). The machine's
 pressure is `MemAvailable` and swap from `/proc/meminfo`, PSI from `/proc/pressure/memory`, and
-pages swapped in from `/proc/vmstat`. A process's fence is its start time (field 22 of
-`/proc/<pid>/stat`).
+pages swapped in from `/proc/vmstat`. The recent share of time every task stalled comes from the
+PSI file's running `full` total, compared across readings. A process's fence is its start time
+(field 22 of `/proc/<pid>/stat`).
 
 **Pausing.** A tree in a cgroup is frozen (`cgroup.freeze`), which its parent cannot see. A tree
 without one gets SIGSTOP, to its process group unless its keeper is in it, and to each member,
@@ -56,6 +57,7 @@ from leasehold import cgroup
 from leasehold.contain import lease_slice, root_slice_cgroup
 from leasehold.facts import meminfo
 from leasehold.host import (
+    STALL_WINDOW_S,
     Adoption,
     Done,
     Ending,
@@ -122,6 +124,18 @@ def _psi(text: str | None) -> dict[str, float]:
     return out
 
 
+def _psi_full_total(text: str | None) -> int | None:
+    """The `full` line's `total` of a PSI file: microseconds every task stalled, since boot."""
+    for line in (text or "").splitlines():
+        kind, *parts = line.split()
+        if kind == "full":
+            for part in parts:
+                name, _, value = part.partition("=")
+                if name == "total" and value.isdigit():
+                    return int(value)
+    return None
+
+
 def _cap_or_kernel(tree: Tree) -> str:
     """Whose limit an OOM kill the tree's scope counted was: `cap` when its own cap was the
     tightest on it (to within a page, which the kernel rounds it to), else `kernel`."""
@@ -146,8 +160,13 @@ class Linux(Posix):
         self._no_scope: str | None = None
         #: (when, pages swapped in) at the last `pressure`.
         self._swapins: tuple[float, int] | None = None
+        #: (when, microseconds every task stalled on memory) at recent `pressure` readings,
+        #: the oldest at least `STALL_WINDOW_S` before the newest.
+        self._stalls: list[tuple[float, int]] = []
         #: (when, pids by session) at the last scan of the user's processes' environments.
         self._tags: tuple[float, dict[str, list[int]]] | None = None
+        #: When the machine booted, in wall-clock seconds (None: not read yet, or unreadable).
+        self._boot: float | None = None
 
     # --- what works here ---------------------------------------------------------------------
 
@@ -214,6 +233,17 @@ class Linux(Posix):
         stat = self._stat(pid)
         return None if stat is None else stat[2]
 
+    def _started(self, ticks: str) -> float | None:
+        """A start time in clock ticks since boot (a fence), in wall-clock seconds."""
+        if self._boot is None:
+            for line in (_read(self._proc / "stat") or "").splitlines():
+                if line.startswith("btime "):
+                    with contextlib.suppress(ValueError):
+                        self._boot = float(line.split()[1])
+        if self._boot is None or not ticks.isdigit():
+            return None
+        return self._boot + int(ticks) / os.sysconf("SC_CLK_TCK")
+
     def _proc_of(self, pid: int, *, role: str | None = None, basis: str | None = None):
         """Process `pid` as a `Proc`, with its resident and swapped memory; None when it has
         gone, is a zombie, or has no memory of its own (a kernel thread)."""
@@ -238,6 +268,7 @@ class Linux(Posix):
         return Proc(
             pid, stat[2], name, held, stat[1], self._fence(stat[1]), role=role, basis=basis,
             anon=None if anon is None else anon << 10, swap=None if swap is None else swap << 10,
+            started=self._started(stat[2]),
         )  # fmt: skip
 
     def _children(self, pid: int) -> list[int]:
@@ -326,13 +357,23 @@ class Linux(Posix):
         info = meminfo(self._proc)
         if not info:
             return Pressure(reason=self.support("pressure").reason)
-        psi = _psi(_read(self._proc / "pressure" / "memory"))
+        text = _read(self._proc / "pressure" / "memory")
+        psi = _psi(text)
+        stalled = _psi_full_total(text)
         swapped_in = _fields(_read(self._proc / "vmstat")).get("pswpin")
         now, rate = time.monotonic(), None
         if swapped_in is not None:
             if self._swapins is not None and now > self._swapins[0]:
                 rate = max(0, swapped_in - self._swapins[1]) / (now - self._swapins[0])
             self._swapins = (now, swapped_in)
+        recent = None
+        if stalled is not None:
+            self._stalls.append((now, stalled))
+            while len(self._stalls) > 2 and self._stalls[1][0] <= now - STALL_WINDOW_S:
+                del self._stalls[0]
+            (t0, s0) = self._stalls[0]
+            if now > t0:
+                recent = min(100.0, max(0, stalled - s0) / ((now - t0) * 1e4))
         total = info.get("SwapTotal")
         free = info.get("SwapFree")
         return Pressure(
@@ -343,6 +384,7 @@ class Linux(Posix):
             swap_total=total,
             stall=psi.get("some"),
             stall_full=psi.get("full"),
+            stall_full_recent=recent,
             stall_how="psi" if psi else None,
             swapins_per_s=rate,
             compressed=info.get("Zswap"),
@@ -413,6 +455,19 @@ class Linux(Posix):
             if named and (got := self._proc_of(pid)) is not None:
                 found.append(got)
         return found
+
+    def command_line(self, proc: Proc) -> str | None:
+        """The command `proc` runs, its arguments joined by spaces; None once it has ended (or
+        its pid is another process's) or when it cannot be read."""
+        try:
+            raw = (self._proc / str(proc.pid) / "cmdline").read_bytes()
+        except OSError:
+            return None
+        if proc.fence is not None and self._fence(proc.pid) != proc.fence:
+            return None
+        words = raw.rstrip(b"\0").split(b"\0")
+        line = b" ".join(words).decode(errors="replace").strip()
+        return line or None
 
     def _of_session(self, pid: int, session: SessionRef, basis: str) -> Proc | None:
         if pid == session.agent_pid:

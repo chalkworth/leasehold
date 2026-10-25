@@ -223,6 +223,30 @@ here.
   `session_ended` (with a `reason`) say when one starts and ends.
 - `host.named(names)` lists the user's processes by program name, and a `Proc` has `anon` and
   `swap`. A polled `Footprint` has `anon` and `swap`, summed over its processes.
+- The watchdog, in watch mode. Your own daemon judges how short of memory the machine is and
+  says what it would do. `critical`: under 2 GiB available once swap is nearly full (or there
+  is none), or every task stalled on memory over 20% of the last 2 seconds. `warn`: under
+  3 GiB available once swap is nearly full. At `warn` it would hold new heavy work; at
+  `critical` it would pause a session tree: a runaway first (judged by the tree's own growth,
+  or more than twice what its leases declared or learned), then a tree over a quarter of
+  memory, then the newest. It holds, pauses and stops nothing yet. Trees of sessions found by
+  name, the agent process, trees of only leasehold's own processes, small trees, trees that
+  started with their agent and trees matching a protect pattern are never chosen. See "The
+  watchdog" in docs/reference.md.
+- `[watchdog]` keys: `mode` (`"watch"`, or `"off"`), `act_at` (`"critical"`, or `"warn"`),
+  `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`, or a size),
+  `choose_discovered` (false) and `protect` (regular expressions). `critical_below` at or
+  above `hold_below` is a config error.
+- The status object's `watchdog` has `mode`, `act_at`, `level`, `reason`, `available_bytes`,
+  `swap_free_bytes`, `available_counts`, `stall_recent`, `limits`, `how`, `candidates`,
+  `passed_over`, `victim` and `would`. Where the machine's memory cannot be read (macOS for
+  now), `level` is null and `reason` says the watchdog cannot see memory there.
+- Events `held`, `paused` and `runaway` from the watchdog, each with `would` (true while it
+  only decides).
+- `host.Proc` has `started` (when the process started, in wall-clock seconds), the host has
+  `command_line(proc)`, and `host.Pressure` has `stall_full_recent`, the share of the last
+  `host.STALL_WINDOW_S` seconds every task stalled, from the PSI `full` total.
+  `MachineAgent` takes `platform`, the function that makes its host.
 
 ### Changed
 

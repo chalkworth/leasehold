@@ -10,9 +10,10 @@ A session's processes are what `host.session_processes` finds: its slice's, unde
 run`; else the agent's descendants and the processes whose environment names the session
 (`LEASEHOLD_SESSION`). The agent process itself is never counted as the session's work;
 everything else is, as **trees**: a process whose parent is the agent, or is not of the session
-at all (one shell command, one MCP server, a server left running), with what it started. A
-session's footprint is the sum of its trees' anonymous memory, resident or in swap
-(`host.footprint`). File cache is left out, since the kernel takes it back first.
+at all (one shell command, one MCP server, a server left running), with what it started
+(`Branch`, the unit the watchdog would pause). A session's footprint is the sum of its trees'
+anonymous memory, resident or in swap, as its processes were read. File cache is left out,
+since the kernel takes it back first.
 
 Watching only reads. Nothing here pauses or stops a process. A session found by name never
 asked to join, and is only ever reported.
@@ -48,6 +49,22 @@ class UnknownSession(LookupError):
 
 
 @dataclass(frozen=True)
+class Branch:
+    """One tree of a session's work: its `root` process and every process in it, the root
+    first, and the command the root runs (None: not read). `agent_line` is True when the agent
+    process descends from the root (a launcher the agent runs under, tagged with the session)."""
+
+    root: Proc
+    members: tuple[Proc, ...]
+    command: str | None = None
+    agent_line: bool = False
+
+    @property
+    def footprint(self) -> int:
+        return sum(_anon(p) for p in self.members)
+
+
+@dataclass(frozen=True)
 class Reading:
     """What a session's processes were when last read. `how` is `polled` (each process read in
     turn) or `none`, and then `reason` says why. `footprint` is its trees' anonymous memory,
@@ -64,6 +81,10 @@ class Reading:
     pids: frozenset[int] = frozenset()
     #: Whether the agent process was among them (None: it cannot be told here).
     agent_alive: bool | None = None
+    #: The agent process as read (None: not among them).
+    agent: Proc | None = None
+    #: The session's trees, oldest root first.
+    branches: tuple[Branch, ...] = ()
 
 
 @dataclass
@@ -235,22 +256,58 @@ class Sessions:
         procs = self.host.session_processes(session.ref())
         pids = frozenset(p.pid for p in procs)
         alive = None if session.agent_pid is None else session.agent_pid in pids
-        work = [p for p in procs if p.role != "agent"]
-        roots = [p for p in work if p.parent == session.agent_pid or p.parent not in pids]
-        total = 0
-        for root in roots:
-            got = self.host.footprint(Tree(root=root.pid, fence=root.fence))
-            total += (got.anon or 0) + (got.swap or 0)
-        largest = max(work, key=_anon, default=None)
+        agent = next((p for p in procs if p.role == "agent"), None)
+        branches = self._branches(procs, agent)
+        work = [m for b in branches for m in b.members]
         return Reading(
             "polled",
-            footprint=total,
+            footprint=sum(b.footprint for b in branches),
             processes=len(work),
-            trees=len(roots),
-            largest=largest,
+            trees=len(branches),
+            largest=max(work, key=_anon, default=None),
             pids=pids,
             agent_alive=alive,
+            agent=agent,
+            branches=branches,
         )
+
+    def _branches(self, procs: list[Proc], agent: Proc | None) -> tuple[Branch, ...]:
+        """The session's processes, the agent left out, as trees: each process whose parent is
+        the agent or is not of the session, with its descendants among them."""
+        by_pid = {p.pid: p for p in procs}
+        lineage: set[int] = set()
+        if agent is not None:
+            up = by_pid.get(agent.parent or 0)
+            while up is not None and up.pid not in lineage:
+                lineage.add(up.pid)
+                up = by_pid.get(up.parent or 0)
+        work = [p for p in procs if p is not agent]
+        children: dict[int, list[Proc]] = {}
+        for p in work:
+            children.setdefault(p.parent or 0, []).append(p)
+        own = None if agent is None else agent.pid
+        roots = [p for p in work if p.parent == own or p.parent not in by_pid]
+        out = []
+        for root in sorted(roots, key=_start):
+            members, level = [root], [root]
+            while level:
+                level = [c for p in level for c in children.get(p.pid, ()) if c is not agent]
+                members += level
+            out.append(
+                Branch(
+                    root,
+                    tuple(members),
+                    self.host.command_line(root),
+                    agent_line=root.pid in lineage,
+                )
+            )
+        return tuple(out)
+
+    def work(self) -> list[tuple[Session, Branch]]:
+        """Every watched session's trees as last read, with the session each is of."""
+        with self._lock:
+            watched = list(self._sessions.values())
+        return [(s, b) for s in watched if s.reading is not None for b in s.reading.branches]
 
     def refresh(self) -> Changes:
         """Read every session's processes again, drop those whose agent has ended, and watch
