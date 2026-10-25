@@ -10,12 +10,16 @@ here.
 ### Added
 
 - A memory net for your own daemon, off by default: `[memory_net] mode = "park"`. When the
-  contained commands under one memory limit spill into swap fast while the limit stalls on
-  memory, the daemon parks the youngest heavy command. It freezes the command's scope and asks
-  the kernel to move its memory out to swap, then lets it run again once another command under
-  that limit ends or memory frees. Each contained command's scope gets `memory.swap.max` of
-  `overflow` (`"1g"`; `"max"` for no limit), and parking writes at most `write_per_day`
-  (`"16g"`) to swap in 24 hours. See "Memory net" in docs/reference.md.
+  contained commands under one memory limit spill into swap while the limit is near full and
+  stalls on memory, the daemon parks the youngest heavy command. It freezes the command's scope
+  and asks the kernel to move its memory out to swap, then lets it run again once another
+  command under that limit ends or memory frees. While a park is possible under a limit (two or
+  more heavy commands run there), each running scope's `memory.swap.max` is `overflow` (`"1g"`;
+  `"max"` for no limit) above the swap it held; otherwise the net sets no swap limit. Parking
+  writes at most `write_per_day` (`"16g"`) to swap in 24 hours. The net keeps
+  `memory-net.json` beside the ledger: a parked command stays frozen across a daemon restart and
+  the next daemon takes it over, and a daemon with the net off lets it run. See "Memory net" in
+  docs/reference.md.
 - While a lease is parked, or settling after it runs again, no new request that counts memory
   is granted (none at all without `[memory]`). Such a request waits with `blocked` saying `the
   memory net holds new work: lease ID is parked until memory frees` or `... is resuming after a
@@ -23,15 +27,16 @@ here.
   `AdmissionPolicy.from_pools` and `MachineConfig.policy` take `memory_held`.
 - The status object has a `memory_net` field: null while the net is off, else its mode, whether
   it is active and why not, its limits, the bytes it wrote to swap, the leases `parked` and
-  `settling`, and counts of `parks` and `forced_resumes`.
+  `settling`, and the count of `parks`.
 - `POST /v1/renew` answers `parked` with `ok`. `Lease.parked` in the Python API says whether the
   lease's command is parked, and `hold` tells its user when the command is paused and when it
   runs again.
 - Events of type `parked` and `resumed`, shown by `top`.
 - An outcome records `parks` and `parked_s`, how often the net parked the command and for how
   long. The ledger's outcomes table gains the two columns.
-- `leasehold doctor` warns when the net is on and there is no swap, and says when swap is on a
-  non-rotational disk, which parking wears.
+- `leasehold doctor` warns when the net is on and there is no swap or the kernel is older than
+  5.19 (no `memory.reclaim`), and says when swap is on a non-rotational disk, which parking
+  wears.
 - A config with `[memory_net] mode = "park"` and `[contain] mode = "off"`, or for the machine's
   daemon, is an error, and so is an `overflow` of 0.
 - The benchmark takes `net=park` (and `overflow=SIZE`) on the conditions whose jobs run in lease

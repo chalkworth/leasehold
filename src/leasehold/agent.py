@@ -33,6 +33,7 @@ from leasehold import (
     proctable,
     status,
 )
+from leasehold import net as memory_net
 from leasehold.access import Forbidden
 from leasehold.admission import AdmissionPolicy, alone
 from leasehold.events import EventLog, EventType, Snapshot, changes
@@ -233,17 +234,26 @@ class MachineAgent:
         }
         #: When each waiting item was first seen in line, on `_monotonic` (`_overdue`).
         self._queued_at: dict[tuple[str, str], float] = {}
+        #: `[memory] learn`: `off` without a `[memory]` table.
+        self.learn = config.memory.learn if config.memory is not None else "off"
+        #: (user, rule, repo) to (when worked out on `_monotonic`, the learned figure).
+        self._learned: dict[tuple, tuple[float, estimate.Learned]] = {}
         #: The memory net (`leasehold.net`), when `[memory_net]` turns it on; `net` makes it
-        #: (a test gives it fake roots). The server runs its loop.
+        #: (a test gives it fake roots). The server runs its loop. With it off, whatever a net
+        #: before left paused or limited is let go.
         self.net: MemoryNet | None = None
+        record = None if config.ledger_dir is None else config.ledger_dir / "memory-net.json"
         if config.memory_net.on and config.for_user:
             self.net = net(
                 config.memory_net,
                 leases=self._net_leases,
                 on_change=self._net_changed,
+                state=record,
                 clock=clock,
                 monotonic=self._monotonic,
             )
+        else:
+            memory_net.release(record)
         self._seen = self._snapshot()
 
     def _guard_cgroups(self) -> tuple[str, ...]:
@@ -890,6 +900,8 @@ class MachineAgent:
                 parks = {"parks": 0, "parked_s": 0.0} | self.net.take(lease_id)
             if outcome is not None:
                 self.ledger.record_outcome((SCOPE, lease_id), outcome.model_dump() | parks)
+                for key in [k for k in self._learned if k[1:] == (outcome.rule, outcome.repo)]:
+                    self._learned.pop(key, None)
             self._released.add((SCOPE, lease_id))
             self.ledger.release((SCOPE, lease_id))
             self.ledger.settle(self.policy())

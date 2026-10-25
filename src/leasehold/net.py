@@ -10,47 +10,59 @@ and holds new work back meanwhile.
 The net watches the scope of every contained command (`lease-<id>.scope`, `leasehold.contain`)
 of a lease the daemon holds, found under this user's `leasehold.slice`, directly or in a
 `leasehold run` session slice. It groups scopes by their cap: the cgroup above the scope that
-sets the lowest memory limit (`leasehold.cgroup.limit`), or the machine when none does. When it
-first sees a scope, it sets the scope's `memory.swap.max` to `overflow`, the swap the command
-may spill into before the net acts.
+sets the lowest memory limit (`leasehold.cgroup.limit`), or the machine when none does.
 
-A park is due in a cap when a running scope's swap grew by `SPILL_BYTES` or more over the last
-`WINDOW_S`, or over the last `SLOW_WINDOW_S`, and the cap spent `STALL_SHARE` or more of that
-same time stalled on memory (PSI `some`, from its running total). The short window catches a
-fast spill, and the long one a command that spills slowly because it is already stalled. The
-net then parks the cap's youngest heavy scope: the one granted last, of those holding
-`HEAVY_BYTES` or more in memory and swap. It never parks the only heavy scope running in a cap,
-never within `THAW_GAP_S` of a resume in that cap, and never once parking has written
-`write_per_day` to swap in the last 24 hours.
+A cap is armed while a park could happen there: the net can park (`reason` is None), the day's
+writes are not used up, and two or more heavy scopes run in it (heavy: holding `HEAVY_BYTES` or
+more in memory and swap). In an armed cap each running scope's `memory.swap.max` is `overflow`
+more than the swap it held when the cap was armed, the room it may spill into before the net
+acts. Everywhere else the net sets no swap limit, and puts `max` back where it set one, so a
+command the net would not park swaps as freely as without the net.
+
+A park is due in an armed cap that is near its limit (its use is `NEAR` of the limit or more,
+or its `memory.events` counted a `high` or `max` event in the last `SLOW_WINDOW_S`) and stalled
+on memory (PSI `some`, from its running total, `STALL_SHARE` or more of the time), when a
+running scope's swap grew by `SPILL_BYTES` or more over the last `WINDOW_S` or `SLOW_WINDOW_S`,
+or has used `FULL_SHARE` or more of its overflow. The short window catches a fast spill, the
+long one a slow spill, and the last a scope whose swap is at its limit and can no longer grow.
+The net then parks the cap's youngest heavy scope, the one granted last, which has done the
+least work, and no other in that cap for `GAP_S`.
 
 To park a scope, the net freezes it (`cgroup.freeze`), lifts its swap limit and asks the kernel
 to reclaim what it uses (`memory.reclaim`, at most what the day's writes leave), which moves its
 memory out to swap. A reclaim that stops short leaves the scope frozen all the same. While the
 reclaim runs, the cap's other running scopes have their swap limits lifted too, so that none
-fills its overflow while room is made; the limits go back once it ends.
+fills its overflow while room is made. Every swap and stall reading of the cap starts afresh
+after a park, so the next park needs a spill seen after it.
 
 The net resumes one scope a step, the one parked longest first, once no other heavy scope of
-its cap runs, once the cap's use plus what the scope holds in swap is under `THAW_AT` of the
-limit, or once it has been parked `MAX_PARK_S` (a forced resume, after which it may be parked
-again). Its swap limit goes back to `overflow`, so it takes no more swap than it already holds.
-It then settles: until the moving average (over `SETTLE_TAU_S`) of its growth has stayed under
-the larger of `SETTLE_FLOOR` and `SETTLE_SHARE` of its use a second for `SETTLE_COOLDOWN_S`,
-until it ends, or for `SETTLE_MAX_S` at most.
+its cap runs or once the cap's use plus what the scope holds in swap is under `THAW_AT` of the
+limit. A parked scope waits as long as neither holds. It then settles: until the moving average
+(over `SETTLE_TAU_S`) of its growth has stayed under the larger of `SETTLE_FLOOR` and
+`SETTLE_SHARE` of its use a second for `SETTLE_COOLDOWN_S`, until it ends, or for
+`SETTLE_MAX_S` at most. No park follows in its cap for `GAP_S`.
 
 While any lease is parked or settling, `held` says why, and the machine agent holds back new
-work that counts memory (the memory net's hold in `leasehold.admission`). A request granted the
-moment a peer ended would otherwise start beside the resumed command as it reads its memory
-back, and the two would overflow the cap again.
+work that counts memory (the memory net's hold in `leasehold.admission`), under every cap. A
+request granted the moment a peer ended would otherwise start beside the resumed command as it
+reads its memory back, and the two would overflow the cap again.
 
-Without swap there is nowhere to put a parked command's memory, and without cgroup v2 there is
-no scope to pause: `reason` says why, and nothing is parked while it holds. A scope of a lease
-the daemon no longer holds is resumed without settling, since its memory is no longer counted.
-A scope found frozen that this net did not park (its daemon stopped mid-park) is thawed, and
-`stop` resumes every scope the net parked.
+The net keeps a record (`state`, a JSON file beside the ledger) of the scopes it froze, the
+scopes whose swap limit it set, and what parking wrote to swap in the last day. A net that
+stops leaves what it parked frozen and puts every swap limit it set back to `max`. A net that
+starts adopts each scope the record says it froze as parked, if its lease is still held, and
+resumes the others. With the net off, `release` resumes and unlimits whatever the record names.
+Of the scopes of leases the daemon does not hold, the net touches only those its record names.
 
-The net steps every `TICK_S`, and sooner when a cap's `memory.events` changes (the cap reached
-its `memory.high` or `memory.max`), but never more often than every `MIN_STEP_S`. Roots, clocks
-and the leases are injectable, so a test can run it on a fake cgroup tree.
+Without swap there is nowhere to put a parked command's memory, without `memory.reclaim` (Linux
+5.19 and later) no way to move it there, and without cgroup v2 no scope to pause: `reason` says
+why, and the net parks nothing while it holds. A scope of a lease the daemon no longer holds is
+resumed without settling, since its memory is no longer counted. A cgroup file the net cannot
+write is reported once on stderr and skipped.
+
+The net steps every `TICK_S`, and sooner when a cap's `memory.events` changes, but never more
+often than every `MIN_STEP_S`. Roots, clocks and the leases are injectable, so a test can run
+it on a fake cgroup tree.
 """
 
 from __future__ import annotations
@@ -58,6 +70,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import errno
+import json
 import math
 import os
 import select
@@ -72,11 +85,12 @@ from leasehold.machine import MemoryNetSettings
 SPILL_BYTES = 32 << 20
 WINDOW_S = 0.25
 SLOW_WINDOW_S = 4.0
+FULL_SHARE = 0.75
 STALL_SHARE = 0.05
+NEAR = 0.90
 HEAVY_BYTES = 256 << 20
 THAW_AT = 0.80
-THAW_GAP_S = 2.0
-MAX_PARK_S = 120.0
+GAP_S = 2.0
 SETTLE_FLOOR = 16 << 20
 SETTLE_SHARE = 0.01
 SETTLE_TAU_S = 1.0
@@ -89,6 +103,8 @@ DAY_S = 86400.0
 
 #: A lease the agent holds, as the net needs it: (lease id, wall-clock time it was granted).
 Held = tuple[str, float]
+
+_reported: set[tuple[str, int]] = set()
 
 
 def _read(path: Path) -> str | None:
@@ -114,24 +130,43 @@ def _stall_us(path: Path) -> int | None:
     return None
 
 
+def _events(path: Path) -> int | None:
+    """The `high` and `max` counts of the `memory.events` file `path`, summed."""
+    text = _read(path)
+    if text is None:
+        return None
+    total = 0
+    for line in text.splitlines():
+        name, _, value = line.partition(" ")
+        if name in ("high", "max") and value.strip().isdigit():
+            total += int(value)
+    return total
+
+
 def _write(path: Path, value: str) -> bool:
-    """Write `value` to the cgroup file `path`; False when the cgroup is gone. A reclaim that
-    could not reclaim all it was asked (`EAGAIN`) counts as written."""
+    """Write `value` to the cgroup file `path`; whether it was written. A reclaim that could
+    not reclaim all it was asked (`EAGAIN`) counts as written. A cgroup that is gone is False
+    quietly; any other failure is False and said once on stderr."""
     try:
         fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
+    except OSError as exc:
+        return _failed(path, exc)
     try:
         os.write(fd, value.encode())
     except OSError as exc:
-        if exc.errno == errno.EAGAIN:
-            return True
-        if exc.errno in (errno.ENOENT, errno.ENODEV):
-            return False
-        raise
+        return exc.errno == errno.EAGAIN or _failed(path, exc)
     finally:
         os.close(fd)
     return True
+
+
+def _failed(path: Path, exc: OSError) -> bool:
+    if exc.errno not in (errno.ENOENT, errno.ENODEV, errno.ENOTDIR):
+        key = (str(path), exc.errno or 0)
+        if key not in _reported:
+            _reported.add(key)
+            os.write(2, f"leasehold: memory net could not write {path}: {exc}\n".encode())
+    return False
 
 
 class _Window:
@@ -165,7 +200,11 @@ class _Cap:
     path: Path | None
     limit: int
     stall: _Window = field(default_factory=_Window)
-    last_thaw: float = -math.inf
+    #: No park here before this time (after a park or a resume).
+    quiet_until: float = -math.inf
+    #: Its `memory.events` count at the last step, and when it last grew.
+    events: int | None = None
+    pressed_at: float = -math.inf
 
 
 @dataclass
@@ -186,12 +225,20 @@ class _Scope:
     #: The memory it used at the last step, and the swap it held.
     current: int = 0
     swapped: int = 0
-    #: Its memory and swap at its last park: what it needs to run again.
+    #: Its memory when parked: what the reclaim moves out.
     resident: int = 0
+    #: The `memory.swap.max` the net last wrote (None: none yet), and the swap it held when
+    #: its cap was armed, which its limit is `overflow` above.
+    limit: str | None = None
+    base: int = 0
 
     @property
     def footprint(self) -> int:
         return self.current + self.swapped
+
+    @property
+    def limited(self) -> bool:
+        return self.limit not in (None, "max")
 
 
 class MemoryNet:
@@ -205,6 +252,7 @@ class MemoryNet:
         *,
         leases: Callable[[], Iterable[Held]],
         on_change: Callable[[], object] = lambda: None,
+        state: Path | None = None,
         cgroup_root: Path = Path("/sys/fs/cgroup"),
         proc: Path = Path("/proc"),
         uid: int | None = None,
@@ -216,6 +264,7 @@ class MemoryNet:
         self.write_cap = settings.write_per_day_bytes()
         self._leases = leases
         self._on_change = on_change
+        self._state = state
         self._root = cgroup_root
         self._proc = proc
         self._slice = cgroup_root / contain.root_slice_cgroup(uid)
@@ -224,13 +273,21 @@ class MemoryNet:
         self._lock = threading.Lock()
         self._scopes: dict[str, _Scope] = {}
         self._caps: dict[str, _Cap] = {}
-        #: (when, bytes) of each park's writes to swap in the last `DAY_S`.
-        self._writes: collections.deque[tuple[float, int]] = collections.deque()
+        record = _load(state)
+        #: Scopes a net before this one froze or limited, until the first step settles them.
+        self._adopt = {Path(p) for p in record.get("frozen", [])}
+        self._unlimit = {Path(p) for p in record.get("limited", [])}
+        #: (wall-clock time, bytes) of each park's writes to swap in the last `DAY_S`.
+        self._writes: collections.deque[tuple[float, int]] = collections.deque(
+            (float(t), int(n)) for t, n in record.get("writes", [])
+        )
+        self._saved: dict | None = None
+        #: Scopes whose reclaim is under way: their swap limits stay lifted until it ends.
+        self._reclaiming: set[str] = set()
         #: Per lease: [parks, seconds parked], until `take` hands them over.
         self._counts: dict[str, list[float]] = {}
         self._events: list[dict] = []
         self.parks = 0
-        self.forced = 0
         self.written = 0
         self.reason: str | None = None
         self._poller: _Watch | None = None
@@ -280,7 +337,6 @@ class MemoryNet:
 
     def status(self) -> dict:
         with self._lock:
-            now = self._now()
             parked = [
                 {"lease_id": s.lease_id, "since": s.parked_wall, "memory_bytes": s.pre_park}
                 for s in self._scopes.values()
@@ -297,20 +353,19 @@ class MemoryNet:
                 "reason": self.reason,
                 "overflow_bytes": self.overflow,
                 "write_per_day_bytes": self.write_cap,
-                "written_day_bytes": self._written_since(now - DAY_S),
+                "written_day_bytes": self._written_day(),
                 "watched": len(self._scopes),
                 "parked": parked,
                 "settling": settling,
                 "parks": self.parks,
-                "forced_resumes": self.forced,
                 "written_bytes": self.written,
             }
 
     # --- the loop --------------------------------------------------------------------------
 
     def run(self, stop: threading.Event) -> None:
-        """Step every `TICK_S`, and at once when a cap's `memory.events` changes, until `stop`;
-        then resume everything parked."""
+        """Step every `TICK_S`, and sooner when a cap's `memory.events` changes, until `stop`;
+        then `stop()`."""
         self._poller = _Watch()
         last = self._now()
         try:
@@ -329,12 +384,14 @@ class MemoryNet:
             self.stop()
 
     def stop(self) -> None:
-        """Resume every scope this net parked, with no settling."""
+        """Put every swap limit the net set back to `max`, and leave what it parked frozen for
+        the next net to adopt (its record says which)."""
         with self._lock:
             for scope in self._scopes.values():
-                if scope.parked_at is not None:
-                    self._thaw(scope, self._now(), settle=False)
-                scope.thawed_at = scope.thawed_wall = None
+                if scope.limited or scope.lease_id in self._reclaiming:
+                    _write(scope.path / "memory.swap.max", "max")
+                scope.limit = "max"
+            self._save()
 
     def step(self) -> None:
         """Read, then park or resume what is due (the module's docstring)."""
@@ -344,20 +401,22 @@ class MemoryNet:
             now = self._now()
             self.reason = self._unable()
             self._track(held, now)
-            caps = self._read_caps(now)
+            used = self._read_caps(now)
             if self._poller is not None:
                 self._poller.watch([c.path for c in self._caps.values() if c.path is not None])
             for scope in self._scopes.values():
                 self._read_scope(scope, now)
             victim = None
             for key, cap in self._caps.items():
-                if self._resume(key, cap, caps.get(key), now):
+                if self._resume(key, cap, used.get(key), now):
                     continue
-                victim = victim or self._due(key, cap, now)
+                victim = victim or self._due(key, cap, used.get(key), now)
             peers = None if victim is None else self._freeze(victim, now)
+            self._arm()
+            self._save()
             changed = self._shape() != before
         if victim is not None and peers is not None:
-            self._reclaim(victim, peers)
+            self._reclaim(victim)
         if changed:
             self._on_change()
 
@@ -375,19 +434,19 @@ class MemoryNet:
     def _unable(self) -> str | None:
         if not (self._root / "cgroup.controllers").is_file():
             return "no cgroup v2 here, so no scope to pause"
-        swap = None
-        for line in (_read(self._proc / "meminfo") or "").splitlines():
-            name, _, value = line.partition(":")
-            if name == "SwapTotal":
-                parts = value.split()
-                swap = int(parts[0]) * 1024 if parts and parts[0].isdigit() else None
-        if not swap:
+        if not _meminfo(self._proc).get("SwapTotal"):
             return "no swap, so nowhere to put a parked command's memory"
+        if self._slice.is_dir() and not (self._slice / "memory.reclaim").exists():
+            return (
+                "no memory.reclaim (Linux 5.19 or later has it), so no way to move a parked "
+                "command's memory to swap"
+            )
         return None
 
     def _track(self, held: list[Held], now: float) -> None:
         """Start watching the scopes of new leases; let go of those whose lease or scope is
-        gone."""
+        gone. A scope a net before this one froze is adopted as parked while its lease is
+        held, and resumed otherwise."""
         live = dict(held)
         for lease_id in list(self._scopes):
             scope = self._scopes[lease_id]
@@ -395,6 +454,8 @@ class MemoryNet:
                 continue
             if scope.parked_at is not None:
                 self._thaw(scope, now, settle=False)
+            if scope.limited:
+                _write(scope.path / "memory.swap.max", "max")
             del self._scopes[lease_id]
         for lease_id in list(self._counts):
             if lease_id not in live:
@@ -405,11 +466,23 @@ class MemoryNet:
             path = self._find(lease_id)
             if path is None:
                 continue
-            if (_read(path / "cgroup.freeze") or "").strip() == "1":
-                _write(path / "cgroup.freeze", "0")  # left frozen by a daemon that stopped
-            if self.overflow is not None:
-                _write(path / "memory.swap.max", str(self.overflow))
-            self._scopes[lease_id] = _Scope(lease_id, path, granted_at, self._cap_of(path))
+            scope = _Scope(lease_id, path, granted_at, self._cap_of(path))
+            self._scopes[lease_id] = scope
+            if path in self._unlimit or path in self._adopt:
+                scope.limit = "?"  # a net before set it: `_arm` writes it anew
+            self._unlimit.discard(path)
+            if path in self._adopt and (_read(path / "cgroup.freeze") or "").strip() == "1":
+                self._read_scope(scope, now)
+                scope.parked_at, scope.parked_wall = now, self._clock()
+                scope.pre_park, scope.limit = scope.footprint, "max"
+                self._counts.setdefault(lease_id, [1, 0.0])
+            self._adopt.discard(path)
+        # What the record names and no held lease owns: the first step resumes and unlimits it.
+        for path in self._adopt:
+            _write(path / "cgroup.freeze", "0")
+        for path in self._adopt | self._unlimit:
+            _write(path / "memory.swap.max", "max")
+        self._adopt, self._unlimit = set(), set()
 
     def _find(self, lease_id: str) -> Path | None:
         unit = contain.lease_unit(lease_id)
@@ -434,7 +507,8 @@ class MemoryNet:
         return key
 
     def _read_caps(self, now: float) -> dict[str, int]:
-        """Each cap's use now, in bytes; its stall total goes in its window."""
+        """Each cap's use now, in bytes; its stall total goes in its window, and a new
+        `memory.events` count marks it pressed."""
         used: dict[str, int] = {}
         keys = {s.cap for s in self._scopes.values()}
         for key in list(self._caps):
@@ -452,6 +526,10 @@ class MemoryNet:
                 if current is not None:
                     used[key] = current
                 stall = _stall_us(cap.path / "memory.pressure")
+                events = _events(cap.path / "memory.events")
+                if events is not None and cap.events is not None and events > cap.events:
+                    cap.pressed_at = now
+                cap.events = events
             if stall is not None:
                 cap.stall.add(now, stall)
         return used
@@ -459,6 +537,7 @@ class MemoryNet:
     def _read_scope(self, scope: _Scope, now: float) -> None:
         scope.current = _int(scope.path / "memory.current") or 0
         scope.swapped = _int(scope.path / "memory.swap.current") or 0
+        scope.base = min(scope.base, scope.swapped)
         if scope.parked_at is None:
             scope.swap.add(now, scope.swapped)
         if scope.thawed_at is not None:
@@ -484,6 +563,35 @@ class MemoryNet:
     def _in(self, key: str) -> list[_Scope]:
         return [s for s in self._scopes.values() if s.cap == key]
 
+    def _heavy(self, key: str) -> list[_Scope]:
+        """The cap's running heavy scopes."""
+        return [s for s in self._in(key) if s.parked_at is None and s.footprint >= HEAVY_BYTES]
+
+    def _armed(self, key: str) -> bool:
+        return (
+            self.reason is None
+            and self._written_day() < self.write_cap
+            and len(self._heavy(key)) >= 2
+        )
+
+    def _arm(self) -> None:
+        """Set each running scope's swap limit: `overflow` above its base in an armed cap,
+        `max` elsewhere. A scope whose reclaim is under way keeps its limit lifted."""
+        if self.overflow is None:
+            return
+        for key in self._caps:
+            armed = self._armed(key)
+            for scope in self._in(key):
+                if scope.parked_at is not None or scope.lease_id in self._reclaiming:
+                    continue
+                if armed and not scope.limited:
+                    scope.base = scope.swapped
+                want = str(scope.base + self.overflow) if armed else "max"
+                if want == "max" and scope.limit is None:
+                    scope.limit = want  # never limited: leave it as it was found
+                elif want != scope.limit and _write(scope.path / "memory.swap.max", want):
+                    scope.limit = want
+
     def _resume(self, key: str, cap: _Cap, used: int | None, now: float) -> bool:
         """Resume the cap's longest-parked scope when it is due; whether one was."""
         parked = sorted(
@@ -493,58 +601,62 @@ class MemoryNet:
         if not parked:
             return False
         first = parked[0]
-        assert first.parked_at is not None
-        running = [s for s in self._in(key) if s.parked_at is None and s.footprint >= HEAVY_BYTES]
-        forced = now - first.parked_at >= MAX_PARK_S
         fits = used is not None and used + first.swapped < THAW_AT * cap.limit
-        if not (forced or not running or fits):
+        if self._heavy(key) and not fits:
             return False
-        if running and not fits:
-            self.forced += 1
         self._thaw(first, now, settle=True)
-        cap.last_thaw = now
+        cap.quiet_until = now + GAP_S
         return True
 
-    def _due(self, key: str, cap: _Cap, now: float) -> _Scope | None:
+    def _due(self, key: str, cap: _Cap, used: int | None, now: float) -> _Scope | None:
         """The scope to park in the cap now, if a park is due there."""
-        if self.reason is not None or now - cap.last_thaw < THAW_GAP_S:
+        if now < cap.quiet_until or not self._armed(key):
             return None
-        if self._written_since(now - DAY_S) >= self.write_cap:
+        near = used is not None and used >= NEAR * cap.limit
+        if not near and now - cap.pressed_at > SLOW_WINDOW_S:
             return None
         running = [s for s in self._in(key) if s.parked_at is None]
-        heavy = [s for s in running if s.footprint >= HEAVY_BYTES]
-        if len(heavy) < 2:
-            return None
+        due = False
         for span in (WINDOW_S, SLOW_WINDOW_S):
             spilling = any(
                 (rise := s.swap.rise(span)) is not None and rise[0] >= SPILL_BYTES for s in running
             )
-            stalled = cap.stall.rise(span)
-            if spilling and stalled is not None and stalled[0] / 1e6 >= STALL_SHARE * stalled[1]:
-                return max(heavy, key=lambda s: s.granted_at)
-        return None
+            due = due or (spilling and _stalled(cap.stall.rise(span)))
+        if not due and self.overflow is not None:
+            full = any(
+                s.limited and s.swapped - s.base >= FULL_SHARE * self.overflow for s in running
+            )
+            stall = cap.stall.rise(SLOW_WINDOW_S) or cap.stall.rise(WINDOW_S)
+            due = full and _stalled(stall)
+        if not due:
+            return None
+        return max(self._heavy(key), key=lambda s: s.granted_at)
 
     def _freeze(self, scope: _Scope, now: float) -> list[_Scope] | None:
         """Freeze `scope` and lift its swap limit and its cap's other running scopes'; those
-        others. None when the scope is gone (its command has just ended)."""
+        others. None when the scope could not be frozen (its command has just ended)."""
         if not _write(scope.path / "cgroup.freeze", "1"):
             return None
         scope.parked_at, scope.parked_wall = now, self._clock()
         scope.thawed_at = scope.thawed_wall = scope.calm_since = scope.last = None
         scope.pre_park, scope.resident = scope.footprint, scope.current
-        scope.swap.clear()
         self.parks += 1
         self._counts.setdefault(scope.lease_id, [0, 0.0])[0] += 1
         self._events.append({"type": "parked", "lease_id": scope.lease_id})
+        cap = self._caps[scope.cap]
+        cap.stall.clear()
+        cap.quiet_until = now + GAP_S
         peers = [s for s in self._in(scope.cap) if s.parked_at is None]
-        if self.overflow is not None:
-            for s in [scope, *peers]:
+        for s in [scope, *peers]:
+            s.swap.clear()
+            if s.limited:
                 _write(s.path / "memory.swap.max", "max")
+            s.limit = "max"
+            self._reclaiming.add(s.lease_id)
+        self._reclaiming.discard(scope.lease_id)
         return peers
 
     def _thaw(self, scope: _Scope, now: float, *, settle: bool) -> None:
-        if self.overflow is not None:
-            _write(scope.path / "memory.swap.max", str(self.overflow))
         _write(scope.path / "cgroup.freeze", "0")
         if scope.parked_at is not None:
             counts = self._counts.setdefault(scope.lease_id, [0, 0.0])
@@ -553,34 +665,83 @@ class MemoryNet:
         if settle:
             scope.thawed_at, scope.thawed_wall = now, self._clock()
         scope.swap.clear()
+        scope.limit = "max"  # as `_freeze` left it; `_arm` sets it anew
         self._events.append({"type": "resumed", "lease_id": scope.lease_id})
 
-    def _written_since(self, since: float) -> int:
+    def _written_day(self) -> int:
+        since = self._clock() - DAY_S
         while self._writes and self._writes[0][0] < since:
             self._writes.popleft()
         return sum(n for _, n in self._writes)
 
+    def _save(self) -> None:
+        """Write the record when what it says has changed."""
+        if self._state is None:
+            return
+        record = {
+            "frozen": sorted(str(s.path) for s in self._scopes.values() if s.parked_at is not None),
+            "limited": sorted(
+                str(s.path)
+                for s in self._scopes.values()
+                if s.limited or s.lease_id in self._reclaiming
+            ),
+            "writes": [list(w) for w in self._writes],
+        }
+        if record == self._saved:
+            return
+        with contextlib.suppress(OSError):
+            temp = self._state.with_suffix(".tmp")
+            temp.write_text(json.dumps(record))
+            temp.replace(self._state)
+            self._saved = record
+
     # --- outside the lock ------------------------------------------------------------------
 
-    def _reclaim(self, scope: _Scope, peers: list[_Scope]) -> None:
+    def _reclaim(self, scope: _Scope) -> None:
         """Move the parked `scope`'s memory out to swap (blocking until the kernel is done),
-        then put its peers' swap limits back."""
+        then let `_arm` set its peers' swap limits again."""
         with self._lock:
-            left = self.write_cap - self._written_since(self._now() - DAY_S)
-            want = min(scope.resident, max(0, left))
+            want = min(scope.resident, max(0, self.write_cap - self._written_day()))
         before = _int(scope.path / "memory.swap.current") or 0
         try:
             if want > 0:
                 _write(scope.path / "memory.reclaim", str(want))
         finally:
-            if self.overflow is not None:
-                for peer in peers:
-                    _write(peer.path / "memory.swap.max", str(self.overflow))
-        after = _int(scope.path / "memory.swap.current")
-        written = max(0, (after or before) - before)
-        with self._lock:
-            self._writes.append((self._now(), written))
-            self.written += written
+            after = _int(scope.path / "memory.swap.current")
+            written = max(0, (after or before) - before)
+            with self._lock:
+                self._writes.append((self._clock(), written))
+                self.written += written
+                self._reclaiming.clear()
+                self._arm()
+                self._save()
+
+
+def release(state: Path | None) -> None:
+    """With the net off: resume every scope the record at `state` says a net froze, put every
+    swap limit it set back to `max`, and forget the record."""
+    record = _load(state)
+    for path in record.get("frozen", []):
+        _write(Path(path) / "cgroup.freeze", "0")
+    for path in {*record.get("frozen", []), *record.get("limited", [])}:
+        _write(Path(path) / "memory.swap.max", "max")
+    if state is not None and record:
+        with contextlib.suppress(OSError):
+            state.unlink()
+
+
+def _load(state: Path | None) -> dict:
+    if state is None:
+        return {}
+    try:
+        record = json.loads(state.read_text())
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def _stalled(rise: tuple[int, float] | None) -> bool:
+    return rise is not None and rise[0] / 1e6 >= STALL_SHARE * rise[1]
 
 
 def _leases(ids: list[str]) -> str:
