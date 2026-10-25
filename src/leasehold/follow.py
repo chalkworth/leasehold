@@ -31,7 +31,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from leasehold import contain, jobs
+from leasehold import host, jobs
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.units import memory_to_bytes
 
@@ -46,8 +46,9 @@ _SETTLE_S = 0.05
 class Follower:
     """One elastic lease's holder side. `granted` is the lease as granted (its `weight`,
     `jobs`, and from a daemon with elastic leases its `elastic`, `target` and `target_jobs`).
-    `server` is the command's jobserver; `scope` its systemd scope, if it runs in one, sized
-    with `memory_per_slot` (a size such as `2g`) for each slot when given, and `hard_cpu`.
+    `server` is the command's jobserver; `tree` its tree, if it runs in a kernel group of its
+    own, which `platform` resizes with `memory_per_slot` (a size such as `2g`) for each slot when
+    given, and `hard_cpu`.
     `client` should answer within a renewal interval, since `step` waits for it."""
 
     def __init__(
@@ -57,7 +58,8 @@ class Follower:
         granted: dict,
         *,
         server: jobs.Jobserver,
-        scope: str | None = None,
+        tree: host.Tree | None = None,
+        platform: host.Host | None = None,
         memory_per_slot: str | None = None,
         hard_cpu: bool = False,
         say: Callable[[str], None] = lambda _: None,
@@ -68,7 +70,8 @@ class Follower:
         self.elastic = bool(granted.get("elastic"))
         self._take(granted)
         self.server = server
-        self.scope = scope
+        self.tree = tree
+        self._host = platform
         self.memory_per_slot = memory_per_slot
         self.hard_cpu = hard_cpu
         self._say = say
@@ -158,13 +161,13 @@ class Follower:
             self._resize_scope()
 
     def _resize_scope(self) -> None:
-        if self.scope is None:
+        if self.tree is None or self._host is None:
             return
         memory = None
         if self.memory_per_slot is not None:
             memory = f"{self.weight * memory_to_bytes(self.memory_per_slot)}b"
-        why = contain.update_scope(
-            self.scope, weight=self.weight, memory=memory, hard_cpu=self.hard_cpu
-        )
-        if why is not None:
-            self._say(why)
+        unit = self.tree.unit or ""
+        spec = host.TreeSpec(unit, "", weight=self.weight, memory=memory, hard_cpu=self.hard_cpu)
+        done = self._host.resize(self.tree, spec)
+        if done.how == "none":
+            self._say(done.reason or f"cannot resize {unit}")

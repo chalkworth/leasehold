@@ -5,7 +5,12 @@
 # the MCP server) reach it only through `leasehold.client`, never by importing the agent, the API
 # or the ledger.
 #
-# A package named here (`cli`, `top`) stands for itself and every module in it.
+# Everything leasehold asks of the operating system about processes and memory goes through
+# `leasehold.host`, at the bottom of the layers. Only it imports its platform modules (linux,
+# posix, systemd), and only it reads cgroup files, apart from the daemon's load reader and the
+# memory net (whose swap parking reads its scopes' files until the watchdog replaces it).
+#
+# A package named here (`cli`, `top`, `host`) stands for itself and every module in it.
 
 [importlinter]
 root_package = leasehold
@@ -30,7 +35,7 @@ layers =
     elastic
     admission
     model | discovery | estimate
-    paths
+    paths | host
 containers =
     leasehold
 
@@ -59,6 +64,26 @@ forbidden_modules =
     leasehold.machine
     leasehold.admission
     leasehold.elastic
+
+[importlinter:contract:host]
+name = only leasehold.host imports its platform modules
+type = protected
+protected_modules =
+    leasehold.host.linux
+    leasehold.host.posix
+    leasehold.host.systemd
+allowed_importers =
+    leasehold.host
+
+[importlinter:contract:cgroup]
+name = cgroup files are read through leasehold.host
+type = protected
+protected_modules =
+    leasehold.cgroup
+allowed_importers =
+    leasehold.host
+    leasehold.load
+    leasehold.net
 
 [importlinter:contract:leaves]
 name = leaf modules import nothing else of leasehold's

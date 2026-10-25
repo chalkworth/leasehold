@@ -1827,6 +1827,10 @@ when a field is removed or changes meaning:
   memory_max` [cap](#a-hard-cap-memory_max) in bytes (`"8589934592b"`) or null; and
   `memory_cap`, how a cap works on this machine: `how` (`exact`, `polled` or `none`) and,
   for `none`, `reason`;
+- `host`: what the daemon's host can do on this machine, one entry per operation (`start`,
+  `adopt`, `members`, `footprint`, `pressure`, `pause`, `resume`, `kill`, `ended`,
+  `memory_hard`, `session_processes`), each with `how` (`exact`, `polled` or `none`), `reason`
+  (why not, for `none`) and `via` (what does it in words, such as `systemd`, or null);
 - `maintenance`: the [maintenance lease](#maintenance) that holds the machine, or else the
   oldest one draining it, or null: `lease_id`, `state` (`held` or `draining`), `user`, `name`
   (its `name` label, or else its user), `reason`, `until` (its `until` label, or null) and

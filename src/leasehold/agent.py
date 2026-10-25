@@ -267,6 +267,8 @@ class MachineAgent:
             )
         else:
             memory_net.release(record)
+        #: What the host can do here, once asked (`capabilities`).
+        self._capabilities: dict[str, dict] | None = None
         self._seen = self._snapshot()
 
     def _guard_cgroups(self) -> tuple[str, ...]:
@@ -1085,9 +1087,21 @@ class MachineAgent:
             "when_busy": settings.when_busy,
         }
 
+    def capabilities(self) -> dict[str, dict]:
+        """What the host can do for this daemon (`leasehold.host`), worked out once."""
+        if self._capabilities is None:
+            found = host.current().capabilities()
+            self._capabilities = {
+                op: {"how": s.how, "reason": s.reason, "via": s.via} for op, s in found.items()
+            }
+        return self._capabilities
+
     def status(self) -> dict:
         if self.last_load is None:
             self.last_load = self.loader.read()
+        capabilities = self.capabilities()
+        hard = capabilities["memory_hard"]
+        cap = {"how": hard["how"], "reason": hard["reason"]}
         listing = self.leases()
         return status.report(
             config=self.config,
@@ -1105,7 +1119,8 @@ class MachineAgent:
             queue=listing["queue"],
             maintenance=self.maintenance(),
             memory_net=None if self.net is None else self.net.status(),
-            contain=self.contain_settings() | {"memory_cap": vars(host.memory_cap())},
+            contain=self.contain_settings() | {"memory_cap": cap},
+            host=capabilities,
             now=self._clock(),
             version=__version__,
         )

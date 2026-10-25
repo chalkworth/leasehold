@@ -71,7 +71,6 @@ from pathlib import Path
 from leasehold import (
     attach,
     busy,
-    contain,
     handoff,
     hooknotes,
     host,
@@ -313,7 +312,7 @@ def pre(
             jobs=jobs,
             threads=_threads(settings, command, event, env) or rule.threads,
             weight=granted,
-            mark=host.mark().encode(),
+            mark=host.current().mark().encode(),
         )
         if noted and why is None:
             memory = rule.memory
@@ -356,7 +355,7 @@ def _no_attach(contain_settings: Mapping) -> str | None:
     """Why a granted command's shell is not offered its lease's scope here; None when it is."""
     if contain_settings.get("mode", "auto") == "off":
         return 'the daemon has [contain] mode = "off"'
-    found = host.adoption()
+    found = host.current().support("adopt")
     return found.reason if found.how == "none" else None
 
 
@@ -419,12 +418,12 @@ def post(event: Mapping, client: Client, *, env: Mapping[str, str]) -> Reply:
         reply.log.append(f"{program} was not contained: {collected.reason}")
         if collected.cap_bytes is not None:
             said.append(_uncapped(program, collected.cap_bytes, collected.reason))
-    if collected is not None and collected.left is not None and collected.unit:
+    if collected is not None and collected.left is not None and collected.tree is not None:
         pid, name, used = collected.left
-        failed = contain.neutral_scope(collected.unit)
+        done = host.current().release(collected.tree)
         said.append(
             f"leasehold: {program} left {name} running (pid {pid}, {size(used)}) in its scope; "
-            + (failed or "it no longer has the lease's limits")
+            + (done.reason if done.how == "none" else "it no longer has the lease's limits")
         )
     if found is not None:
         reply.output = {
@@ -484,31 +483,19 @@ def _memory(
     usage = None if collected is None else collected.usage
     if status is None or (mark is None and usage is None):
         return None
-    ending = host.ended(status, host.Mark.decode(mark))
-    peak = limit = largest = None
+    peak = largest = None
+    tree = counted = None
     if usage is not None:
-        peak = usage.peak_bytes
-        reached = collected.capped and bool(host.cap_ended(collected.unit))
-        if usage.oom_kills or reached:
-            kind = _cap_or_kernel(collected)
-            ending = host.Ending(kind, "certain", ending.kills, how="exact")
-            limit = collected.cap_bytes if kind == "cap" else collected.limit_bytes
-            seen = collected.largest
-            # Named only when it held most of what was capped: otherwise it was read too early.
-            if kind == "cap" and seen is not None and seen[2] * 2 >= collected.cap_bytes:
-                largest = seen
+        peak, counted = usage.peak_bytes, usage.oom_kills
+        tree = collected.tree
+    # Certain when its scope counted the kill, or systemd says its own cap ended it.
+    ending = host.current().ended(status, host.Mark.decode(mark), tree=tree, counted=counted)
+    seen = None if collected is None else collected.largest
+    # Named only when it held most of what was capped: otherwise it was read too early.
+    if ending.memory == "cap" and seen is not None and seen[2] * 2 >= (ending.limit_bytes or 0):
+        largest = seen
     agent_limit = env.get(verdict.AGENT_LIMIT_ENV) or None
     return verdict.describe(
-        ending, program, status=status, peak_bytes=peak, limit_bytes=limit,
+        ending, program, status=status, peak_bytes=peak, limit_bytes=ending.limit_bytes,
         agent_limit=agent_limit, largest=largest,
     )  # fmt: skip
-
-
-def _cap_or_kernel(collected: attach.Collected) -> str:
-    """Whose limit an OOM kill the scope counted was: `cap` when the command's own cap was the
-    tightest on it (to within a page, which the kernel rounds it to), else `kernel`."""
-    if not collected.capped or collected.cap_bytes is None:
-        return "kernel"
-    page = os.sysconf("SC_PAGE_SIZE")
-    above = collected.limit_bytes
-    return "cap" if above is None or above + page > collected.cap_bytes else "kernel"

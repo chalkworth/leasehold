@@ -6,8 +6,9 @@ group.
 * It gets the lease's environment (`leasing.child_env`): its `LEASEHOLD_*` variables and, with
   `job_env`, job and thread counts for the weight granted. Unleased, it gets the caller's
   environment without `LEASEHOLD_WANT`, and nothing else below applies.
-* Where the daemon allows it and the caller runs in the user's own session, it runs in a systemd
-  user scope sized to the lease (`leasehold.contain`); `contain=False` runs it as is.
+* Where the daemon allows it and the host can (`leasehold.host`; on Linux, for a caller in the
+  user's own session), it runs in a kernel group sized to the lease, a systemd user scope;
+  `contain=False` runs it as is.
 * With `jobserver`, it gets a make jobserver of the lease's job count, and a range is elastic
   unless `elastic` is false: once its jobs take tokens, the lease's jobserver and scope follow
   the lease's target (`leasehold.follow`), stepped from the lease's renewal thread.
@@ -26,14 +27,14 @@ group.
   command. A cap that cannot be enforced here (no scope, or a platform with no cap) is said
   in `uncapped`, never left silent.
 * Once a contained command ends, a process it left running in its scope (a build server) loses
-  the lease's limits (`contain.neutral_scope`), and `say` hears so.
+  the lease's limits (`Host.release`), and `say` hears so.
 * Once any command ends, `memory` is the memory verdict on it (`leasehold.verdict`), or None
   when memory did not end it as far as leasehold can tell: `certain` when its scope counted
   the OOM kill, `likely` when it ended by SIGKILL while the machine's count rose
   (`leasehold.host`, which knows of no kills off Linux).
 
-No signal handler is installed: a caller that wants signals passed on sends them to `pid`'s
-group.
+The host starts the command and reaps it (`leasehold.host.Started`). No signal handler is
+installed: a caller that wants signals passed on sends them to `pid`'s group.
 """
 
 from __future__ import annotations
@@ -43,18 +44,18 @@ import dataclasses
 import os
 import shutil
 import signal
-import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from leasehold import contain, follow, host, jobs, measure, verdict
+from leasehold.host import group_alive, signal_group
 from leasehold.kinds import PREEMPTIBLE
 from leasehold.leasing import Lease, own_env
 from leasehold.units import CAP_OFF, memory_to_bytes, size
 
-__all__ = ["Command", "NotStarted", "group_alive", "jobserver_env", "scope_prefix"]
+__all__ = ["Command", "NotStarted", "group_alive", "jobserver_env", "signal_group"]
 
 #: How often `Command.wait` looks at the lease while the command runs.
 _POLL_S = 0.1
@@ -64,49 +65,6 @@ CAP_PERIOD_S = 0.25
 
 class NotStarted(Exception):
     """The command could not be started; nothing of it runs."""
-
-
-def group_alive(pgid: int) -> bool:
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def signal_group(pgid: int, sig: int) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pgid, sig)
-
-
-def stop_group(child: subprocess.Popen, grace_s: float) -> int:
-    """SIGTERM the group `child` leads, wait up to `grace_s`, then SIGKILL whatever is left. The
-    leader's exit status."""
-    pgid = child.pid
-    signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + grace_s
-    while time.monotonic() < deadline:
-        if child.poll() is not None and not group_alive(pgid):
-            break
-        time.sleep(0.1)
-    signal_group(pgid, signal.SIGKILL)
-    return child.wait()
-
-
-def scope_prefix(
-    lease_id: str, weight: int, settings: dict, memory: str | None, cap: Sequence[str] = ()
-) -> list | None:
-    """The `systemd-run` prefix for a lease's command, with the properties `cap` of a hard
-    memory cap (`leasehold.host.cap_properties`), or None where it runs as is: the daemon
-    turned containment off (`[contain] mode`, from the grant's `contain` `settings`), or
-    `contain.probe` finds no user scope this caller may use."""
-    if settings.get("mode", "auto") == "off" or not contain.probe().enforced:
-        return None
-    return contain.lease_argv(
-        lease_id, weight=weight, memory=memory, hard_cpu=bool(settings.get("hard_cpu")), cap=cap
-    )
 
 
 def cap_bytes(asked: str | None, contain_settings: Mapping) -> int | None:
@@ -121,11 +79,13 @@ def cap_bytes(asked: str | None, contain_settings: Mapping) -> int | None:
     return memory_to_bytes(value)
 
 
-def _no_scope(settings: Mapping) -> str:
-    """Why a lease's command gets no scope here (`scope_prefix` gave none)."""
+def _no_scope(settings: Mapping, found: host.Support) -> str | None:
+    """Why a lease's command gets no kernel group here: the daemon turned containment off
+    (`[contain] mode`, from the grant's `contain` `settings`), or the host cannot make one for
+    this caller (`found`, its support for `start`). None when it gets one."""
     if settings.get("mode", "auto") == "off":
         return 'the daemon has [contain] mode = "off"'
-    return contain.probe().reason
+    return found.reason if found.how == "none" else None
 
 
 def jobserver_env(env: Mapping[str, str], count: int, fifo: Path) -> dict[str, str]:
@@ -164,7 +124,7 @@ class Command:
     `off`; None: the cap the grant names, if any); `uncapped` says why a cap asked for does not
     hold (None: it holds, or none was asked for).
     `say` hears what the follower and the stop have to tell. Raises `NotStarted`, or
-    `contain.Cancelled` when `cancel_fd` turns readable while its scope is made.
+    `host.Cancelled` when `cancel_fd` turns readable while its scope is made.
 
     Once it has ended, `oom_killed` says whether the OOM killer ended any of its processes and
     `peak_bytes` is the most memory its scope used (None: unknown). Both are known only for a
@@ -204,8 +164,7 @@ class Command:
         self.peak_bytes: int | None = None
         self.memory: verdict.Verdict | None = None
         self._program = Path(argv[0]).name if argv else ""
-        self._mark = host.Mark()
-        self._limit: int | None = None
+        self._host = host.current()
         self._cap: int | None = None
         self._say = say
         self._meter: measure.Meter | None = None
@@ -225,7 +184,7 @@ class Command:
         env, tty, cancel_fd, popen,
     ) -> None:  # fmt: skip
         lease = self.lease
-        server = prefix = None
+        server = spec = None
         cap = why = None
         if not lease.held:
             env = own_env(env)
@@ -249,32 +208,35 @@ class Command:
                 env |= jobserver_env(env, lease.jobs, server.fifo)
             settings = lease._answer.get("contain") or {}
             cap = cap_bytes(most_mem, settings)
-            props: list[str] = []
+            capped = cap
             if cap is not None:
-                found = host.memory_cap()
+                found = self._host.support("memory_hard")
                 if found.how == "none":
-                    why = found.reason
-                else:
-                    props = host.cap_properties(cap)
+                    why, capped = found.reason, None
             if contained:
-                prefix = scope_prefix(lease.lease_id, weight, settings, memory, cap=props)
-                if cap is not None and prefix is None and why is None:
-                    why = _no_scope(settings)
+                no_scope = _no_scope(settings, self._host.support("start"))
+                if no_scope is None:
+                    spec = host.TreeSpec(
+                        contain.lease_unit(lease.lease_id), contain.lease_slice(),
+                        weight=weight, memory=memory, cap_bytes=capped,
+                        hard_cpu=bool(settings.get("hard_cpu")),
+                    )  # fmt: skip
+                elif cap is not None and why is None:
+                    why = no_scope
             elif cap is not None:
                 why = "it was started with contain=False"
-            if prefix and not _findable(argv[0], env, popen.get("cwd")):
+            if spec and not _findable(argv[0], env, popen.get("cwd")):
                 # Said here: under systemd-run a missing program would be its error, not ours.
                 raise NotStarted(f"cannot run {argv[0]}: not found or not executable")
         group = {"process_group": 0} if tty else {"start_new_session": True}
         started = time.monotonic()
-        self._mark = host.mark()
         try:
-            self.process, self.uncontained = contain.spawn(
-                argv, prefix, env=env, cancel_fd=cancel_fd, whole=cap is not None and not why,
-                **group, **popen,
-            )  # fmt: skip
+            self.started = self._host.start(
+                argv, spec, env=env, cancel_fd=cancel_fd, **group, **popen
+            )
         except OSError as exc:
             raise NotStarted(f"cannot run {argv[0]}: {exc}") from exc
+        self.process, self.uncontained = self.started.process, self.started.uncontained
         self.pid = self.process.pid
         if cap is not None:
             why = why or self.uncontained
@@ -282,17 +244,15 @@ class Command:
                 self.uncapped = f"no memory cap of {size(cap)} on {self._program}: {why}"
             else:
                 self._cap = cap
-        if prefix and not self.uncontained:
+        if spec and not self.uncontained:
             self._repo = measure.repository(popen.get("cwd"))
-            unit = contain.lease_unit(lease.lease_id)
-            running = lambda: self.process.poll() is None  # noqa: E731
+            running = lambda: self.started.poll() is None  # noqa: E731
             # A capped command is read more often, to name its largest process if it is killed.
             period = CAP_PERIOD_S if self._cap is not None else measure.PERIOD_S
             self._meter = measure.Meter(
-                self.pid, unit, started=started, running=running, period_s=period
+                self._host, self.started.tree, started=started, running=running, period_s=period
             )
             self._stack.callback(self._meter.stop)
-            self._limit = host.memory_max(self.pid)
         if lease.held and lease.kind in PREEMPTIBLE:
             watcher = threading.Thread(
                 target=self._stop_when_lost, name=f"leasehold-watch-{self.pid}", daemon=True
@@ -300,10 +260,10 @@ class Command:
             watcher.start()
         if elastic and server is not None:
             settings = lease._answer.get("contain") or {}
-            scoped = prefix and not self.uncontained
+            scoped = spec and not self.uncontained
             follower = follow.Follower(
                 lease._quick, lease.lease_id, granted, server=server,
-                scope=contain.lease_unit(lease.lease_id) if scoped else None,
+                tree=self.started.tree if scoped else None, platform=self._host,
                 memory_per_slot=per_slot, hard_cpu=bool(settings.get("hard_cpu")), say=self._say,
             )  # fmt: skip
             settle_s = (lease._answer.get("elastic") or {}).get("settle_s")
@@ -312,12 +272,12 @@ class Command:
 
     def _stop_when_lost(self) -> None:
         """Stop the group once the lease is lost, whether or not anyone waits for the command."""
-        while self.process.poll() is None:
+        while self.started.poll() is None:
             if self.lease._lost_event.wait(_POLL_S):
-                if self.process.poll() is None:
+                if self.started.poll() is None:
                     self.stopped_for = self.lease.lost
                     self._say(f"lease revoked ({self.stopped_for}); stopping the command")
-                    stop_group(self.process, self.grace_s)
+                    self.started.kill(self.grace_s)
                 return
 
     def wait(self, timeout: float | None = None) -> int:
@@ -326,15 +286,15 @@ class Command:
         `subprocess.TimeoutExpired` when `timeout` passes first."""
         if self.returncode is not None:
             return self.returncode
-        code = self.process.wait(timeout=timeout)
+        code = self.started.wait(timeout=timeout)
         self._end(code)
         return code
 
     def _end(self, code: int) -> None:
-        ending = host.ended(code, self._mark)
-        unit = contain.lease_unit(self.lease.lease_id) if self.lease.held else ""
         largest = None
-        if self._meter is not None:
+        if self._meter is None:
+            ending = self.started.ending()
+        else:
             wall_s = self._meter.stop()
             usage = self._meter.usage
             self.lease._outcome = {
@@ -345,55 +305,42 @@ class Command:
                 "exit_status": code,
             }
             self.peak_bytes = usage.peak_bytes
-            self.oom_killed = (usage.oom_kills or 0) > 0 or (
-                code == -signal.SIGKILL and (self._meter.machine_oom_kills or 0) > 0
+            # Certain when its own scope counted the kill, or systemd says its cap ended it.
+            ending = self.started.ending(counted=usage.oom_kills)
+            self.oom_killed = ending.confidence == "certain" or (
+                code == -signal.SIGKILL and (ending.kills or 0) > 0
             )
-            # A capped scope outlives its command, so systemd can say the OOM killer ended it.
-            reached = self._cap is not None and host.cap_ended(unit)
-            self.oom_killed = self.oom_killed or bool(reached)
             self.lease.oom_killed = self.oom_killed
-            if usage.oom_kills or reached:  # its own scope counted it
-                ending = host.Ending(self._cap_or_kernel(), "certain", ending.kills, how="exact")
             # Named only when it held most of what was capped: otherwise it was read too early.
             seen = self._meter.largest
             if self._cap is not None and seen is not None and seen[2] * 2 >= self._cap:
                 largest = seen
-        limit = self._limit if ending.confidence == "certain" else None
         self.memory = verdict.describe(
             ending,
             self._program,
             status=code,
             peak_bytes=self.peak_bytes,
-            limit_bytes=self._cap if ending.memory == "cap" else limit,
+            limit_bytes=ending.limit_bytes,
             agent_limit=os.environ.get(verdict.AGENT_LIMIT_ENV) or None,
             largest=largest,
         )
         self.lease.memory = self.memory
         if group_alive(self.pid):
-            stop_group(self.process, self.grace_s)
+            self.started.kill(self.grace_s)
         if self._meter is not None and (left := self._meter.left()):
             pid, name, used = left[0]
-            failed = contain.neutral_scope(unit)
+            done = self._host.release(self.started.tree)
             self._say(
                 f"{self._program} left {name} running (pid {pid}, {size(used)}) in its scope; "
-                + (failed or "it no longer has the lease's limits")
+                + (done.reason if done.how == "none" else "it no longer has the lease's limits")
             )
         self.returncode = code
         self._stack.close()
 
-    def _cap_or_kernel(self) -> str:
-        """Whose limit an OOM kill its scope counted was: `cap` when the command's own cap was
-        the tightest limit on it (to within a page, which the kernel rounds it to), else
-        `kernel`."""
-        if self._cap is None:
-            return "kernel"
-        page = os.sysconf("SC_PAGE_SIZE")
-        return "cap" if self._limit is None or self._limit + page > self._cap else "kernel"
-
     def close(self) -> None:
         """Stop the command's group, if it still runs, and what it holds (its jobserver)."""
         if self.returncode is None:
-            self._end(stop_group(self.process, self.grace_s))
+            self._end(self.started.kill(self.grace_s))
 
     def __enter__(self) -> Command:
         return self

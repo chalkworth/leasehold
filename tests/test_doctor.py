@@ -8,7 +8,7 @@ import pytest
 from support import machine_config
 
 from leasehold import doctor, host
-from leasehold.contain import Containment
+from leasehold.host.posix import Posix
 
 
 def test_a_negative_oom_score_adj_is_warned_about(tmp_path):
@@ -22,8 +22,10 @@ def test_a_negative_oom_score_adj_is_warned_about(tmp_path):
     assert doctor.check_oom_score(roots) is None
 
 
-EXACT = host.Cap("exact")
-MACOS = host.Cap("none", "macOS has no per-command memory limit without root")
+EXACT = host.Support("exact", via="MemoryMax")
+MACOS = host.Support("none", "macOS has no per-command memory limit without root")
+#: Commands get a scope here.
+SCOPES = host.Support("exact", via="systemd")
 #: case: ([commands], [contain] mode, how a cap works here, the check's level, in its detail).
 CAP_CASES = {
     "none set": ({}, "auto", EXACT, "ok", "none is set"),
@@ -41,9 +43,19 @@ CAP_CASES = {
 )
 def test_a_memory_cap_that_cannot_hold_is_warned_about(tmp_path, commands, mode, cap, level, says):
     config = machine_config(tmp_path, commands=commands, contain={"mode": mode})
-    found = doctor.check_memory_cap(config, {}, probe=lambda env: Containment(True, ""), cap=cap)
+    found = doctor.check_memory_cap(config, {}, start=SCOPES, cap=cap)
     assert (found.name, found.level) == ("memory_max", level)
     assert says in found.detail
+
+
+def test_doctor_says_how_each_operation_works_on_this_host():
+    # The fallback host, as on a system leasehold has no port for: it signals process groups
+    # and does nothing else.
+    found = doctor.check_host(Posix().capabilities())
+    assert found.level == "ok"
+    said = dict(part.rsplit(" ", 1) for part in found.detail.split(": ", 1)[1].split(", "))
+    assert list(said) == list(host.OPERATIONS)
+    assert {op for op, how in said.items() if how != "none"} == {"pause", "resume", "kill"}
 
 
 @pytest.mark.parametrize("cap", ["0g", "150%", "lots"])

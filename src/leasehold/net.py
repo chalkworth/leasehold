@@ -28,7 +28,8 @@ long one a slow spill, and the last a scope whose swap is at its limit and can n
 The net then parks the cap's youngest heavy scope, the one granted last, which has done the
 least work, and no other in that cap for `GAP_S`.
 
-To park a scope, the net freezes it (`cgroup.freeze`), lifts its swap limit and asks the kernel
+To park a scope, the net pauses it through the host (`leasehold.host`, which freezes its
+cgroup), lifts its swap limit and asks the kernel
 to reclaim what it uses (`memory.reclaim`, at most what the day's writes leave), which moves its
 memory out to swap. A reclaim that stops short leaves the scope frozen all the same. While the
 reclaim runs, the cap's other running scopes have their swap limits lifted too, so that none
@@ -79,7 +80,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from leasehold import cgroup, contain
+from leasehold import cgroup, contain, host
 from leasehold.machine import MemoryNetSettings
 
 SPILL_BYTES = 32 << 20
@@ -167,6 +168,28 @@ def _failed(path: Path, exc: OSError) -> bool:
             _reported.add(key)
             os.write(2, f"leasehold: memory net could not write {path}: {exc}\n".encode())
     return False
+
+
+def _host(proc: Path = Path("/proc")) -> host.Host:
+    """The host that pauses and resumes scopes (`leasehold.host`). The net names each scope by
+    its full path, in its record too, so the host's cgroup root is `/`."""
+    return host.current(proc=proc, cgroup_root=Path("/"))
+
+
+def _done(done: host.Done) -> bool:
+    """Whether the host paused or resumed a scope (`done`). A scope that has gone is False
+    quietly; any other failure is False and said once on stderr."""
+    if done.how != "none":
+        return True
+    if not done.empty and (done.reason, 0) not in _reported:
+        _reported.add((done.reason or "", 0))
+        os.write(2, f"leasehold: memory net {done.reason}\n".encode())
+    return False
+
+
+def _scope(path: Path) -> host.Tree:
+    """The scope at `path` as a tree of the host `_host` gives."""
+    return host.Tree(root=0, group=str(path))
 
 
 class _Window:
@@ -267,6 +290,7 @@ class MemoryNet:
         self._state = state
         self._root = cgroup_root
         self._proc = proc
+        self._host = _host(proc)
         self._slice = cgroup_root / contain.root_slice_cgroup(uid)
         self._clock = clock
         self._now = monotonic
@@ -479,7 +503,7 @@ class MemoryNet:
             self._adopt.discard(path)
         # What the record names and no held lease owns: the first step resumes and unlimits it.
         for path in self._adopt:
-            _write(path / "cgroup.freeze", "0")
+            _done(self._host.resume(_scope(path)))
         for path in self._adopt | self._unlimit:
             _write(path / "memory.swap.max", "max")
         self._adopt, self._unlimit = set(), set()
@@ -635,7 +659,7 @@ class MemoryNet:
     def _freeze(self, scope: _Scope, now: float) -> list[_Scope] | None:
         """Freeze `scope` and lift its swap limit and its cap's other running scopes'; those
         others. None when the scope could not be frozen (its command has just ended)."""
-        if not _write(scope.path / "cgroup.freeze", "1"):
+        if not _done(self._host.pause(_scope(scope.path))):
             return None
         scope.parked_at, scope.parked_wall = now, self._clock()
         scope.thawed_at = scope.thawed_wall = scope.calm_since = scope.last = None
@@ -657,7 +681,7 @@ class MemoryNet:
         return peers
 
     def _thaw(self, scope: _Scope, now: float, *, settle: bool) -> None:
-        _write(scope.path / "cgroup.freeze", "0")
+        _done(self._host.resume(_scope(scope.path)))
         if scope.parked_at is not None:
             counts = self._counts.setdefault(scope.lease_id, [0, 0.0])
             counts[1] += now - scope.parked_at
@@ -721,8 +745,9 @@ def release(state: Path | None) -> None:
     """With the net off: resume every scope the record at `state` says a net froze, put every
     swap limit it set back to `max`, and forget the record."""
     record = _load(state)
+    platform = _host()
     for path in record.get("frozen", []):
-        _write(Path(path) / "cgroup.freeze", "0")
+        _done(platform.resume(_scope(Path(path))))
     for path in {*record.get("frozen", []), *record.get("limited", [])}:
         _write(Path(path) / "memory.swap.max", "max")
     if state is not None and record:

@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from support import NO_SCOPE
 
 from leasehold import busy, claude_code, commands, contain
 from leasehold.client import Client
@@ -163,7 +164,7 @@ ATTACH = {
 }
 
 
-@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+@pytest.mark.skipif(NO_SCOPE, reason="needs a systemd user manager")
 @pytest.mark.parametrize(("body", "limit", "moved", "told"), ATTACH.values(), ids=ATTACH.keys())
 def test_a_leased_command_runs_in_its_lease_scope(
     daemon, tmp_path, monkeypatch, body, limit, moved, told

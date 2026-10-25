@@ -61,7 +61,7 @@ def oom_kills(tmp_path, monkeypatch):
 
     proc = tmp_path / "proc"
     proc.mkdir()
-    monkeypatch.setattr(host, "current", lambda: Linux(proc=proc))
+    monkeypatch.setattr(host, "current", lambda **_: Linux(proc=proc))
 
     def set_count(count: int) -> None:
         (proc / "vmstat").write_text(f"pgfault 1\noom_kill {count}\n")
