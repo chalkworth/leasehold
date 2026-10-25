@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from leasehold import contain, doctor, machine, paths, shims, template, upgrade
+from leasehold import contain, doctor, host, machine, paths, shims, template, upgrade
 from leasehold.client import Client
 from leasehold.facts import meminfo, probe
 
@@ -167,8 +167,8 @@ def find_agents(env: Mapping[str, str], say: Say) -> None:
 
 
 def check(env: Mapping[str, str], say: Say) -> int:
-    found = contain.probe(env=env)
-    say(f"containment: {found.describe()}")
+    found = host.current(env=env).support("start")
+    say(f"containment: {contain.describe(found)}")
     problems = [c for c in doctor.run(socket=None, config=None, env=env) if c.level == "fail"]
     for c in problems:
         say(f"doctor: {c.name}: {c.detail}" + (f" (fix: {c.fix})" if c.fix else ""))

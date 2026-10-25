@@ -11,10 +11,10 @@ import sys
 import threading
 
 import pytest
-from support import gone, make_agent, until
+from support import NO_SCOPE, gone, make_agent, until
 
 import leasehold
-from leasehold import contain
+from leasehold import host
 from leasehold.agent import AcquireRequest
 from leasehold.client import Client
 
@@ -189,7 +189,7 @@ def test_a_command_killed_for_memory_says_so(daemon, oom_kills, kills, certain):
     assert lease.memory is command.memory
 
 
-@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+@pytest.mark.skipif(NO_SCOPE, reason="needs a systemd user manager")
 def test_a_command_past_its_own_memory_cap_is_stopped_and_told_so(daemon):
     with leasehold.lease(socket=daemon.path) as lease:
         over = [sys.executable, "-c", "b = b'x' * (256 << 20)"]
@@ -208,4 +208,8 @@ def test_the_daemon_hands_out_its_memory_caps_in_bytes(tmp_path):
     granted = agent.acquire(AcquireRequest(kind="work"), user="me")
     assert granted["contain"]["memory_max"] == f"{8 << 30}b"  # half of the machine's 16 GiB
     assert agent.commands()["rules"][0]["memory_max"] == "off"
-    assert agent.status()["contain"]["memory_cap"]["how"] in ("exact", "none")
+    status = agent.status()
+    assert status["contain"]["memory_cap"]["how"] in ("exact", "none")
+    # The status says what the host can do, by operation, the cap among them.
+    assert list(status["host"]) == list(host.OPERATIONS)
+    assert status["host"]["memory_hard"]["how"] == status["contain"]["memory_cap"]["how"]

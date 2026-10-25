@@ -4,7 +4,7 @@ of it left running once it ends.
 `run` gives the session an id (`LEASEHOLD_SESSION`, so its leases take turns with the user's
 other sessions), puts the PATH shims first on its PATH where they are installed, and starts the
 agent in the foreground, on the terminal, as a shell would. Where commands can be contained
-(`leasehold.contain`), the agent runs in a scope of a slice of its own,
+(`leasehold.host`), the agent runs in a scope of a slice of its own,
 `leasehold-<session>_<token>.slice` (the token is this run's alone, so no two runs share a slice
 whatever their session names), named to everything under it in `LEASEHOLD_SLICE`: the scopes of
 the commands it holds leases for go in the same slice. When the agent exits, whatever it left in
@@ -31,7 +31,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, shims, toolwait
+from leasehold import contain, host, shims, toolwait
 from leasehold.exits import EXIT_NOT_STARTED
 
 ENV_SESSION = "LEASEHOLD_SESSION"
@@ -90,31 +90,31 @@ def run(
     tool_timeout_s: float | None = None,
 ) -> int:
     """Run the agent `argv` as one session (module docstring); its exit code. `contain_mode`
-    `off` runs it uncontained whatever `contain.probe` finds. `tool_timeout_s` is the agent's
+    `off` runs it uncontained whatever the host could do. `tool_timeout_s` is the agent's
     timeout on a shell command (0: none; None: as the module docstring says)."""
     if not argv:
         _say("no command given (leasehold run [options] -- agent ...)")
         return 2
     env = dict(os.environ if env is None else env)
     session = session or new_session(argv)
+    platform = host.current(env=env)
     found = (
-        contain.Containment(False, "[contain] mode is off")
+        host.Support("none", "[contain] mode is off")
         if contain_mode == "off"
-        else contain.probe(env=env)
+        else platform.support("start")
     )
     shim_dir = shims.default_dir(env)
     if not shims.installed(shim_dir):
         shim_dir = None
-    prefix = None
+    spec = None
     slice_ = None
-    if found.enforced:
+    if found.how != "none":
         if shutil.which(argv[0], path=env.get("PATH")) is None:
             _say(f"cannot run {argv[0]}: not found or not executable")
             return EXIT_NOT_STARTED
         token = uuid.uuid4().hex[:8]
         slice_ = contain.session_slice(session, token)
-        unit = f"agent-{contain.unit_part(session)[:40]}_{token}.scope"
-        prefix = contain.scope_argv(unit, slice_, weight=1)
+        spec = host.TreeSpec(contain.agent_unit(session, token), slice_, weight=1)
     if tool_timeout_s is None and toolwait.timeout(env) is None:
         tool_timeout_s = toolwait.detect(argv, env)
     if not quiet:
@@ -122,7 +122,7 @@ def run(
         timed = toolwait.timeout(env) if tool_timeout_s is None else tool_timeout_s
         if shim_dir and timed and timed > 0:
             shimmed += f"; shims wait at most {timed * toolwait.SHARE:g}s in line"
-        _say(f"session {session}: {found.describe()}; {shimmed}")
+        _say(f"session {session}: {contain.describe(found)}; {shimmed}")
     # Caught, not ignored, in this process: the agent starts with the default dispositions (exec
     # resets caught ones), so Ctrl-C and Ctrl-\ from the terminal reach it, and not us.
     previous = {s: signal.signal(s, _pass) for s in (signal.SIGINT, signal.SIGQUIT)}
@@ -131,24 +131,26 @@ def run(
             env, session, slice_=slice_, shim_dir=shim_dir, tool_timeout_s=tool_timeout_s
         )
         try:
-            child, uncontained = contain.spawn(argv, prefix, env=child_env)
+            started = platform.start(argv, spec, env=child_env)
         except OSError as exc:
             _say(f"cannot run {argv[0]}: {exc}")
             return EXIT_NOT_STARTED
-        if uncontained:
-            _say(uncontained)
+        if started.uncontained:
+            _say(started.uncontained)
             slice_ = None
             child_env.pop(contain.ENV_SLICE, None)
         for sig in (signal.SIGTERM, signal.SIGHUP):
-            previous.setdefault(sig, signal.signal(sig, lambda s, _f: child.send_signal(s)))
-        code = child.wait()
+            previous.setdefault(
+                sig, signal.signal(sig, lambda s, _f: started.process.send_signal(s))
+            )
+        code = started.wait()
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
     if slice_ is not None and not leave_running:
-        try:
-            if contain.stop_slice(slice_, grace_s) and not quiet:
-                _say(f"stopped what the session left running in {slice_}")
-        except contain.CleanupError as exc:
-            _say(f"could not stop what the session left running: {exc}")
+        done = platform.kill(host.Tree(root=started.pid, unit=slice_), grace_s)
+        if done.how == "none":
+            _say(f"could not stop what the session left running: {done.reason}")
+        elif not done.empty and not quiet:
+            _say(f"stopped what the session left running in {slice_}")
     return code if code >= 0 else 128 - code

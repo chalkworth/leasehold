@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
@@ -323,7 +324,8 @@ def check_socket_mode(config) -> Check | None:
     )
 
 
-#: What to do about each reason `contain.probe` gives for not containing, by its start.
+#: What to do about each reason the host gives for not containing (`support("start")`), by its
+#: start.
 _CONTAIN_FIXES = (
     (contain.ENV, f"unset {contain.ENV} to contain commands again"),
     ("no cgroup v2", "boot with systemd.unified_cgroup_hierarchy=1"),
@@ -342,25 +344,35 @@ _CONTAIN_FIXES = (
 )
 
 
-def check_contain(config, env: Mapping[str, str], probe=contain.probe) -> Check:
-    """Whether commands `hold` starts here go in a systemd user scope sized to their lease."""
+def check_host(capabilities: Mapping[str, host.Support]) -> Check:
+    """What the host can do here (`leasehold.host`), each operation with how it works: the
+    lines below say why one that matters does not."""
+    said = ", ".join(f"{op} {found.how}" for op, found in capabilities.items())
+    return Check("host", "ok", f"{sys.platform}: {said}")
+
+
+def check_contain(config, env: Mapping[str, str], found: host.Support | None = None) -> Check:
+    """Whether commands `hold` starts here go in a kernel group sized to their lease (`found`,
+    the host's support for `start`)."""
     if config is not None and config.contain.mode == "off":
         return Check("contain", "ok", 'off ([contain] mode = "off"): leases are advisory')
-    found = probe(env=env)
-    if found.enforced:
-        return Check("contain", "ok", f"{found.describe()}: commands run in scopes sized to leases")
-    if found.reason.startswith(contain.UNDER_LIMIT):
+    found = host.current(env=env).support("start") if found is None else found
+    if found.how != "none":
+        detail = f"{contain.describe(found)}: commands run in scopes sized to leases"
+        return Check("contain", "ok", detail)
+    reason = found.reason or ""
+    if reason.startswith(contain.UNDER_LIMIT):
         agent = env.get(verdict.AGENT_LIMIT_ENV)
         if agent:
             detail = (
                 f"Claude Code's tool memory limit ({agent}) is on: leasehold leaves commands in "
-                f"its cgroup and reports its kills ({found.reason})"
+                f"its cgroup and reports its kills ({reason})"
             )
         else:
-            detail = f"{found.reason}; leasehold reports the kills of that limit"
+            detail = f"{reason}; leasehold reports the kills of that limit"
         return Check("contain", "ok", detail)
-    fix = next((f for start, f in _CONTAIN_FIXES if found.reason.startswith(start)), None)
-    detail = f"{found.describe()}; a lease counts its command but does not hold it back"
+    fix = next((f for start, f in _CONTAIN_FIXES if reason.startswith(start)), None)
+    detail = f"{contain.describe(found)}; a lease counts its command but does not hold it back"
     return Check("contain", "warn", detail, fix or "see Containment in docs/reference.md")
 
 
@@ -379,12 +391,15 @@ def _caps_set(config) -> str | None:
 
 
 def check_memory_cap(
-    config, env: Mapping[str, str], probe=contain.probe, cap: host.Cap | None = None
+    config,
+    env: Mapping[str, str],
+    start: host.Support | None = None,
+    cap: host.Support | None = None,
 ) -> Check:
     """Whether a hard cap on one command's memory (`memory_max`) holds for commands `hold`
-    starts here (`host.memory_cap`, and a scope to set it on), and whether the config sets one.
-    A cap that is set but cannot hold is a warning."""
-    cap = host.memory_cap() if cap is None else cap
+    starts here (the host's support for `memory_hard`, `cap`, and for `start`, a scope to set
+    it on), and whether the config sets one. A cap that is set but cannot hold is a warning."""
+    cap = host.current(env=env).support("memory_hard") if cap is None else cap
     wanted = _caps_set(config)
     where = f"; {wanted}" if wanted else "; none is set (off unless asked for)"
     level = "warn" if wanted else "ok"
@@ -395,8 +410,8 @@ def check_memory_cap(
     if config is not None and config.contain.mode == "off":
         why = '[contain] mode = "off"'
     else:
-        found = probe(env=env)
-        why = None if found.enforced else found.reason
+        found = host.current(env=env).support("start") if start is None else start
+        why = None if found.how != "none" else found.reason
     if why is not None:
         detail = f"caps do not hold: commands get no scope here ({why}){where}"
         return Check("memory_max", level, detail, fix)
@@ -684,8 +699,13 @@ def run(
     checks.append(check_psi(roots))
     checks.append(check_proc(roots, resolved))
     checks += check_cgroups(roots, resolved)
-    checks.append(check_contain(resolved, env))
-    checks.append(check_memory_cap(resolved, env))
+    platform = host.current(env=env)
+    capabilities = platform.capabilities()
+    checks.append(check_host(capabilities))
+    checks.append(check_contain(resolved, env, capabilities["start"]))
+    checks.append(
+        check_memory_cap(resolved, env, capabilities["start"], capabilities["memory_hard"])
+    )
     oom = check_oom_score(roots)
     if oom is not None:
         checks.append(oom)

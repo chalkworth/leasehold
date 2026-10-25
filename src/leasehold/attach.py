@@ -28,8 +28,9 @@ agent that died does not keep every later shell starting Python.
 
 A shell that runs under a hard memory limit someone else set (Claude Code's
 `CLAUDE_CODE_TOOL_MEMORY_LIMIT`, say) is never moved from under it: the lease is kept, and the
-record says why there is no scope. Where the platform cannot adopt (`leasehold.host.adoption`),
-`env_lines` gives no lines, and a lease counts the command without containing it.
+record says why there is no scope. Where the platform cannot adopt (the host's `support` for
+`adopt`, `leasehold.host`), `env_lines` gives no lines, and a lease counts the command without
+containing it.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ def env_lines(
     """The shell lines an agent sources before each command, and None; or no lines and why,
     where nothing can be adopted here. A command with no lease offered costs one `[ -d ]`.
     Marks `session` as one whose shells source them (`offer`)."""
-    found = host.adoption()
+    found = host.current().support("adopt")
     if found.how == "none":
         return [], found.reason
     directory = hooknotes.state_dir(env)
@@ -250,7 +251,7 @@ def adopt(directory: Path, lease_id: str, note: Mapping, pids: Sequence[int], ho
         hard_cpu=bool(note.get("hard_cpu")),
     )
     moved = [*pids, holder.pid] if holder is not None else list(pids)
-    found = host.adopt(moved, spec)
+    found = host.current().adopt(moved, spec)
     if found.how == "none" and holder is not None:
         holder.kill()
         holder.wait()
@@ -259,6 +260,7 @@ def adopt(directory: Path, lease_id: str, note: Mapping, pids: Sequence[int], ho
         "attached": how if found.how != "none" else None,
         "reason": found.reason,
         "unit": found.unit,
+        "tree": None if found.tree is None else found.tree.to_dict(),
         "limit_bytes": found.limit_bytes,
         "capped": found.capped,
         "pids": list(pids),
@@ -325,6 +327,7 @@ class Watcher:
         self._directory = hooknotes.state_dir(env, create=False)
         self._agent = agent
         self._proc = proc
+        self._host = host.current(proc=proc)
         self._grace_s = grace_s
         self._meter: measure.Meter | None = None
         self._holder: int | None = None
@@ -369,22 +372,21 @@ class Watcher:
                 pending.parent.rmdir()
             tree = [pid, *_descendants(pid, self._proc)]
             record = adopt(self._directory, self._lease_id, note, tree, "scan")
-            if record["attached"]:
+            if record["attached"] and record.get("tree"):
                 # What the command started while it was being moved, moved after it.
                 later = [p for p in _descendants(pid, self._proc) if p not in tree]
                 if later:
-                    contain.adopt(later, record["unit"], contain.lease_slice(), proc=self._proc)
+                    self._host.join(host.Tree.from_dict(record["tree"]), later)
             return
 
     def _measure(self, record: dict) -> None:
         holder = record.get("holder")
         self._holder = holder[0] if holder else None
-        pid = self._holder or record["pids"][0]
         shell, birth = record["pids"][0], (record.get("births") or [None])[0]
+        tree = host.Tree.from_dict(record.get("tree") or {"root": shell})
         self._meter = measure.Meter(
-            pid,
-            record["unit"],
-            proc=self._proc,
+            self._host,
+            tree,
             running=lambda: birth is not None and process_matches(shell, birth),
         )
 
@@ -421,14 +423,15 @@ class Watcher:
 class Collected:
     """What `collect` found for a lease offered to a command. `attached` is how its shell was
     adopted (`shell` or `scan`), or None with the `reason`. For an adopted one: its scope
-    (`unit`), the hard memory limit above it (`limit_bytes`), its own cap (`cap_bytes` when
-    `capped`), and what it used (`usage`, None when the renewer did not report), how long it
-    ran (`wall_s`), its largest process (`largest`) and what it left running (`left`), each as
-    (pid, name, bytes)."""
+    (`unit`) and its `tree`, the hard memory limit above it (`limit_bytes`), its own cap
+    (`cap_bytes` when `capped`), and what it used (`usage`, None when the renewer did not
+    report), how long it ran (`wall_s`), its largest process (`largest`) and what it left
+    running (`left`), each as (pid, name, bytes)."""
 
     attached: str | None
     reason: str | None = None
     unit: str | None = None
+    tree: host.Tree | None = None
     limit_bytes: int | None = None
     cap_bytes: int | None = None
     capped: bool = False
@@ -482,6 +485,7 @@ def collect(
     return Collected(
         record["attached"],
         unit=record.get("unit"),
+        tree=host.Tree.from_dict(record["tree"]) if record.get("tree") else None,
         limit_bytes=record.get("limit_bytes"),
         cap_bytes=record.get("cap_bytes"),
         capped=bool(record.get("capped")),

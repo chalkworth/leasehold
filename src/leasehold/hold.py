@@ -30,7 +30,7 @@ runs (`leasehold.terminal`); otherwise it runs in a session of its own.
   makes `hold` exit 128 + the signal.
 
 Where the daemon allows it and the caller runs in the user's own session, the command is started
-in a systemd user scope sized to the lease (`leasehold.contain`); elsewhere it runs as is. What a
+in a systemd user scope sized to the lease (`leasehold.host`); elsewhere it runs as is. What a
 contained command used is sent with the release (`leasehold.measure`), filed under the
 `[commands]` rule that sized it when `hold` was given no weight.
 When memory ended the command, `hold` says so as the last line on stderr, in the memory
@@ -72,7 +72,7 @@ from pathlib import Path
 
 from leasehold import (
     busy,
-    contain,
+    host,
     jobs,
     leasing,
     maintenance,
@@ -486,7 +486,7 @@ def _run(lease: leasing.Lease, argv: Sequence[str], **options) -> int:
                         lease, argv, tty=tty, cancel_fd=relay.wake_fd, say=_say, **options
                     )
                 )
-            except contain.Cancelled:
+            except host.Cancelled:
                 interrupted = relay.received
             except supervise.NotStarted as exc:
                 _say(str(exc))

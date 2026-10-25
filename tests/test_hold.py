@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from support import CHILD_ENV, cli, gone, until
+from support import CHILD_ENV, NO_SCOPE, cli, gone, until
 
 import leasehold
 from leasehold import contain
@@ -157,7 +157,7 @@ OOM_CASES = {
 }
 
 
-@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+@pytest.mark.skipif(NO_SCOPE, reason="needs a systemd user manager")
 @pytest.mark.parametrize(("options", "slice_", "says"), OOM_CASES.values(), ids=OOM_CASES.keys())
 def test_a_command_the_oom_killer_ends_is_named(daemon, options, slice_, says):
     # A session slice is what `leasehold run` makes: the command's scope goes in it.
@@ -188,7 +188,7 @@ def test_a_command_the_oom_killer_ends_is_named(daemon, options, slice_, says):
         assert ("Declare at least --memory " in done.stderr) == slice_
 
 
-@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+@pytest.mark.skipif(NO_SCOPE, reason="needs a systemd user manager")
 def test_a_command_under_a_memory_limit_stays_there_and_its_leftovers_lose_their_limits(daemon):
     # Run from inside a scope held to 1 GiB, as Claude Code's tool memory limit holds its
     # commands, the command stays in that scope, so a cap of its own does not hold.
@@ -209,7 +209,7 @@ def test_a_command_under_a_memory_limit_stays_there_and_its_leftovers_lose_their
     assert "left sleep running (pid " in started.stderr
 
 
-@pytest.mark.skipif(not contain.probe().enforced, reason="needs a systemd user manager")
+@pytest.mark.skipif(NO_SCOPE, reason="needs a systemd user manager")
 def test_a_contained_command_is_not_exempt_from_the_oom_killer(daemon):
     # A negative value is raised to 0 and anything else is left as it was.
     inherited = int(Path("/proc/self/oom_score_adj").read_text())

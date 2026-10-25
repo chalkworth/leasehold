@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import leasehold
-from leasehold import jobs
+from leasehold import host, jobs
 
 
 def outer_lease(name: str) -> bool:
@@ -67,6 +67,8 @@ class Orphan:
 SRC = Path(leasehold.__file__).resolve().parent.parent
 #: The environment a child `python -m leasehold` runs with.
 CHILD_ENV = {**os.environ, "PYTHONPATH": str(SRC)}
+#: Whether commands get no scope here: the tests of scopes need a systemd user manager.
+NO_SCOPE = host.current().support("start").how == "none"
 
 
 class Clock:

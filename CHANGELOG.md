@@ -24,9 +24,16 @@ here.
 - `Command.memory` and `Lease.memory` in the Python API: the verdict on the command (an object
   with `kind`, `certain`, `program`, `peak_bytes`, `limit_bytes`, `person` and `agent`), or
   None.
-- `leasehold.host`, the one place that asks the operating system how a command ended. Linux
-  reads the kernel's OOM kill count; other systems give no verdict yet. The new
-  `leasehold.verdict` holds the wording.
+- `leasehold.host`, the one place that asks the operating system about a command's processes
+  and memory. `host.current()` gives this platform's host, which can `start` a command in a
+  tree of its own (a systemd user scope on Linux), `adopt` running processes into one, list a
+  tree's `members`, read its `footprint` and the machine's `pressure`, `pause`, `resume` and
+  `kill` it, say how it `ended` (the kernel's OOM kill count on Linux), apply `memory_max`, and
+  list a session's processes. Its `support(op)` and `capabilities()` say, for each of those
+  operations, whether it works here `exact`, `polled` or `none`, and why not. `host.OPERATIONS`
+  lists them. Other systems get the fallback host, which pauses, resumes and kills a process
+  group and says why it does nothing else. `Started`, what `start` gives, waits for the
+  command and kills it. The new `leasehold.verdict` holds the wording.
 - `leasehold doctor` warns when this shell has a negative `oom_score_adj`. Leased commands are
   reset to 0, but commands that are not leased keep the value, so the kernel spares them under
   memory pressure.
@@ -125,12 +132,15 @@ here.
   says why. A bad `memory_max` is a config error, and a bad `--memory-max` exits 2.
 - The verdict's `kind` can be `cap`, and it has `largest`, the largest of the command's
   processes as `(pid, name, bytes)` when leasehold saw it near the cap.
-- `leasehold.host` says how a cap works on this platform: `memory_cap()` gives `how` (`exact`
-  on Linux, `none` with a reason elsewhere until macOS gets a polled cap), `cap_properties()`
-  the scope's properties, and `cap_ended()` whether the OOM killer ended a capped scope.
+- `leasehold.host` says how a cap works on this platform: `support("memory_hard")` gives `how`
+  (`exact` on Linux, `none` with a reason elsewhere until macOS gets a polled cap), and a tree
+  started with `cap_bytes` in its `TreeSpec` gets the cap. `ended` says whether the OOM killer
+  ended a capped tree, and whose limit it was.
 - `leasehold doctor` has a `memory_max` line that says how a cap works here, and warns when the
   config sets a cap that cannot hold. The status object's `contain` has `memory_max` (the
-  default cap in bytes, or null) and `memory_cap` (`how` and `reason`). `GET /v1/commands`
+  default cap in bytes, or null) and `memory_cap` (`how` and `reason`). The status object has
+  a `host` field: each of the host's operations with its `how`, `reason` and `via`.
+  `leasehold doctor` has a `host` line that says how each operation works here. `GET /v1/commands`
   serves each rule's `memory_max` in bytes, `"off"` or null, and a grant's `contain` carries
   the default cap.
 - When a contained command ends and leaves a process running in its scope (a build server),
@@ -174,12 +184,18 @@ here.
 - `leasehold.attach`, the same mechanism for other agent harnesses: `offer` a lease from a
   pre-command hook, source the lines `env_lines` gives in the command's shell, and `collect`
   in the post-command hook. `python -m leasehold.attach PID` is what the lines run.
-- `leasehold.host.adopt` and `leasehold.host.adoption`: put running processes in a tree of
-  their own sized to a lease (a systemd user scope on Linux), and say whether that can be done
-  here. The fallback host, macOS included, adopts nothing and says why.
+- The host's `adopt` puts running processes in a tree of their own sized to a lease (a systemd
+  user scope on Linux), and `support("adopt")` says whether that can be done here. The fallback
+  host, macOS included, adopts nothing and says why.
 
 ### Changed
 
+- `leasehold.contain` now only names scopes and slices. Making scopes (`probe`, `spawn`,
+  `adopt`, `scope_argv`, `update_scope`, `neutral_scope`, `stop_slice`) moved behind
+  `leasehold.host`, and `contain.Containment` is gone: ask `host.current().support("start")`.
+  `contain.describe` words that support as `enforced (systemd)` or `advisory: <why>`.
+  `measure.members` and `measure.machine_oom_kills` are gone too: use the host's `members` and
+  `ended`. `measure.Meter` takes a host and a tree.
 - Faster startup. `import leasehold` no longer imports the SDK: the names in `__all__` load
   on first use (they all still work, and `dir(leasehold)` lists them). The attach step, the
   Claude Code hook, the shims and `hold` no longer import pydantic or the config loader, or
