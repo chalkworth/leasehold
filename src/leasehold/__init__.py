@@ -9,7 +9,8 @@ The library:
   it, its holders fenced by `process` identity or by a TTL;
 * `quota`: the submit-time per-user queued limit and create rate;
 * `client`: a client for the machine agent's socket API;
-* `leasing`: leases for Python callers, the names this package exports.
+* `leasing`: leases for Python callers, the names this package exports, and `joining`:
+  an agent session the daemon watches (`session()`).
 
 The machine agent (`leasehold serve`) is built from `machine`, `agent`, `api` and `server`.
 Only the standard library and pydantic.
@@ -21,6 +22,7 @@ The names in `__all__` are the supported API. Until 1.0 a minor release may chan
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from leasehold.joining import Session, session
     from leasehold.leasing import (
         Busy,
         Cancelled,
@@ -57,6 +59,7 @@ _HOME = {
         "leasehold.leasing",
     ),
     **dict.fromkeys(("Command", "NotStarted"), "leasehold.supervise"),
+    **dict.fromkeys(("Session", "session"), "leasehold.joining"),
 }
 
 __all__ = [
@@ -69,11 +72,13 @@ __all__ = [
     "LeaseLost",
     "NotStarted",
     "Refused",
+    "Session",
     "Unavailable",
     "Waiting",
     "__version__",
     "find_daemon",
     "lease",
+    "session",
 ]
 
 #: The one place the version is written; the build reads it from here (`[tool.hatch.version]`).

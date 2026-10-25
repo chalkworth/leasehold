@@ -1,4 +1,4 @@
-"""`run`: an agent (or any command) as one session of its own (`leasehold.session`)."""
+"""`run`: an agent (or any command) as one session of its own (`leasehold.agentrun`)."""
 
 from __future__ import annotations
 
@@ -38,12 +38,12 @@ def register(sub) -> None:
 
 
 def _run(args, ctx) -> int:
-    from leasehold import session
+    from leasehold import agentrun
 
     cmd = list(args.argv)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
-    return session.run(
+    return agentrun.run(
         cmd,
         env=ctx.env,
         session=args.session,

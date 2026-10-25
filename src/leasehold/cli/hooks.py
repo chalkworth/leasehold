@@ -28,7 +28,7 @@ def register(sub) -> None:
 
     s = sub.add_parser("hook", help="a coding agent's hook (reads its event on stdin)")
     s.add_argument("agent", choices=["claude-code"])
-    s.add_argument("event", choices=["start", "pre", "post"])
+    s.add_argument("event", choices=["start", "pre", "post", "end"])
     s.set_defaults(run=_hook)
 
     s = sub.add_parser("shims", help="PATH shims that run heavy programs under a lease")
@@ -172,7 +172,14 @@ def _hook(args, ctx) -> int:
     try:
         event = json.load(sys.stdin)
         if args.event == "start":
-            reply = claude_code.start(event, os.environ)
+            reply = claude_code.start(
+                event,
+                os.environ,
+                client=_client_or_none(ctx),
+                agent_pid=claude_code.agent_pid(os.getppid()),
+            )
+        elif args.event == "end":
+            reply = claude_code.end(event, ctx.client())
         elif args.event == "pre":
             reply = claude_code.pre(
                 event,
@@ -192,6 +199,14 @@ def _hook(args, ctx) -> int:
     if reply.output is not None:
         sys.stdout.write(reply.text() + "\n")
     return 0
+
+
+def _client_or_none(ctx):
+    """The daemon's client; None when no daemon is found."""
+    try:
+        return ctx.client()
+    except SystemExit:
+        return None
 
 
 def _shims(args, ctx) -> int:

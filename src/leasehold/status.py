@@ -224,6 +224,7 @@ def report(
     memory_net: dict | None = None,
     contain: dict | None = None,
     host: dict | None = None,
+    watchdog: dict | None = None,
     now: float,
     version: str,
 ) -> dict:
@@ -232,7 +233,8 @@ def report(
     `memory_net` the memory net's own status (`leasehold.net.MemoryNet.status`), or None when
     it is off; `contain` how commands are contained and capped (default: `[contain]` as
     configured); `host` what the host can do here, by operation (`leasehold.host`), or None
-    when not known."""
+    when not known; `watchdog` the agent sessions watched (`leasehold.sessions.Sessions.status`),
+    or None."""
     leases = with_counted(policy, leases)
     queue = with_counted(policy, queue)
     by_pool = pools(config, policy, leases, queue)
@@ -275,4 +277,5 @@ def report(
         "queue": queue,
         "maintenance": maintenance,
         "memory_net": memory_net,
+        "watchdog": watchdog,
     }

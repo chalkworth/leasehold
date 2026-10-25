@@ -47,6 +47,8 @@ class EventType(StrEnum):
     RESIZED = "resized"
     PARKED = "parked"
     RESUMED = "resumed"
+    SESSION_STARTED = "session_started"
+    SESSION_ENDED = "session_ended"
 
 
 #: How many events the ring keeps.

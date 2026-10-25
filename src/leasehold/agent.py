@@ -47,6 +47,7 @@ from leasehold.load import LoadReader, available, some_avg10
 from leasehold.machine import MachineConfig, lease_memory_limit
 from leasehold.net import MemoryNet
 from leasehold.proctable import Proc
+from leasehold.sessions import Session, Sessions
 from leasehold.units import CAP_OFF, cap_to_bytes, declared_to_bytes, memory_to_bytes
 
 #: The ledger scope observed processes' leases are filed under; no client may name it.
@@ -61,6 +62,8 @@ _LENDING_OFF = "lending switched off"
 #: How long a learned figure is kept before it is worked out again from the ledger, in seconds,
 #: unless an outcome for its rule and repository is kept sooner.
 LEARNED_TTL_S = 300.0
+#: How often the watched sessions' processes are read again, in seconds.
+SESSIONS_S = 2.0
 
 __all__ = ["SCOPE", "AcquireRequest", "Conflict", "Forbidden", "MachineAgent"]
 
@@ -166,6 +169,15 @@ def _over_quota(lease_id: str, reason: str) -> dict:
     return {"status": "refused", "lease_id": lease_id, "reason": reason, "code": "quota_exceeded"}
 
 
+def _session_fields(row: dict) -> dict:
+    """What a session event says of the session (`Session.public`)."""
+    return {k: row.get(k) for k in ("session", "source", "user", "agent", "agent_pid")}
+
+
+def _session_event(kind: EventType, session: Session) -> dict:
+    return {"type": kind} | _session_fields(session.public())
+
+
 class MachineAgent:
     def __init__(
         self,
@@ -269,6 +281,15 @@ class MachineAgent:
             memory_net.release(record)
         #: What the host can do here, once asked (`capabilities`).
         self._capabilities: dict[str, dict] | None = None
+        #: The agent sessions watched (`leasehold.sessions`): only a user's own daemon finds
+        #: agents by name, among its user's processes.
+        self.sessions = Sessions(
+            config.watchdog.agents if config.for_user else (),
+            owner=self._user_name(os.getuid()),
+            clock=clock,
+        )
+        #: When the sessions were last read, on `_monotonic` (None: not yet).
+        self._sessions_read: float | None = None
         self._seen = self._snapshot()
 
     def _guard_cgroups(self) -> tuple[str, ...]:
@@ -539,7 +560,53 @@ class MachineAgent:
             self._record()
         if revoked or admitted:
             self._notify()
+        self._watch_sessions()
         return {"revoked": revoked, "admitted": admitted, "lend": self._lend_status()}
+
+    def _watch_sessions(self) -> None:
+        """Read the sessions' processes again every `SESSIONS_S`, outside the lock: it reads
+        every process of every session."""
+        mono = self._monotonic()
+        if self._sessions_read is not None and mono - self._sessions_read < SESSIONS_S:
+            return
+        self._sessions_read = mono
+        found = self.sessions.refresh()
+        events = [_session_event(EventType.SESSION_STARTED, s) for s in found.started]
+        events += [
+            _session_event(EventType.SESSION_ENDED, e.session) | {"reason": e.reason}
+            for e in found.ended
+        ]
+        if events:
+            self.events.emit(events, now=self._clock())
+
+    def register_session(
+        self,
+        session_id: str,
+        *,
+        user: str | None,
+        source: str,
+        agent_pid: int | None,
+        agent: str | None,
+        slice_: str | None,
+    ) -> dict:
+        """Watch the session `session_id` (`Sessions.register`): the session as status shows
+        it, under `session`."""
+        row = self.sessions.register(
+            session_id, source=source, user=user, agent_pid=agent_pid, agent=agent, slice_=slice_
+        )
+        self.events.emit(
+            [{"type": EventType.SESSION_STARTED} | _session_fields(row)], now=self._clock()
+        )
+        return {"status": "registered", "session": row}
+
+    def unregister_session(self, session_id: str, *, user: str | None) -> dict:
+        """Stop watching `session_id`; raises `UnknownSession` when none has that id."""
+        row = self.sessions.unregister(session_id, user=user)
+        self.events.emit(
+            [{"type": EventType.SESSION_ENDED, "reason": "unregistered"} | _session_fields(row)],
+            now=self._clock(),
+        )
+        return {"status": "unregistered", "session": row}
 
     def _watch_processes(self) -> None:
         """Impose an observed lease for each process an `[[observe]]` rule counts and the ledger
@@ -1121,6 +1188,7 @@ class MachineAgent:
             memory_net=None if self.net is None else self.net.status(),
             contain=self.contain_settings() | {"memory_cap": cap},
             host=capabilities,
+            watchdog=self.sessions.status(),
             now=self._clock(),
             version=__version__,
         )

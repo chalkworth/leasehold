@@ -191,6 +191,38 @@ here.
 - The host's `adopt` puts running processes in a tree of their own sized to a lease (a systemd
   user scope on Linux), and `support("adopt")` says whether that can be done here. The fallback
   host, macOS included, adopts nothing and says why.
+- Watched sessions. Your own daemon watches agent sessions and reports, for each one, the
+  anonymous memory (in RAM or swap) of everything its agent started, the agent itself not
+  counted. It only watches and never pauses or stops anything. A session joins through
+  `POST /v1/sessions` (`session`, `pid`, `agent`, `slice`, `source`) and leaves through
+  `DELETE /v1/sessions/<id>`, which answers 404 `unknown_session` for an id no session has.
+  `leasehold.client.Client` has `register_session` and `unregister_session`. See "Watched
+  sessions" in docs/reference.md.
+- `leasehold session register [--session ID] [--pid PID] [--agent NAME]` registers a session
+  for any harness and prints its id. `leasehold session unregister ID` ends one, and exits 77
+  for an id no session has.
+- `leasehold.session()` and `leasehold.Session` in the Python API: `with
+  leasehold.session(name) as s:` makes the calling process a session's agent for the block and
+  sets `LEASEHOLD_SESSION` for the processes it starts. `s.registered` says whether a daemon
+  took it, and `s.reason` why not.
+- `leasehold run` registers its session, with the agent's process and its slice, when a daemon
+  answers, and unregisters it when the agent exits.
+- The Claude Code plugin registers each session at `SessionStart` and unregisters it at
+  `SessionEnd` (a new hook, `leasehold hook claude-code end`). `SessionStart` also adds
+  `export LEASEHOLD_SESSION=cc-<id>` to the session's `CLAUDE_ENV_FILE`.
+- `[watchdog] agents` (default `["claude", "codex", "gemini", "cursor-agent", "aider"]`): your
+  own daemon watches each of your processes with one of these names as a session of its own,
+  `auto-<pid>`, unless it already belongs to one. Such sessions are only reported. `[]` turns
+  this off.
+- The status object has a `watchdog` field: `processes` (whether a session's processes can be
+  found here, and why not), `discover` (the names looked for), and `sessions`, each with
+  `session`, `source`, `user`, `agent`, `agent_pid`, `slice`, `since`, `how`, `reason`,
+  `footprint_bytes`, `processes`, `trees` and `largest`. Where a session's processes cannot be
+  listed (macOS for now), `how` is `none`, `reason` says why and `footprint_bytes` is null.
+- `leasehold top` shows each watched session and its footprint. Events `session_started` and
+  `session_ended` (with a `reason`) say when one starts and ends.
+- `host.named(names)` lists the user's processes by program name, and a `Proc` has `anon` and
+  `swap`. A polled `Footprint` has `anon` and `swap`, summed over its processes.
 
 ### Changed
 

@@ -9,7 +9,8 @@ A well-formed request is answered 200 with a `status` field (the lend and pool r
 their state); a malformed one 400, one the peer may not make 403, an unknown path 404, one the
 ledger cannot answer now 503, one that cannot be done now but may be later 409, and one the
 daemon fails on 500, each with an `error` field (`bad_request`, `forbidden`, `not_found`,
-`conflict`, `ledger_unavailable`, `internal`) and a `detail`. The transport adds 400
+`conflict`, `ledger_unavailable`, `internal`) and a `detail`. Unregistering a session no
+one watches is a 404 `unknown_session`. The transport adds 400
 `bad_request` for a malformed `Content-Length` and 413 `too_large` for a body over its limit.
 Every request is answered: no exception escapes `handle`, so a fault in the daemon never reads
 to a client as no daemon at all.
@@ -22,16 +23,17 @@ import sys
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
-from urllib.parse import parse_qsl
+from typing import Any, Literal
+from urllib.parse import parse_qsl, unquote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from leasehold.access import Forbidden, may_administer
-from leasehold.agent import AcquireRequest, Conflict, MachineAgent
+from leasehold.agent import ID_PATTERN, AcquireRequest, Conflict, MachineAgent
 from leasehold.events import CAPACITY
 from leasehold.ledger import LedgerUnavailable
 from leasehold.outcomes import Outcome
+from leasehold.sessions import UnknownSession
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,20 @@ class _LendRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     open: bool
+
+
+class _SessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    #: The session's id: what its processes have in `LEASEHOLD_SESSION`.
+    session: str = Field(pattern=ID_PATTERN)
+    #: The agent's process (none: the session lasts until it is unregistered).
+    pid: int | None = Field(None, ge=1)
+    #: The agent's name, for people to read (default: the process's program).
+    agent: str | None = Field(None, min_length=1, max_length=64)
+    #: The systemd slice the session runs in, under `leasehold run`.
+    slice: str | None = Field(None, pattern=r"^leasehold-[A-Za-z0-9_.]{1,100}\.slice$")
+    source: Literal["run", "hook", "sdk", "api"] = "api"
 
 
 class _PoolRequest(BaseModel):
@@ -161,6 +177,21 @@ def _pool(agent: MachineAgent, req: _PoolRequest, peer: Peer, rest: str) -> dict
     return agent.set_pool_max(rest, req.max)
 
 
+def _register(agent: MachineAgent, req: _SessionRequest, peer: Peer, rest: str) -> dict:
+    return agent.register_session(
+        req.session,
+        user=peer.user,
+        source=req.source,
+        agent_pid=req.pid,
+        agent=req.agent,
+        slice_=req.slice,
+    )
+
+
+def _unregister(agent: MachineAgent, req: None, peer: Peer, rest: str) -> dict:
+    return agent.unregister_session(unquote(rest), user=peer.user)
+
+
 #: Every route, by (method, path).
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/v1/status"): Route(None, lambda agent, req, peer, rest: agent.status()),
@@ -175,6 +206,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/v1/elastic"): Route(_ElasticRequest, _elastic),
     ("POST", "/v1/lend"): Route(_LendRequest, _lend, admin=True),
     ("POST", "/v1/pools/<name>"): Route(_PoolRequest, _pool, admin=True, prefix=True),
+    ("POST", "/v1/sessions"): Route(_SessionRequest, _register),
+    ("DELETE", "/v1/sessions/<id>"): Route(None, _unregister, prefix=True),
 }
 
 
@@ -215,6 +248,8 @@ def handle(
         return 403, {"error": "forbidden", "detail": str(exc)}
     except Conflict as exc:
         return 409, {"error": "conflict", "detail": str(exc)}
+    except UnknownSession as exc:
+        return 404, {"error": "unknown_session", "detail": str(exc)}
     except LedgerUnavailable as exc:
         return 503, {"error": exc.code, "detail": str(exc)}
     except Exception as exc:  # noqa: BLE001 -- answered as a 500, its traceback on stderr

@@ -34,6 +34,7 @@ from leasehold.top.cells import (
     cells,
     fit,
 )
+from leasehold.units import size
 
 #: The lease orders, in the order `s` cycles through them.
 SORTS = ("pool", "held", "weight", "user")
@@ -783,6 +784,12 @@ def _resized(e: Mapping) -> str:
     return f"{_who(e)} {how} {_slots(abs(after - before))} in {e.get('pool')}, now {after}"
 
 
+def _agent(e: Mapping) -> str:
+    """A session event's agent and how it joined: `claude 3120, hook`."""
+    agent = " ".join(str(x) for x in (e.get("agent"), e.get("agent_pid")) if x is not None)
+    return ", ".join(x for x in (agent, str(e.get("source") or "")) if x)
+
+
 def _pool_max(e: Mapping) -> str:
     how = "set to" if e.get("overridden") else "reset to"
     return f"pool {e.get('pool')} max {how} {e.get('max')}"
@@ -828,12 +835,53 @@ _EVENTS: dict[EventType, _Shown] = {
         "parked", "bad", lambda e: f"{_who(e)}'s command paused, its memory moved to swap"
     ),
     EventType.RESUMED: _Shown("resumed", "ok", lambda e: f"{_who(e)}'s command runs again"),
+    EventType.SESSION_STARTED: _Shown(
+        "session", "", lambda e: f"session {e.get('session')} ({_agent(e)}) is watched"
+    ),
+    EventType.SESSION_ENDED: _Shown(
+        "session",
+        "dim",
+        lambda e: f"session {e.get('session')} ({_agent(e)}) ended: {e.get('reason')}",
+    ),
     EventType.LEND_SWITCH: _Shown(
         "switch",
         "bold",
         lambda e: "an administrator turned lending " + ("on" if e.get("open") else "off"),
     ),
 }
+
+
+def _session_row(s: Mapping, v: _View) -> _Out:
+    """One watched session: its id, agent, how it joined, and what its work holds in memory
+    besides the agent, or why that cannot be read here."""
+    g = v.g
+    agent = " ".join(str(x) for x in (s.get("agent"), s.get("agent_pid")) if x is not None)
+    parts: list[tuple[int, Line]] = [(0, [(_clean(s.get("session") or "?"), "bold")])]
+    if agent:
+        parts.append((2, [(f"  {_clean(agent)}", "")]))
+    parts.append((3, [(f"  {s.get('source')}", "dim")]))
+    sep = (f"  {g.sep}  ", "dim")
+    if s.get("how") == "none" or s.get("footprint_bytes") is None:
+        why = s.get("reason") or "not read yet"
+        parts.append((1, [sep, (f"memory not known: {_clean(why)}", "warn")]))
+        return _row(parts, v.inner)
+    trees = int(s.get("trees") or 0)
+    held = f"{size(int(s['footprint_bytes']))} in {trees} tree{'' if trees == 1 else 's'}"
+    parts.append((1, [sep, (held, "")]))
+    largest = s.get("largest")
+    if largest:
+        text = f"largest {largest.get('name')} {size(int(largest.get('bytes') or 0))}"
+        parts.append((4, [sep, (_clean(text), "dim")]))
+    return _row(parts, v.inner)
+
+
+def _sessions(v: _View) -> _Section:
+    """The agent sessions the daemon watches, when there are any."""
+    watched = (v.status.get("watchdog") or {}).get("sessions") or []
+    if not watched:
+        return _Section(6, [])
+    rows = [_session_row(s, v) for s in watched]
+    return _Section(6, [_labelled("SESSIONS", rows)], trim=True, cap=2)
 
 
 def _event_text(e: Mapping) -> str:
@@ -863,7 +911,17 @@ def _events(v: _View) -> _Section:
 
 
 #: The sections top to bottom.
-_SECTIONS = (_header, _pressure, _slots_section, _pools, _leases, _queue, _lending, _events)
+_SECTIONS = (
+    _header,
+    _pressure,
+    _slots_section,
+    _pools,
+    _leases,
+    _queue,
+    _sessions,
+    _lending,
+    _events,
+)
 
 
 def _allocate(sections: Sequence[_Section], height: int) -> tuple[dict[int, int], int]:

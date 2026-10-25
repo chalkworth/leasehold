@@ -18,7 +18,10 @@ The agent's own timeout on a shell command goes in `LEASEHOLD_TOOL_TIMEOUT_S`
 agent hears why a command did not run: the `tool_timeout_s` given, else the variable the caller
 set, else what leasehold knows of the agent (`toolwait.detect`).
 
-No daemon is needed to start: the shims and `hold` find one when they need it.
+No daemon is needed to start: the shims and `hold` find one when they need it. When one
+answers, the session is registered with it (`leasehold.joining`), with the agent's
+process and its slice, so that the daemon watches what the session runs, and it is
+unregistered when the agent exits.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from leasehold import contain, host, shims, toolwait
+from leasehold import contain, host, joining, shims, toolwait
 from leasehold.exits import EXIT_NOT_STARTED
 
 ENV_SESSION = "LEASEHOLD_SESSION"
@@ -72,6 +75,17 @@ def session_env(
 def _say(message: str) -> None:
     sys.stderr.write(f"leasehold run: {message}\n")
     sys.stderr.flush()
+
+
+def _join(env: Mapping[str, str], session: str, pid: int, argv: Sequence[str], slice_):
+    """Register the session with the daemon that answers; its client, or None when none
+    answers or it did not take the session."""
+    found = joining.find_client(env=env)
+    if found is None:
+        return None
+    agent = Path(argv[0]).name[:64] or None
+    why = joining.join(found, session, pid=pid, source="run", agent=agent, slice_=slice_)
+    return None if why is not None else found
 
 
 def _pass(_signum, _frame) -> None:
@@ -143,7 +157,10 @@ def run(
             previous.setdefault(
                 sig, signal.signal(sig, lambda s, _f: started.process.send_signal(s))
             )
+        watched = _join(env, session, started.pid, argv, slice_)
         code = started.wait()
+        if watched is not None:
+            joining.leave(watched, session)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

@@ -4,9 +4,9 @@ Each module here registers one group of subcommands (`register`) and handles the
 (`setup`), `run` (`run`), `daemon` (`serve`, `init`, `doctor`, `observe`), `leases` (`hold`,
 `acquire`, `keep`, `release`), `views` (`status`, `leases`, `outcomes`, `facts`, `ui`,
 `metrics`), `watch` (`top`), `admin` (`lend`, `pool`), `push` (`report`), `hooks` (`commands`,
-`hook`, `shims`), `agents` (`mcp`) and `demo`. A handler takes the parsed arguments and a
-`Context`, and returns the exit code. A command that Ctrl-C (SIGINT) interrupts ends by SIGINT,
-with no traceback (`exits.end_by`).
+`hook`, `shims`), `agents` (`mcp`), `sessions` (`session`) and `demo`. A handler takes the
+parsed arguments and a `Context`, and returns the exit code. A command that Ctrl-C (SIGINT)
+interrupts ends by SIGINT, with no traceback (`exits.end_by`).
 """
 
 from __future__ import annotations
@@ -94,6 +94,7 @@ def _parser() -> argparse.ArgumentParser:
         leases,
         push,
         run,
+        sessions,
         setup,
         views,
         watch,
@@ -114,7 +115,20 @@ def _parser() -> argparse.ArgumentParser:
         help=f"daemon socket (default ${discovery.ENV_SOCKET}, else the first daemon that answers)",
     )
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
-    for module in (setup, run, daemon, leases, views, watch, admin, push, hooks, agents, demo):
+    for module in (
+        setup,
+        run,
+        sessions,
+        daemon,
+        leases,
+        views,
+        watch,
+        admin,
+        push,
+        hooks,
+        agents,
+        demo,
+    ):
         module.register(sub)
     advanced = _order_commands(sub)
     p.epilog = f"advanced: {', '.join(advanced)}  (`leasehold COMMAND --help`)"
