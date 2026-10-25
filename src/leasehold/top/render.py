@@ -844,7 +844,21 @@ _EVENTS: dict[EventType, _Shown] = {
         "bold",
         lambda e: "an administrator turned lending " + ("on" if e.get("open") else "off"),
     ),
+    EventType.PAUSED: _Shown(
+        "paused",
+        "warn",
+        lambda e: f"{'would pause' if e.get('would') else 'paused'} {_tree(e)}: {e.get('reason')}",
+    ),
+    EventType.RESUMED: _Shown("resumed", "ok", lambda e: f"{_tree(e)} runs again"),
+    EventType.STOPPED: _Shown(
+        "stopped", "bad", lambda e: f"stopped {_tree(e)} ({e.get('stopped_for')})"
+    ),
 }
+
+
+def _tree(e: Mapping) -> str:
+    """The tree a watchdog event is about: its command and session."""
+    return f"{e.get('cmd')} (pid {e.get('pid')}, session {e.get('session')})"
 
 
 def _session_row(s: Mapping, v: _View) -> _Out:

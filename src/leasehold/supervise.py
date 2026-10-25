@@ -315,6 +315,12 @@ class Command:
             seen = self._meter.largest
             if self._cap is not None and seen is not None and seen[2] * 2 >= self._cap:
                 largest = seen
+        stop = None
+        if code in (-signal.SIGKILL, 128 + signal.SIGKILL):
+            stop = self.lease.stopped_by_watchdog()
+            if stop is not None:
+                ending = host.Ending("leasehold", "certain", how="exact")
+                self.oom_killed = self.lease.oom_killed = False
         self.memory = verdict.describe(
             ending,
             self._program,
@@ -323,6 +329,7 @@ class Command:
             limit_bytes=ending.limit_bytes,
             agent_limit=os.environ.get(verdict.AGENT_LIMIT_ENV) or None,
             largest=largest,
+            watchdog=stop,
         )
         self.lease.memory = self.memory
         if group_alive(self.pid):

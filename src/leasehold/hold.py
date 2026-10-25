@@ -297,6 +297,7 @@ def hold(
         weight = 1  # the daemon gives a maintenance lease the whole machine, whatever is asked
     request = None
     rule_key = None
+    rerun = False
     try:
         with _interruptible():
             # Rules are read for the weight, or for the threads the job variables use.
@@ -304,7 +305,7 @@ def hold(
                 rule = auto_size(client, argv) if client is not None else _UNSIZED
                 if weight is None:
                     weight, max_weight = rule.weight, rule.max_weight
-                    rule_key = rule.key
+                    rule_key, rerun = rule.key, rule.rerun
                     if memory is None and memory_per_slot is None:
                         memory, memory_per_slot = rule.memory, rule.memory_per_slot
                     if memory_max is None:
@@ -370,6 +371,7 @@ def hold(
                 elastic=elastic,
                 rule=rule_key,
                 memory_max=memory_max,
+                rerun=rerun,
             )
     except _Interrupted as exc:
         if client is not None and request is not None:
@@ -433,6 +435,7 @@ def run_leased(
     elastic: bool = False,
     rule: str | None = None,
     memory_max: str | None = None,
+    rerun: bool = False,
 ) -> int:
     """`hold` once `request` is granted (`answer`): run `argv` under the lease
     (`supervise.Command`: sized to the weight granted, its thread pools to `threads`, held to
@@ -440,16 +443,16 @@ def run_leased(
     `jobserver`, elastic with `elastic`), renewing the lease, and release it when the command
     ends, with what a contained command used filed under `rule` (`shell.Rule.key`; None: no
     rule sized it); the command's exit code (`_ended`), or `EXIT_REVOKED`. SIGINT, SIGTERM or
-    SIGHUP before the command runs gives the lease back and stops what was started of it."""
+    SIGHUP before the command runs gives the lease back and stops what was started of it.
+    With `rerun`, when the daemon's watchdog stopped the command and says it may run again,
+    it asks for the lease again and runs the command once more, which the daemon starts
+    alone."""
 
     def lost(reason: str) -> None:
         if request["kind"] not in PREEMPTIBLE:
             _say(f"{reason}; the command runs on without a lease")
 
-    lease = leasing.Lease(client, request, answer, on_lost=lost, _say=_say, _rule=rule)
-    return _run(
-        lease,
-        argv,
+    options = dict(
         grace_s=grace_s,
         job_env=job_env,
         jobserver=jobserver,
@@ -459,6 +462,18 @@ def run_leased(
         elastic=elastic,
         memory_max=memory_max,
     )
+    lease = leasing.Lease(client, request, answer, on_lost=lost, _say=_say, _rule=rule)
+    code = _run(lease, argv, **options)
+    stopped = lease.memory.watchdog if lease.memory is not None else None
+    if not rerun or not (stopped or {}).get("rerun"):
+        return code
+    _say("running it again once, on its own, as the watchdog stopped it")
+    again = {k: v for k, v in request.items() if k != "lease_id"}
+    fault, answer = wait_for_grant(client, again, None, _say)
+    if fault is not None:
+        return code
+    lease = leasing.Lease(client, again, answer, on_lost=lost, _say=_say, _rule=rule)
+    return _run(lease, argv, **options)
 
 
 def run_unleased(

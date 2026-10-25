@@ -351,6 +351,27 @@ def check_host(capabilities: Mapping[str, host.Support]) -> Check:
     return Check("host", "ok", f"{sys.platform}: {said}")
 
 
+def check_watchdog(config, platform: host.Host) -> Check | None:
+    """Whether the watchdog acts here, and whether the daemon can keep its own memory in RAM
+    while it does (`host.stay_resident`), so that it still runs when memory is short. None
+    without a config, and for the machine's daemon, which has no watchdog."""
+    if config is None or not config.for_user:
+        return None
+    mode = config.watchdog.mode
+    if mode != "on":
+        return Check("watchdog", "ok", f"mode {mode}: it does not pause or stop anything")
+    resident = platform.stay_resident(dry=True)
+    if resident.how == "none" or resident.reason:
+        return Check(
+            "watchdog",
+            "warn",
+            f"mode on; {resident.reason}, so the daemon may itself be slow when memory is short",
+            "raise this user's locked-memory limit to unlimited (memlock in "
+            "/etc/security/limits.conf, or DefaultLimitMEMLOCK= for systemd user services)",
+        )
+    return Check("watchdog", "ok", "mode on; the daemon keeps its memory in RAM")
+
+
 def check_contain(config, env: Mapping[str, str], found: host.Support | None = None) -> Check:
     """Whether commands `hold` starts here go in a kernel group sized to their lease (`found`,
     the host's support for `start`)."""
@@ -630,6 +651,8 @@ def run(
     platform = host.current(env=env)
     capabilities = platform.capabilities()
     checks.append(check_host(capabilities))
+    if (watchdog := check_watchdog(resolved, platform)) is not None:
+        checks.append(watchdog)
     if (says := macos.note()) is not None:
         checks.append(Check("platform", "warn", says))
     checks.append(check_contain(resolved, env, capabilities["start"]))

@@ -61,6 +61,11 @@ memory_pressure_off = 2.5
 # min_available = "2g"        # default: 5% of memory, at least 512 MiB
 settle_s = 30
 
+# When the machine runs short of memory, pause the newest heavy work an agent started, and
+# stop it if pausing does not free enough; "watch" only says what it would do, "off" neither.
+[watchdog]
+mode = "on"
+
 # An elastic lease (a range run with `hold --jobserver`) grows one slot at a time into free
 # slots and gives them back when a request waits for them.
 [elastic]

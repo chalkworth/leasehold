@@ -303,6 +303,11 @@ class Sessions:
             )
         return tuple(out)
 
+    def listed(self) -> list[Session]:
+        """Every session watched now."""
+        with self._lock:
+            return list(self._sessions.values())
+
     def work(self) -> list[tuple[Session, Branch]]:
         """Every watched session's trees as last read, with the session each is of."""
         with self._lock:

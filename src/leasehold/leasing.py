@@ -489,6 +489,17 @@ class Lease:
             took = time.monotonic() - getattr(self, "_paused_at", time.monotonic())
             self._say(f"the command runs again after {took:.0f}s paused")
 
+    def stopped_by_watchdog(self) -> dict | None:
+        """Whether the daemon's watchdog stopped the lease's command, asked now: what it says of
+        the stop (`why`, `runaway`, `rerun`, `paused_s`), or None."""
+        if not self.held or self._stop.is_set():
+            return None
+        try:
+            answer = self._quick.renew(self.lease_id)
+        except (_client.Unavailable, _client.ApiError):
+            return None
+        return answer.get("stopped") if answer.get("status") == "ok" else None
+
     def _ask_again(self) -> dict:
         try:
             return self._quick.acquire(**self._request, wait_s=0)

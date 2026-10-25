@@ -48,6 +48,8 @@ class EventType(StrEnum):
     RESIZED = "resized"
     HELD = "held"
     PAUSED = "paused"
+    RESUMED = "resumed"
+    STOPPED = "stopped"
     RUNAWAY = "runaway"
     SESSION_STARTED = "session_started"
     SESSION_ENDED = "session_ended"

@@ -76,8 +76,9 @@ from leasehold.host import (
 )
 from leasehold.host.posix import Posix
 
-#: The variable that names the session a process belongs to.
+#: The variables that name the session a process belongs to, and the lease it runs under.
 SESSION_ENV = b"LEASEHOLD_SESSION"
+LEASE_ENV = b"LEASEHOLD_LEASE_ID"
 #: How long one scan of the user's processes' environments serves `session_processes`.
 TAGS_S = 1.0
 #: Errors that say a cgroup has gone, which no one needs to hear about.
@@ -152,9 +153,11 @@ class Linux(Posix):
         env: Mapping[str, str] | None = None,
         proc: Path = Path("/proc"),
         cgroup_root: Path = Path("/sys/fs/cgroup"),
+        sys_root: Path = Path("/sys"),
     ) -> None:
         super().__init__(env)
         self._proc = proc
+        self._sys = sys_root
         self._cgroup_root = cgroup_root
         #: Why no scope can be made for this caller ("" when one can; None: not asked yet).
         self._no_scope: str | None = None
@@ -163,8 +166,9 @@ class Linux(Posix):
         #: (when, microseconds every task stalled on memory) at recent `pressure` readings,
         #: the oldest at least `STALL_WINDOW_S` before the newest.
         self._stalls: list[tuple[float, int]] = []
-        #: (when, pids by session) at the last scan of the user's processes' environments.
-        self._tags: tuple[float, dict[str, list[int]]] | None = None
+        #: (when, pids by session, lease by pid) at the last scan of the user's processes'
+        #: environments.
+        self._tags: tuple[float, dict[str, list[int]], dict[int, str]] | None = None
         #: When the machine booted, in wall-clock seconds (None: not read yet, or unreadable).
         self._boot: float | None = None
 
@@ -376,6 +380,7 @@ class Linux(Posix):
                 recent = min(100.0, max(0, stalled - s0) / ((now - t0) * 1e4))
         total = info.get("SwapTotal")
         free = info.get("SwapFree")
+        kind, ratio = self._swap_kind()
         return Pressure(
             "exact",
             available=info.get("MemAvailable"),
@@ -388,7 +393,26 @@ class Linux(Posix):
             stall_how="psi" if psi else None,
             swapins_per_s=rate,
             compressed=info.get("Zswap"),
+            swap_kind=kind,
+            zram_ratio=ratio,
         )
+
+    def _swap_kind(self) -> tuple[str | None, float | None]:
+        """What the swap areas in use are (`Pressure.swap_kind`), and how much zram's pages
+        shrank: their size over the RAM zram uses (`mm_stat`'s `orig_data_size` over
+        `mem_used_total`)."""
+        kinds, orig, used = set(), 0, 0
+        for line in (_read(self._proc / "swaps") or "").splitlines()[1:]:
+            name = line.split()[0] if line.split() else ""
+            if not name.startswith("/dev/zram"):
+                kinds.add("disk")
+                continue
+            kinds.add("zram")
+            words = (_read(self._sys / "block" / Path(name).name / "mm_stat") or "").split()
+            if len(words) >= 3 and words[0].isdigit() and words[2].isdigit():
+                orig, used = orig + int(words[0]), used + int(words[2])
+        kind = None if not kinds else kinds.pop() if len(kinds) == 1 else "mixed"
+        return kind, (orig / used if used else None)
 
     def session_processes(self, session: SessionRef) -> list[Proc]:
         """Every process of `session`: its slice's, where it has one; else the agent's
@@ -427,22 +451,29 @@ class Linux(Posix):
     def _tagged(self) -> dict[str, list[int]]:
         """The user's processes by the session their environment names (`LEASEHOLD_SESSION`):
         read once for every session asked about within `TAGS_S`."""
+        return self._scan_env()[0]
+
+    def _scan_env(self) -> tuple[dict[str, list[int]], dict[int, str]]:
+        """The user's processes by the session their environment names, and the lease it names
+        (`LEASEHOLD_LEASE_ID`) by process: read once within `TAGS_S`."""
         now = time.monotonic()
         if self._tags is not None and now - self._tags[0] < TAGS_S:
-            return self._tags[1]
+            return self._tags[1], self._tags[2]
         found: dict[str, list[int]] = {}
-        prefix = SESSION_ENV + b"="
+        leases: dict[int, str] = {}
+        session, lease = SESSION_ENV + b"=", LEASE_ENV + b"="
         for pid in self._own():
             try:
                 environ = (self._proc / str(pid) / "environ").read_bytes()
             except OSError:
                 continue
             for item in environ.split(b"\0"):
-                if item.startswith(prefix):
-                    found.setdefault(item[len(prefix) :].decode(errors="replace"), []).append(pid)
-                    break
-        self._tags = (now, found)
-        return found
+                if item.startswith(session):
+                    found.setdefault(item[len(session) :].decode(errors="replace"), []).append(pid)
+                elif item.startswith(lease):
+                    leases[pid] = item[len(lease) :].decode(errors="replace")
+        self._tags = (now, found, leases)
+        return found, leases
 
     def named(self, names: Collection[str]) -> list[Proc]:
         """The user's live processes whose program is one of `names`, by the kernel's name for
@@ -477,6 +508,9 @@ class Linux(Posix):
         else:
             home = cgroup.own_cgroup(self._proc, str(pid)) or ""
             role = "lease" if PurePosixPath(home).name.startswith("lease-") else "tool"
+            found = self._proc_of(pid, role=role, basis=basis)
+            lease = self._scan_env()[1].get(pid)
+            return None if found is None else replace(found, group=home or None, lease=lease)
         return self._proc_of(pid, role=role, basis=basis)
 
     # --- trees -------------------------------------------------------------------------------
@@ -640,6 +674,9 @@ class Linux(Posix):
             return Done("systemd", empty=not left)
         if not self._pids(tree):
             return Done("signal", empty=True)
+        if grace_s <= 0:
+            self._each(tree, signal.SIGKILL)
+            return Done("signal")
         self._each(tree, signal.SIGTERM)
         self._each(tree, signal.SIGCONT)
         deadline = time.monotonic() + grace_s

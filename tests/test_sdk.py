@@ -283,6 +283,7 @@ class FakeHost(Posix):
 
     def __init__(self) -> None:
         super().__init__()
+        self.done: list[tuple[str, int]] = []
         self.procs: dict[int, host.Proc] = {}
         self.commands: dict[int, str] = {}
         self.available = 12 << 30
@@ -319,6 +320,19 @@ class FakeHost(Posix):
 
     def command_line(self, proc: host.Proc) -> str | None:
         return self.commands.get(proc.pid, proc.name)
+
+    def pause(self, tree: host.Tree) -> host.Done:
+        self.done.append(("pause", tree.root))
+        return host.Done("sigstop")
+
+    def resume(self, tree: host.Tree) -> host.Done:
+        self.done.append(("resume", tree.root))
+        return host.Done("sigcont")
+
+    def kill(self, tree: host.Tree, grace_s: float) -> host.Done:
+        self.done.append(("kill", tree.root))
+        self.procs.pop(tree.root, None)
+        return host.Done("signal")
 
 
 GIB = 1 << 30
@@ -414,8 +428,8 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
                 agent.watch_memory()
                 watchdog = Client(daemon.path).status()["watchdog"]
                 levels.append(watchdog["level"])
-                if watchdog["level"] == "warn":
-                    assert watchdog["would"] == {"action": "hold"}, name
+                if watchdog["level"] != "critical":  # it acts at critical by default
+                    assert watchdog["would"] is None, name
             assert levels == [r[3] for r in readings], name
             would = watchdog["would"]
             assert (would["action"], would["pid"], would["why"]) == ("pause", chosen, why), name
@@ -423,8 +437,8 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
             events = Client(daemon.path).events()["events"]
             paused = [(e["pid"], e["would"]) for e in events if e["type"] == "paused"]
             assert paused == [(chosen, True)], name
-            held = [e["would"] for e in events if e["type"] == "held"]
-            assert held == ([True] if "warn" in levels else []), name
+            assert not [e for e in events if e["type"] == "held"], name
+            assert watchdog["paused"] == watchdog["stopped"] == [], name  # watch mode only says
         finally:
             daemon.stop()
     # Where the host cannot read the machine's memory, there is no level, and status says why.
@@ -434,3 +448,93 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
     watchdog = agent.status()["watchdog"]
     assert (watchdog["level"], watchdog["would"]) == (None, None)
     assert watchdog["reason"].startswith("the watchdog cannot see memory here")
+
+
+def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, monkeypatch):
+    # Acting: at critical it pauses the newest tree, then after 5 s still critical stops it,
+    # then pauses the next; once memory has been fine for a while the oldest paused runs again,
+    # and new work waits until it ends. Each step: (available GiB, trees alive, what the host
+    # was told to do, what is paused, why new work waits).
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    steps = [
+        (6, [101, 102], [], [], None),
+        (1.5, [101, 102], [("pause", 102)], [102], "is paused until memory frees"),
+        (1.5, [101, 102], [], [102], "is paused until memory frees"),
+        (1.5, [101, 102], [("kill", 102)], [], "memory is short"),
+        (1.5, [101], [("pause", 101)], [101], "is paused until memory frees"),
+        *[(10, [101], [], [101], "is paused until memory frees")] * 4,
+        (10, [101], [("resume", 101)], [101], "new work waits until it ends"),
+        (10, [], [], [], None),
+    ]  # fmt: skip
+    fake, mono = FakeHost(), Clock(0.0)
+    fake.procs[100] = host.Proc(100, "100", "fake-agent", parent=1, started=1000.0, anon=GIB)
+    config = machine_config(
+        tmp_path, socket=str(sock_dir / "s.sock"), watchdog={"mode": "on", "agents": ["x"]}
+    )
+    agent = MachineAgent(
+        config, facts=FACTS, load=FakeLoad(), monotonic=mono, platform=lambda: fake
+    )
+    daemon = Daemon(config, agent)
+    daemon.start()
+    try:
+        client = Client(daemon.path)
+        client.register_session("cc-mine", pid=100, agent="fake-agent", source="hook")
+        # As `hold` and the shims ask: the rule is also a label.
+        pytest = {"rule": "pytest", "labels": {"rule": "pytest"}}
+        lease = client.acquire(kind="work", weight=1, ttl_s=60, wait_s=0, **pytest)
+        lid = lease["lease"]["lease_id"]
+        trees = {
+            101: ("make -j8", 60, None),
+            102: ("python3 -m pytest -n 4", 120, lid),
+        }
+        for n, (free, alive, told, paused, why) in enumerate(steps):
+            for pid in set(fake.procs) - {100} - set(alive):
+                del fake.procs[pid]
+            for pid in alive:
+                command, after, under = trees[pid]
+                fake.procs.setdefault(pid, host.Proc(
+                    pid, str(pid), command.split()[0], parent=100, started=1000.0 + after,
+                    anon=GIB, lease=under,
+                ))  # fmt: skip
+                fake.commands[pid] = command
+            fake.available = int(free * GIB)
+            fake.done.clear()
+            mono.now += 2.5
+            agent.tick()
+            agent.watch_memory()
+            watchdog = client.status()["watchdog"]
+            assert fake.done == told, n
+            assert [p["pid"] for p in watchdog["paused"]] == paused, n
+            assert (watchdog["held"] is None) == (why is None), n
+            assert why is None or why in watchdog["held"], n
+            if n == 1:
+                assert client.renew(lid)["paused"] is True
+                notice = tmp_path / f"leasehold-hooks-{os.getuid()}" / "notice.cc-mine"
+                assert "has been paused" in notice.read_text()
+                waiting = client.acquire(kind="work", weight=1, ttl_s=60, wait_s=0)
+                assert waiting["status"] == "queued"
+                blocked = waiting["blocked"]
+                assert blocked.startswith("the watchdog holds new work"), blocked
+                client.release(waiting["lease_id"])
+            if n == 3:
+                stopped = client.renew(lid)["stopped"]
+                assert (stopped["why"], stopped["runaway"], stopped["rerun"]) == (
+                    "critical",
+                    False,
+                    True,
+                )
+                (record,) = watchdog["stopped"]
+                assert (record["pid"], record["stopped_for"]) == (102, "critical")
+        events = [(e["type"], e.get("pid")) for e in client.events()["events"]]
+        assert [e for e in events if e[0] in ("paused", "resumed", "stopped")] == [
+            ("paused", 102), ("stopped", 102), ("paused", 101), ("resumed", 101),
+        ]  # fmt: skip
+        # The rule's next command runs alone: it waits while another lease is held.
+        again = client.acquire(kind="work", weight=1, ttl_s=60, wait_s=0, **pytest)
+        assert again["status"] == "queued"
+        assert again["blocked"].startswith("it runs alone"), again["blocked"]
+        client.release(lid)
+        agent.tick()
+        assert again["lease_id"] in held(daemon.path)
+    finally:
+        daemon.stop()

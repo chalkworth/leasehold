@@ -19,7 +19,9 @@ for an agent's command there only counts it, and `support("adopt")` says why."""
 
 from __future__ import annotations
 
+import ctypes
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -45,6 +47,13 @@ from leasehold.host import (
 )
 
 _GROUP = "signals to the tree's process group: a member that left the group is not reached"
+#: `stay_resident` locks memory only where this much may be locked: with `MCL_FUTURE` every
+#: later allocation counts against the limit, and one past it would fail.
+LOCK_AT_LEAST = 1 << 30
+#: The priority `stay_resident` asks for (a nice value), where this user may.
+NICE = -10
+#: `mlockall`'s flags on Linux (x86 and ARM) and macOS.
+_MCL_CURRENT, _MCL_FUTURE = 1, 2
 
 
 class Posix:
@@ -188,6 +197,9 @@ class Posix:
             return Done("none", "the tree has no process group of its own")
         if not group_alive(tree.pgid):
             return Done("signal", empty=True)
+        if grace_s <= 0:
+            signal_group(tree.pgid, signal.SIGKILL)
+            return Done("signal")
         signal_group(tree.pgid, signal.SIGTERM)
         signal_group(tree.pgid, signal.SIGCONT)
         deadline = time.monotonic() + grace_s
@@ -195,6 +207,38 @@ class Posix:
             time.sleep(0.1)
         signal_group(tree.pgid, signal.SIGKILL)
         return Done("signal")
+
+    def stay_resident(self, *, dry: bool = False) -> Done:
+        """Lock this process's memory in RAM (`mlockall`, now and for what it allocates later),
+        where the user's locked-memory limit is at least `LOCK_AT_LEAST` or unlimited, and
+        raise its priority to `NICE` where the user may. `how` names what was done (`mlockall`,
+        `nice`, both, or `none` with the `reason`); with `dry`, what would be."""
+        done, why = [], []
+        soft, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        if os.geteuid() != 0 and soft != resource.RLIM_INFINITY and soft < LOCK_AT_LEAST:
+            why.append(
+                f"memory is not locked: this user may lock {soft >> 20} MiB (ulimit -l), and "
+                f"the daemon needs {LOCK_AT_LEAST >> 30} GiB or no limit"
+            )
+        elif dry:
+            done.append("mlockall")
+        else:
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.mlockall(_MCL_CURRENT | _MCL_FUTURE) == 0:
+                done.append("mlockall")
+            else:
+                why.append(f"mlockall failed: {os.strerror(ctypes.get_errno())}")
+        if dry:
+            done.append("nice where allowed")
+        else:
+            try:
+                os.setpriority(os.PRIO_PROCESS, 0, min(NICE, os.getpriority(os.PRIO_PROCESS, 0)))
+                done.append("nice")
+            except OSError:
+                pass
+        if not done:
+            return Done("none", "; ".join(why))
+        return Done(" and ".join(done), "; ".join(why) or None)
 
     # --- how a command ended -----------------------------------------------------------------
 
