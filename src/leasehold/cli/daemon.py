@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from leasehold import discovery, paths
+from leasehold import discovery, macos, paths
 from leasehold.facts import probe
 
 
@@ -61,7 +61,13 @@ def _mode_options(s) -> None:
     )
 
 
+def _note_macos() -> None:
+    if (says := macos.note()) is not None:
+        sys.stderr.write(f"leasehold: {says}\n")
+
+
 def _serve(args, ctx) -> int:
+    _note_macos()
     from leasehold import machine
     from leasehold.server import serve
 
@@ -93,6 +99,9 @@ def _serve(args, ctx) -> int:
 def _init(args, ctx) -> int:
     mode = args.mode or "user"
     from leasehold.template import sized
+
+    if not args.print:
+        _note_macos()
 
     text = sized(mode, probe())
     if args.print:

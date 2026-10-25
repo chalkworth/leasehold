@@ -34,7 +34,7 @@ def register(sub) -> None:
 
 
 def _setup(args, ctx) -> int:
-    from leasehold import setup
+    from leasehold import macos, setup
 
     def say(line: str) -> None:
         print(f"  {line}")
@@ -46,4 +46,6 @@ def _setup(args, ctx) -> int:
     if args.upgrade_config:
         path = Path(ctx.config).expanduser() if ctx.config else None
         return setup.upgrade_config(path, ctx.env, say, dry_run=args.dry_run)
+    if (says := macos.note()) is not None:
+        say(says)
     return setup.setup(ctx.env, say)
