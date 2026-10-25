@@ -196,9 +196,9 @@ class AdmissionPolicy:
     #: Host to why the memory net holds new work there, in words: while it is named, nothing
     #: that counts memory there starts (nothing at all on a host with no budget).
     memory_held: Mapping[str, str] = field(default_factory=dict, hash=False)
-    #: Host to the swap, in bytes, the memory net could park a new command into there while a
-    #: heavy command runs: an item that counts more waits, since the net could not park it
-    #: whole if it overflowed. A host not named here has no such limit.
+    #: Host to the swap, in bytes, the memory net could park a new command into there: while
+    #: other leases count memory there, an item that counts more waits, since the net could
+    #: not park it whole if memory ran out. A host not named here has no such limit.
     memory_room: Mapping[str, int] = field(default_factory=dict, hash=False)
 
     @classmethod
@@ -265,13 +265,9 @@ class AdmissionPolicy:
     def held_back(
         self, host: str, weight: int, memory: int | None, memory_per_slot: int | None = None
     ) -> bool:
-        """Whether the memory net keeps an item of `weight` declaring `memory` or
-        `memory_per_slot` from starting on `host` now: its hold names the host, and the item
-        counts memory there, or the host counts none; or the item counts more than the swap
-        the net could park it into there (`memory_room`)."""
-        room = self.memory_room.get(host)
-        if room is not None and self.counted(host, weight, memory, memory_per_slot) > room:
-            return True
+        """Whether the memory net's hold keeps an item of `weight` declaring `memory` or
+        `memory_per_slot` from starting on `host` now: the hold names the host, and the item
+        counts memory there, or the host counts none."""
         if host not in self.memory_held:
             return False
         return host not in self.memory or self.counted(host, weight, memory, memory_per_slot) > 0
@@ -644,10 +640,24 @@ def _memory_fits(tally: _Tally, policy: AdmissionPolicy, host: str, need: int) -
     budget = policy.memory.get(host)
     if budget is None:
         return True
-    if tally.memory.get(host, 0) + need > budget:
+    if tally.memory.get(host, 0) + need > budget or not _room_fits(tally, policy, host, need):
         return False
     free = policy.memory_free.get(host)
     return free is None or tally.fresh_memory.get(host, 0) + need <= free
+
+
+def _room_fits(tally: _Tally, policy: AdmissionPolicy, host: str, need: int) -> bool:
+    """Whether an item counting `need` may start beside the leases that count memory on `host`
+    (held, or admitted by this decision): it fits the swap the memory net could park it into
+    there (`memory_room`), or nothing else there counts memory."""
+    room = policy.memory_room.get(host)
+    if room is None or need <= room:
+        return True
+    pools = policy.pools
+    standing = sum(
+        m for p, m in policy.standing_memory.items() if p in pools and pools[p].host == host
+    )
+    return tally.memory.get(host, 0) <= standing
 
 
 def gib(n: int) -> str:
@@ -1147,15 +1157,14 @@ def blocker(
         why = f" ({policy.memory_short})" if policy.memory_short else ""
         return f"memory is short{why}: nothing new starts until the pressure eases"
     if policy.held_back(pool.host, item.weight, item.memory, item.memory_per_slot):
-        if pool.host in policy.memory_held:
-            return f"the memory net holds new work: {policy.memory_held[pool.host]}"
-        room = policy.memory_room[pool.host]
-        need = policy.counted(pool.host, item.weight, item.memory, item.memory_per_slot)
-        return (
-            f"the memory net holds new work: a heavy command runs and the swap has "
-            f"{gib(room)} free, too little to park this one ({gib(need)}) if memory ran out"
-        )
+        return f"the memory net holds new work: {policy.memory_held[pool.host]}"
     need = policy.counted(pool.host, item.weight, item.memory, item.memory_per_slot)
+    if not _room_fits(tally, policy, pool.host, need):
+        return (
+            f"the memory net holds new work: swap has {gib(policy.memory_room[pool.host])} "
+            f"free, too little to park this one ({_item_need(policy, pool.host, item)}) "
+            "beside what runs if memory ran out"
+        )
     free_now = policy.memory_free.get(pool.host)
     if pool.host in policy.memory and free_now is not None and need > free_now:
         why = f" ({policy.memory_short})" if policy.memory_short else ""

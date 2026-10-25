@@ -368,24 +368,12 @@ class MachineAgent:
         for key in self._granted_at.keys() - live:
             del self._granted_at[key]
 
-    def _net_leases(self) -> list[tuple[str, float, int]]:
+    def _net_leases(self) -> list[tuple[str, float]]:
         """The leases the memory net watches: every lease of `SCOPE`, with when it was
-        granted and the memory it counts."""
+        granted."""
         return [
-            (r["item_id"], r["acquired_at"], self._counts(r))
-            for r in self.ledger.leases()
-            if r["scope"] == SCOPE
+            (r["item_id"], r["acquired_at"]) for r in self.ledger.leases() if r["scope"] == SCOPE
         ]
-
-    def _counts(self, row) -> int:
-        """The memory the lease `row` counts against the budget (0 with no budget)."""
-        if self.budget is None:
-            return 0
-        if row["memory_per_slot"] is not None:
-            return row["weight"] * row["memory_per_slot"]
-        if row["memory"] is not None:
-            return row["memory"]
-        return row["weight"] * self.budget.assumed_per_slot
 
     def _net_changed(self) -> None:
         """The memory net parked or resumed a lease, or one has settled: record it, and admit

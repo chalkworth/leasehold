@@ -108,9 +108,8 @@ NO_ROOM = "park"
 #: The window `write_per_day` is counted over.
 DAY_S = 86400.0
 
-#: A lease the agent holds, as the net needs it: (lease id, wall-clock time it was granted,
-#: the memory it counts in bytes).
-Held = tuple[str, float, int]
+#: A lease the agent holds, as the net needs it: (lease id, wall-clock time it was granted).
+Held = tuple[str, float]
 
 _reported: set[tuple[str, int]] = set()
 
@@ -303,8 +302,6 @@ class MemoryNet:
         self.written = 0
         self.reason: str | None = None
         self._poller: _Watch | None = None
-        #: What each held lease counts, from the last step.
-        self._counted: dict[str, int] = {}
 
     # --- what others ask -----------------------------------------------------------------
 
@@ -321,22 +318,15 @@ class MemoryNet:
         return None
 
     def room(self) -> int | None:
-        """The swap, in bytes, a new command could be parked into while a heavy command runs:
-        the least free under any cap the net watches, or the machine's free swap when it
-        watches none. None while no heavy command runs (nothing to collide with), or while the
-        net cannot park."""
+        """The swap, in bytes, a new command could be parked into: the least free under any cap
+        the net watches, or the machine's free swap when it watches none. None while the net
+        cannot park."""
         with self._lock:
             if self.reason is not None or ROOM_FIT <= 0:
                 return None
-            heavy = any(n >= HEAVY_BYTES for n in self._counted.values()) or any(
-                s.parked_at is None and s.footprint >= HEAVY_BYTES for s in self._scopes.values()
-            )
-            if not heavy:
-                return None
             rooms = [c.room for c in self._caps.values() if c.room is not None]
-            if rooms:
-                return min(rooms)
-            return _meminfo(self._proc).get("SwapFree")
+            room = min(rooms) if rooms else _meminfo(self._proc).get("SwapFree")
+            return None if room is None else int(room / ROOM_FIT)
 
     def state(self, lease_id: str) -> str | None:
         """`parked`, `settling` or None, for the lease `lease_id`."""
@@ -479,8 +469,7 @@ class MemoryNet:
         """Start watching the scopes of new leases; let go of those whose lease or scope is
         gone. A scope a net before this one froze is adopted as parked while its lease is
         held, and resumed otherwise."""
-        live = {h[0]: h for h in held}
-        self._counted = {h[0]: h[2] for h in held}
+        live = dict(held)
         for lease_id in list(self._scopes):
             scope = self._scopes[lease_id]
             if lease_id in live and scope.path.is_dir():
@@ -493,7 +482,7 @@ class MemoryNet:
         for lease_id in list(self._counts):
             if lease_id not in live:
                 del self._counts[lease_id]
-        for lease_id, granted_at, _ in held:
+        for lease_id, granted_at in held:
             if lease_id in self._scopes:
                 continue
             path = self._find(lease_id)

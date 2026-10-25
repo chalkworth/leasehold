@@ -228,7 +228,7 @@ def stepped(tmp_path, leases: str = "ab") -> tuple[Tree, list[float], net.Memory
     tree, now = Tree(tmp_path, limit=6 * GIB), [0.0]
     memory_net = net.MemoryNet(
         MemoryNetSettings(mode="park"),
-        leases=lambda: [(lease, float(i), 0) for i, lease in enumerate(leases)],
+        leases=lambda: [(lease, float(i)) for i, lease in enumerate(leases)],
         cgroup_root=tree.root,
         proc=tree.proc,
         clock=lambda: now[0],
