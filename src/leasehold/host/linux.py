@@ -148,6 +148,8 @@ class Linux(Posix):
         self._swapins: tuple[float, int] | None = None
         #: (when, pids by session) at the last scan of the user's processes' environments.
         self._tags: tuple[float, dict[str, list[int]]] | None = None
+        #: When the machine booted, in wall-clock seconds (None: not read yet, or unreadable).
+        self._boot: float | None = None
 
     # --- what works here ---------------------------------------------------------------------
 
@@ -214,6 +216,17 @@ class Linux(Posix):
         stat = self._stat(pid)
         return None if stat is None else stat[2]
 
+    def _started(self, ticks: str) -> float | None:
+        """A start time in clock ticks since boot (a fence), in wall-clock seconds."""
+        if self._boot is None:
+            for line in (_read(self._proc / "stat") or "").splitlines():
+                if line.startswith("btime "):
+                    with contextlib.suppress(ValueError):
+                        self._boot = float(line.split()[1])
+        if self._boot is None or not ticks.isdigit():
+            return None
+        return self._boot + int(ticks) / os.sysconf("SC_CLK_TCK")
+
     def _proc_of(self, pid: int, *, role: str | None = None, basis: str | None = None):
         """Process `pid` as a `Proc`, with its resident and swapped memory; None when it has
         gone, is a zombie, or has no memory of its own (a kernel thread)."""
@@ -238,6 +251,7 @@ class Linux(Posix):
         return Proc(
             pid, stat[2], name, held, stat[1], self._fence(stat[1]), role=role, basis=basis,
             anon=None if anon is None else anon << 10, swap=None if swap is None else swap << 10,
+            started=self._started(stat[2]),
         )  # fmt: skip
 
     def _children(self, pid: int) -> list[int]:
@@ -413,6 +427,19 @@ class Linux(Posix):
             if named and (got := self._proc_of(pid)) is not None:
                 found.append(got)
         return found
+
+    def command_line(self, proc: Proc) -> str | None:
+        """The command `proc` runs, its arguments joined by spaces; None once it has ended (or
+        its pid is another process's) or when it cannot be read."""
+        try:
+            raw = (self._proc / str(proc.pid) / "cmdline").read_bytes()
+        except OSError:
+            return None
+        if proc.fence is not None and self._fence(proc.pid) != proc.fence:
+            return None
+        words = raw.rstrip(b"\0").split(b"\0")
+        line = b" ".join(words).decode(errors="replace").strip()
+        return line or None
 
     def _of_session(self, pid: int, session: SessionRef, basis: str) -> Proc | None:
         if pid == session.agent_pid:

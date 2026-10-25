@@ -742,6 +742,7 @@ an example machine. An unknown key is an error.
 | `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again; at least 1 |
 | `[elastic] headroom` | `"keep"` | how much of the pools' and the machine's headroom an [elastic lease](#elastic-leases) leaves free as it grows: `"keep"` all of it, `"leave-one"` one slot, `"use"` none |
 | `[watchdog] agents` | `["claude", "codex", "gemini", "cursor-agent", "aider"]` | the program names your own daemon [watches as sessions](#watched-sessions) without being asked; `[]` for none |
+| `[watchdog]` | `mode = "watch"` | see [The watchdog](#the-watchdog): `mode` (`"off"` or `"watch"`), `act_at` (`"critical"`), `pause_below`, `kill_below`, `resume_above` and `min_size` (`"auto"`), `lead_s` (15), `choose_discovered` (false), `protect` (`[]`) |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
 
 The ceiling clamps the pools: a pool's `max` is clamped to what the pool could ever hold, the
@@ -1551,6 +1552,77 @@ one's footprint, and the events say when one starts and ends.
 Where leasehold cannot list a session's processes yet (macOS among such systems), each session
 has `how` set to `none` and a `reason`, and its footprint is null, so it never looks idle.
 
+### The watchdog
+
+Your own daemon judges how short of memory the machine is, and works out which session's work
+it would pause to make room. In this release it only watches: `[watchdog] mode = "watch"` (the
+default) decides and reports, and pauses or stops nothing. `mode = "off"` turns the judging off;
+sessions are still watched.
+
+The level is one of three:
+
+- `critical`, the last resort before the machine freezes: available memory under `kill_below`,
+  or every task stalled on memory more than 20% of the last 10 seconds (PSI `full avg10`).
+- `warn`: available memory under `pause_below`, or available memory falling fast enough to
+  reach `kill_below` within `lead_s` seconds, at the rate it fell over the last 5 seconds.
+  Memory pressure only confirms a shortage once it has arrived; the rate of fall warns of it
+  earlier.
+- `ok`: anything else.
+
+The watchdog acts only at `act_at` and above, `critical` by default, so `warn` is for watching.
+In watch mode it acts at no level. At `act_at` and above, `would` in the status says which tree
+it would pause, and a `paused` event with `would: true` says so once for each new choice.
+
+A tree is one of a session's trees (see [Watched sessions](#watched-sessions)). The first
+choice is a runaway: a tree whose own growth over the last 5 seconds is at least half of the
+machine's fall in available memory while the projection is under `lead_s`, or a tree holding
+more than twice what its leases declared or learned. Real builds and test runs repeat their
+peaks to within about 10%, so twice is far beyond. The fastest-growing runaway comes first.
+Without a runaway, the choice is the newest tree, by its first process's start, across all
+sessions.
+
+Some trees are never chosen:
+
+- a tree under `min_size`;
+- one the agent process runs under, and one made only of leasehold's own processes (the daemon,
+  and the `leasehold hold` or other process that holds a lease or waits for one). Those
+  processes are left out of a tree's footprint, and would be left running if it were paused;
+- one whose command line matches a built-in pattern (the agents in `[watchdog] agents`, MCP
+  servers such as `npx -y @modelcontextprotocol/...` or `uvx mcp-...`, and `leasehold`) or one
+  of `[watchdog] protect`;
+- one whose first process started within 10 seconds of its agent, such as the MCP and language
+  servers a session starts with;
+- any tree of a session found by name, which never asked to join, unless `choose_discovered =
+  true`.
+
+```toml
+[watchdog]
+mode = "watch"         # "off", or "watch": decide and report, never act
+act_at = "critical"    # "warn" or "critical": the least level at which it would act
+pause_below = "auto"   # the larger of 1.5 GiB and 10% of memory
+kill_below = "auto"    # the larger of 0.5 GiB and 4% of memory
+resume_above = "auto"  # pause_below plus the larger of 1 GiB and 5% of memory
+min_size = "auto"      # the larger of 256 MiB and 2% of memory: smaller trees are never chosen
+lead_s = 15            # warn when available memory would reach kill_below this soon
+choose_discovered = false
+protect = []           # regular expressions searched for in a tree's command line
+```
+
+The sizes take a size (`"2g"`) or `"auto"`. They must keep `kill_below` under `pause_below`,
+and `pause_below` under `resume_above`; when they do not, the status gives the reason and the
+watchdog judges nothing. The `auto` values are starting points from a simulator that has no
+model of page cache or stalls. Watch mode is how they are checked on real machines before the
+watchdog acts.
+
+The daemon reads the machine's memory every 2 seconds while memory is plentiful (level `ok`,
+at least twice `pause_below` available, and no fall that would reach `kill_below` within twice
+`lead_s`), every half second when it is nearer, and four times a second while the level is not
+`ok`. Sessions are read every 2 seconds whatever the level; the watchdog adds no scan of its
+own.
+
+The machine's daemon has no watchdog. Where leasehold cannot read the machine's memory (macOS
+for now), the level is null and the reason says the watchdog cannot see memory there.
+
 ### The Claude Code plugin
 
 ```
@@ -1863,7 +1935,10 @@ program), `revoked`, `resized` (an elastic lease's size changed, from `previous_
 again), `lend_opened` and `lend_closed`, and `session_started` and `session_ended` (a
 [watched session](#watched-sessions), with its `session`, `source`, `user`, `agent` and
 `agent_pid`; an end has a `reason`: `unregistered`, `agent ended`, or `joined` when a registered
-session took in an agent that was found by name). A restarted daemon numbers them afresh. An event about a lease
+session took in an agent that was found by name), and from [the watchdog](#the-watchdog),
+`paused` (the tree it would pause, with `level`, `reason` and the tree's fields as in `would`)
+and `runaway` (a tree newly found running away). Both have `would`, which is true while the
+watchdog only decides and does nothing. A restarted daemon numbers them afresh. An event about a lease
 or a place in line carries its `weight` (a lease's size, a waiting item's least),
 `min_weight` and `max_weight`.
 
@@ -1921,7 +1996,20 @@ when a field is removed or changes meaning:
   or `auto`), `user`, `agent`, `agent_pid`, `slice`, `since`, `how` and `reason` (as for
   `processes`, null until first read), `footprint_bytes` (the anonymous memory of everything
   the agent started, in RAM or swap; null when it cannot be read), `processes` (not counting
-  the agent), `trees`, and `largest` (`pid`, `name` and `bytes` of the process with the most);
+  the agent), `trees`, and `largest` (`pid`, `name` and `bytes` of the process with the most).
+  It also has [the watchdog](#the-watchdog)'s decision: `mode` (`watch` or `off`), `act_at`,
+  `level` (`ok`, `warn`, `critical`, or null when memory cannot be read or the watchdog is off),
+  `reason`, `available_bytes`, `fall_bytes_per_s` (how fast available memory fell over the last
+  5 seconds), `projected_s` (seconds until it reaches `kill_below` at that rate; null while it
+  does not fall), `limits` (`pause_below`, `kill_below`, `resume_above` and `min_size` in bytes,
+  and `lead_s`), `how` (`pressure` and `footprint`: how each is read, or `none`), `candidates`
+  (the trees it could choose), `passed_over` (how many it may not choose, by why: `agent`,
+  `leasehold`, `discovered`, `protected`, `started with its agent`, `small`), `victim` (the
+  tree first in line whenever the level is not `ok`) and `would` (what it would do now:
+  null, or `action` `pause` with the tree). A tree has `session`, `pid`, `cmd`,
+  `footprint_bytes`, `expected_bytes` (what its leases declared or learned, or null),
+  `growth_bytes_per_s`, `started`, `why` (`runaway` or `newest`), `runaway` and `spared` (the
+  pids of leasehold's own processes in it);
 - `standing`, `leases`, and `queue`, each queued item with its `position` and why it waits
   (`blocked`). Each lease and queued item has `memory_bytes` (what it declared, or null; a
   lease declaring memory per slot gives the total it was granted, its weight times the size),

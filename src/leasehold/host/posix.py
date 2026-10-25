@@ -142,6 +142,10 @@ class Posix:
         (`support("session_processes")` says why)."""
         return []
 
+    def command_line(self, proc: Proc) -> str | None:
+        """The command `proc` runs: not readable here."""
+        return None
+
     def wakeup_fd(self) -> int | None:
         """A file descriptor that turns readable when a tree or the machine's memory changes,
         so that a loop can look again before its next tick; None: there is none here."""

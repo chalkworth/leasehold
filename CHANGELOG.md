@@ -223,6 +223,25 @@ here.
   `session_ended` (with a `reason`) say when one starts and ends.
 - `host.named(names)` lists the user's processes by program name, and a `Proc` has `anon` and
   `swap`. A polled `Footprint` has `anon` and `swap`, summed over its processes.
+- The watchdog, in watch mode. Your own daemon judges how short of memory the machine is
+  (`ok`, `warn` or `critical`, with a projection of when available memory reaches
+  `kill_below` at its current fall) and says which session tree it would pause: a runaway
+  first, then the newest. It pauses and stops nothing yet. Trees of sessions found by name,
+  the agent process, leasehold's own processes, small trees, trees that started with their
+  agent and trees matching a protect pattern are never chosen. See "The watchdog" in
+  docs/reference.md.
+- `[watchdog]` keys: `mode` (`"watch"`, or `"off"`), `act_at` (`"critical"`, or `"warn"`),
+  `pause_below`, `kill_below`, `resume_above` and `min_size` (`"auto"`, or a size), `lead_s`
+  (15), `choose_discovered` (false) and `protect` (regular expressions). Sizes out of order
+  are reported in the status, and the watchdog then judges nothing.
+- The status object's `watchdog` has `mode`, `act_at`, `level`, `reason`, `available_bytes`,
+  `fall_bytes_per_s`, `projected_s`, `limits`, `how`, `candidates`, `passed_over`, `victim`
+  and `would`. Where the machine's memory cannot be read (macOS for now), `level` is null and
+  `reason` says the watchdog cannot see memory there.
+- Events `paused` and `runaway` from the watchdog, each with `would` (true while it only
+  decides).
+- `host.Proc` has `started` (when the process started, in wall-clock seconds), and the host has
+  `command_line(proc)`. `MachineAgent` takes `platform`, the function that makes its host.
 
 ### Changed
 

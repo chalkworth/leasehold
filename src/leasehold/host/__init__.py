@@ -13,7 +13,8 @@ has one (a systemd scope on Linux). The operations:
 * `members(tree)` are its live processes and `footprint(tree)` what it costs the machine in
   memory; `pressure()` is one reading of the machine's memory; `session_processes(session)` is
   everything an agent session started, and `named(names)` the user's processes whose program is
-  one of `names` (how agent sessions nobody registered are found).
+  one of `names` (how agent sessions nobody registered are found). `command_line(proc)` is the
+  command a process runs, as one line.
 * `pause(tree)` stops every process in it from running, and `resume(tree)` lets them run again.
   A tree's `keeper` (the process that started it and waits for it) is never paused. `kill(tree,
   grace_s)` sends SIGTERM, and SIGCONT so that a paused member sees it, then SIGKILL to what is
@@ -96,7 +97,8 @@ class Proc:
     """One live process. `fence` is the platform's token for it (None: the platform has none),
     `name` its program, `bytes` its resident and swapped memory (None: not read), `anon` the
     anonymous memory it has resident and `swap` what it has in swap (None: not read), `parent`
-    its parent's pid and `parent_fence` that parent's token as read now. In `session_processes`,
+    its parent's pid and `parent_fence` that parent's token as read now, and `started` when it
+    started, in wall-clock seconds (None: not known). In `session_processes`,
     `role` is `agent`, `tool`, `lease` or `orphan`, and `basis` how it was found to belong to
     the session: `slice`, `lineage` or `env`."""
 
@@ -110,6 +112,7 @@ class Proc:
     basis: str | None = None
     anon: int | None = None
     swap: int | None = None
+    started: float | None = None
 
 
 @dataclass(frozen=True)
@@ -328,6 +331,8 @@ class Host(Protocol):
     def session_processes(self, session: SessionRef) -> list[Proc]: ...
 
     def named(self, names: Collection[str]) -> list[Proc]: ...
+
+    def command_line(self, proc: Proc) -> str | None: ...
 
     def wakeup_fd(self) -> int | None: ...
 

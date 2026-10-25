@@ -1,6 +1,6 @@
 """The Python API (`leasehold.leasing`) against a real daemon: what a lease is granted, how a wait
 ends without one, what a lease the daemon takes back or forgets tells its holder, and the agent
-sessions the daemon watches."""
+sessions the daemon watches, with what its watchdog would pause."""
 
 from __future__ import annotations
 
@@ -11,14 +11,26 @@ import signal
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 
 import pytest
-from support import FACTS, NO_SCOPE, FakeLoad, Orphan, gone, machine_config, make_agent, until
+from support import (
+    FACTS,
+    NO_SCOPE,
+    Clock,
+    FakeLoad,
+    Orphan,
+    gone,
+    machine_config,
+    make_agent,
+    until,
+)
 
 import leasehold
 from leasehold import host
 from leasehold.agent import AcquireRequest, MachineAgent
 from leasehold.client import ApiError, Client
+from leasehold.host.posix import Posix
 from leasehold.server import Daemon
 
 
@@ -262,3 +274,116 @@ def test_a_session_is_watched_with_its_footprint_and_an_agent_is_found_by_name(s
     finally:
         agent.kill()
         daemon.stop()
+
+
+class FakeHost(Posix):
+    """A machine whose processes and available memory a test sets: `procs` by pid, each with
+    its anonymous memory and start time, `commands` by pid, and `available`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.procs: dict[int, host.Proc] = {}
+        self.commands: dict[int, str] = {}
+        self.available = 12 << 30
+
+    def support(self, operation: str) -> host.Support:
+        if operation in ("members", "pressure", "session_processes"):
+            return host.Support("exact", via="fake")
+        return super().support(operation)
+
+    def members(self, tree: host.Tree) -> list[host.Proc]:
+        return [p for p in self.procs.values() if p.pid == tree.root]
+
+    def session_processes(self, session: host.SessionRef) -> list[host.Proc]:
+        procs, found = dict(self.procs), []
+        for p in procs.values():
+            up = p
+            while up is not None and up.pid != session.agent_pid:
+                up = procs.get(up.parent)
+            if up is not None:
+                found.append(replace(p, role="agent" if p.pid == session.agent_pid else "tool"))
+        return found
+
+    def named(self, names) -> list[host.Proc]:
+        return [p for p in dict(self.procs).values() if p.name in names]
+
+    def pressure(self) -> host.Pressure:
+        return host.Pressure("exact", available=self.available, total=16 << 30)
+
+    def command_line(self, proc: host.Proc) -> str | None:
+        return self.commands.get(proc.pid, proc.name)
+
+
+GIB = 1 << 30
+
+
+def test_the_watchdog_says_which_tree_it_would_pause(sock_dir, tmp_path):
+    # Two agents: 100 registers, 200 is only found by name. Each tree is (pid, parent, start
+    # after its agent in s, command, anonymous GiB at each reading); available GiB per reading.
+    cases = [
+        ("the newest", [10, 6, 2, 0.4], [
+            (101, 100, 60, "make -j8", [1, 1, 1, 1]),
+            (102, 100, 120, "pytest -n 4", [1, 1, 1, 1]),
+        ], 102, "newest"),
+        ("a runaway before a newer tree", [6, 4.5, 3, 1.5, 0.4], [
+            (101, 100, 60, "cargo test", [1, 2, 3, 4.5, 6]),
+            (102, 100, 120, "pytest -n 4", [1, 1, 1, 1, 1]),
+        ], 101, "runaway"),
+        ("never a protected tree", [6, 2, 0.4], [
+            (101, 100, 60, "pytest -n 4", [1, 1, 1]),
+            (102, 100, 120, "node my-dev-server.js", [2, 2, 2]),  # [watchdog] protect
+            (103, 100, 5, "python -m some_lsp", [2, 2, 2]),  # started with its agent
+            (104, 100, 90, "npx -y @modelcontextprotocol/server-x", [2, 2, 2]),
+            (105, 100, 100, "sleep 60", [0.1, 0.1, 0.1]),  # under min_size
+        ], 101, "newest"),
+        ("never a session found by name", [6, 2, 0.4], [
+            (101, 100, 60, "pytest -n 4", [1, 1, 1]),
+            (201, 200, 120, "cargo build", [3, 3, 3]),
+        ], 101, "newest"),
+    ]  # fmt: skip
+    for n, (name, available, trees, chosen, why) in enumerate(cases):
+        fake, mono = FakeHost(), Clock(0.0)
+        for pid in (100, 200):
+            fake.procs[pid] = host.Proc(
+                pid, str(pid), "fake-agent", parent=1, started=1000.0, anon=GIB
+            )
+        (tmp_path / str(n)).mkdir()
+        config = machine_config(
+            tmp_path / str(n),
+            socket=str(sock_dir / "s.sock"),
+            watchdog={"agents": ["fake-agent"], "protect": ["dev-server"]},
+        )
+        agent = MachineAgent(
+            config, facts=FACTS, load=FakeLoad(), monotonic=mono, platform=lambda f=fake: f
+        )
+        daemon = Daemon(config, agent)
+        daemon.start()
+        try:
+            Client(daemon.path).register_session("mine", pid=100, agent="fake-agent")
+            for step, free in enumerate(available):
+                for pid, parent, after, command, sizes in trees:
+                    fake.procs[pid] = host.Proc(
+                        pid, str(pid), command.split()[0], parent=parent,
+                        started=1000.0 + after, anon=int(sizes[step] * GIB),
+                    )  # fmt: skip
+                    fake.commands[pid] = command
+                fake.available = int(free * GIB)
+                mono.now += 2.5
+                agent.tick()
+                agent.watch_memory()
+            watchdog = Client(daemon.path).status()["watchdog"]
+            assert watchdog["level"] == "critical", name
+            would = watchdog["would"]
+            assert (would["action"], would["pid"], would["why"]) == ("pause", chosen, why), name
+            events = Client(daemon.path).events()["events"]
+            paused = [e for e in events if e["type"] == "paused"]
+            assert [(e["pid"], e["would"]) for e in paused] == [(chosen, True)], name
+        finally:
+            daemon.stop()
+    # Where the host cannot read the machine's memory, there is no level, and status says why.
+    config = machine_config(tmp_path, socket=str(sock_dir / "s.sock"))
+    agent = MachineAgent(config, facts=FACTS, load=FakeLoad(), platform=Posix)
+    agent.watch_memory()
+    watchdog = agent.status()["watchdog"]
+    assert (watchdog["level"], watchdog["would"]) == (None, None)
+    assert watchdog["reason"].startswith("the watchdog cannot see memory here")

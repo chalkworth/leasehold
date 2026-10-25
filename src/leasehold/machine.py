@@ -304,14 +304,82 @@ class MemoryNetSettings(_Strict):
 DEFAULT_AGENTS = ("claude", "codex", "gemini", "cursor-agent", "aider")
 
 
-class WatchdogSettings(_Strict):
-    """The `[watchdog]` table: which agent sessions the daemon watches (`leasehold.sessions`).
-    Watching only reads and reports: it never pauses or stops anything."""
+# The watchdog's defaults (`leasehold.watchdog`), in one place. Each `auto` size is the larger
+# of a floor and a share of the machine's memory. They are starting points from a
+# simulator, which has no model of page cache or stalls; watch mode is how they are checked on
+# real machines before the watchdog acts.
+_GIB = 1 << 30
+#: `pause_below = "auto"`: under this much available memory the level is `warn`.
+PAUSE_BELOW = (3 * _GIB // 2, 0.10)
+#: `kill_below = "auto"`: under this much it is `critical`, the last resort before a freeze.
+KILL_BELOW = (_GIB // 2, 0.04)
+#: `resume_above = "auto"` is `pause_below` and this much more.
+RESUME_GAP = (_GIB, 0.05)
+#: `min_size = "auto"`: a smaller tree is never chosen.
+MIN_SIZE = (_GIB // 4, 0.02)
+#: `lead_s`: `warn` once available memory would reach `kill_below` this soon at its fall rate.
+LEAD_S = 15.0
+#: `act_at`: the least level at which the watchdog acts, once it may act.
+ACT_AT = "critical"
+#: The share of the last ten seconds in which every task stalled on memory (PSI `full avg10`,
+#: a percentage) that makes the level `critical` by itself.
+STALL_CRITICAL = 20.0
+#: Command lines never chosen, besides `[watchdog] protect`: the agents themselves, MCP servers
+#: (which start with their agent) and leasehold's own processes.
+PROTECT = (
+    r"(^|/)(claude|codex|gemini|cursor-agent|aider)(\s|$)",
+    r"@modelcontextprotocol/",
+    r"(^|[\s/])mcp[-_]server",
+    r"(^|\s)uvx\s+mcp-",
+    r"(^|[\s/])leasehold(\s|$)",
+)
+#: The watchdog's levels, least first.
+LEVELS = ("ok", "warn", "critical")
 
+
+def _auto(value: str, default: tuple[int, float], memory_bytes: int) -> int:
+    if value != "auto":
+        return memory_to_bytes(value)
+    floor, share = default
+    return max(floor, int(memory_bytes * share))
+
+
+@dataclass(frozen=True)
+class WatchdogLimits:
+    """The `[watchdog]` sizes in bytes for one machine (`WatchdogSettings.limits`)."""
+
+    pause_below: int
+    kill_below: int
+    resume_above: int
+    min_size: int
+
+
+class WatchdogSettings(_Strict):
+    """The `[watchdog]` table: the agent sessions the daemon watches (`leasehold.sessions`), and
+    how the watchdog judges the machine's memory (`leasehold.watchdog`). It decides and reports
+    what it would do; it never pauses or stops anything yet."""
+
+    #: `watch` judges the machine's memory and says what it would do (`would`) without acting;
+    #: `off` does neither. Sessions are watched either way.
+    mode: Literal["off", "watch"] = "watch"
     #: Program names, as the kernel names a process (`comm`): each of the user's processes
     #: running one is watched as a session of its own (`auto-<pid>`), unless it is already
     #: part of one. Empty: only sessions that register are watched. A user's own daemon only.
     agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
+    #: Sizes (`2g`), or `auto` for the defaults above.
+    pause_below: str = "auto"
+    kill_below: str = "auto"
+    resume_above: str = "auto"
+    min_size: str = "auto"
+    lead_s: float = Field(LEAD_S, gt=0)
+    #: `warn` or `critical`: below this level the watchdog only watches, even once it may act.
+    act_at: Literal["warn", "critical"] = ACT_AT
+    #: Whether trees of sessions found by name (`auto-<pid>`), which never asked to join, may be
+    #: chosen. They are watched and reported either way.
+    choose_discovered: bool = False
+    #: Regular expressions searched for in a tree's command line: a tree that matches is never
+    #: chosen. They add to the built-in ones (`PROTECT`).
+    protect: list[str] = Field(default_factory=list)
 
     @field_validator("agents")
     @classmethod
@@ -320,6 +388,39 @@ class WatchdogSettings(_Strict):
             if not name or "/" in name or name != name.strip():
                 raise ValueError(f"{name!r} is not a program name")
         return value
+
+    @field_validator("pause_below", "kill_below", "resume_above", "min_size")
+    @classmethod
+    def _auto_or_size(cls, value: str) -> str:
+        if value != "auto":
+            memory_to_bytes(value)
+        return value
+
+    @field_validator("protect")
+    @classmethod
+    def _patterns(cls, value: list[str]) -> list[str]:
+        for pattern in value:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"{pattern!r} is not a regular expression: {exc}") from None
+        return value
+
+    def limits(self, memory_bytes: int) -> WatchdogLimits:
+        """The sizes in bytes for a machine of `memory_bytes`. Raises `ValueError` unless
+        `kill_below` < `pause_below` < `resume_above`."""
+        pause = _auto(self.pause_below, PAUSE_BELOW, memory_bytes)
+        kill = _auto(self.kill_below, KILL_BELOW, memory_bytes)
+        if self.resume_above == "auto":
+            resume = pause + _auto("auto", RESUME_GAP, memory_bytes)
+        else:
+            resume = memory_to_bytes(self.resume_above)
+        if not kill < pause < resume:
+            raise ValueError(
+                "watchdog: kill_below must be under pause_below, and pause_below under "
+                f"resume_above (here {kill}, {pause} and {resume} bytes)"
+            )
+        return WatchdogLimits(pause, kill, resume, _auto(self.min_size, MIN_SIZE, memory_bytes))
 
 
 class ElasticSettings(_Strict):

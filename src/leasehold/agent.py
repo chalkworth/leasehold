@@ -47,8 +47,9 @@ from leasehold.load import LoadReader, available, some_avg10
 from leasehold.machine import MachineConfig, lease_memory_limit
 from leasehold.net import MemoryNet
 from leasehold.proctable import Proc
-from leasehold.sessions import Session, Sessions
+from leasehold.sessions import Branch, Session, Sessions
 from leasehold.units import CAP_OFF, cap_to_bytes, declared_to_bytes, memory_to_bytes
+from leasehold.watchdog import Memory, Watchdog, Work
 
 #: The ledger scope observed processes' leases are filed under; no client may name it.
 OBSERVED_SCOPE = "leasehold.observed"
@@ -178,6 +179,39 @@ def _session_event(kind: EventType, session: Session) -> dict:
     return {"type": kind} | _session_fields(session.public())
 
 
+def _expected(row: Mapping) -> int | None:
+    """The memory a lease declared, or learned from its rule's past runs; None: neither."""
+    if row["memory"] is not None:
+        return row["memory"]
+    per_slot = row["memory_per_slot"] or row["learned_per_slot"]
+    return None if per_slot is None else per_slot * row["weight"]
+
+
+def _work(session: Session, branch: Branch, keepers: set[int], expected: dict[int, int]) -> Work:
+    """`branch` of `session` as the watchdog weighs it (`leasehold.watchdog.Work`)."""
+    reading = session.reading
+    agent = None if reading is None else reading.agent
+    kept = tuple(p.pid for p in branch.members if p.pid in keepers)
+    others = [p for p in branch.members if p.pid not in keepers]
+    sizes = [expected[p.pid] for p in branch.members if p.pid in expected]
+    root = branch.root
+    return Work(
+        session=session.id,
+        source=session.source,
+        pid=root.pid,
+        fence=root.fence,
+        name=root.name,
+        command=branch.command,
+        footprint=sum((p.anon or 0) + (p.swap or 0) for p in others),
+        started=root.started,
+        agent_started=None if agent is None else agent.started,
+        keepers=kept,
+        leasehold=not others,
+        agent_line=branch.agent_line,
+        expected=sum(sizes) if sizes else None,
+    )
+
+
 class MachineAgent:
     def __init__(
         self,
@@ -192,8 +226,11 @@ class MachineAgent:
         processes: Callable[[], Mapping[int, Proc]] = proctable.scan,
         user_name: Callable[[int], str] | None = None,
         net: Callable[..., MemoryNet] = MemoryNet,
+        platform: Callable[[], host.Host] = host.current,
     ) -> None:
         self.config = config
+        #: Makes the host this daemon asks about processes and memory (a fake in tests).
+        self._platform = platform
         #: The process table, for `[[observe]]` rules, and the name of a process's owner (fakes
         #: in tests and the demo).
         self._processes = processes
@@ -286,10 +323,25 @@ class MachineAgent:
         self.sessions = Sessions(
             config.watchdog.agents if config.for_user else (),
             owner=self._user_name(os.getuid()),
+            platform=platform,
             clock=clock,
         )
         #: When the sessions were last read, on `_monotonic` (None: not yet).
         self._sessions_read: float | None = None
+        #: The watchdog (`leasehold.watchdog`): a user's own daemon's, unless `[watchdog] mode`
+        #: is `off` or its sizes do not fit this machine (`_watchdog_off` says why).
+        self.watchdog: Watchdog | None = None
+        self._watchdog_off: str | None = None
+        self._watchdog_lock = threading.Lock()
+        if not config.for_user:
+            self._watchdog_off = "the machine's daemon has no watchdog: each user's daemon has one"
+        elif config.watchdog.mode == "off":
+            self._watchdog_off = "[watchdog] mode is off"
+        else:
+            try:
+                self.watchdog = Watchdog(config.watchdog, config.watchdog.limits(memory))
+            except ValueError as exc:
+                self._watchdog_off = str(exc)
         self._seen = self._snapshot()
 
     def _guard_cgroups(self) -> tuple[str, ...]:
@@ -578,6 +630,68 @@ class MachineAgent:
         ]
         if events:
             self.events.emit(events, now=self._clock())
+        if self.watchdog is not None:
+            trees = self._watched_work()
+            with self._watchdog_lock:
+                self.watchdog.work(trees, now=mono)
+
+    def _watched_work(self) -> list[Work]:
+        """The watched sessions' trees as the watchdog weighs them: leasehold's own processes
+        in each (the daemon, and the holders of its leases and places in line) left out of its
+        footprint, and what its leases declared or learned as its expected size."""
+        here = Holder.current().ns
+        keepers = {os.getpid()}
+        expected: dict[int, int] = {}
+        for row in self.ledger.leases() + self.ledger.queued():
+            if row["holder_ns"] not in (None, here):
+                continue
+            keepers.add(row["holder_pid"])
+            if "acquired_at" in row and row["scope"] != OBSERVED_SCOPE:
+                size = _expected(row)
+                if size is not None:
+                    expected[row["holder_pid"]] = expected.get(row["holder_pid"], 0) + size
+        out = []
+        for session, branch in self.sessions.work():
+            out.append(_work(session, branch, keepers, expected))
+        return out
+
+    def watch_memory(self) -> float:
+        """Read the machine's memory and let the watchdog judge it, reporting the events it
+        gives. The seconds until it should be read again (`Watchdog.interval`)."""
+        if self.watchdog is None:
+            return 2.0
+        got = self.sessions.host.pressure()
+        reading = Memory(
+            now=self._monotonic(),
+            available=got.available,
+            total=got.total,
+            stall_full=got.stall_full,
+            os_level=got.level,
+            how=got.how,
+            reason=got.reason,
+        )
+        with self._watchdog_lock:
+            events = self.watchdog.observe(reading)
+            wait = self.watchdog.interval()
+        if events:
+            self.events.emit(events, now=self._clock())
+        return wait
+
+    def _watchdog_status(self) -> dict:
+        """The status object's `watchdog`: the watchdog's decision, how it reads memory, and
+        the sessions it watches."""
+        if self.watchdog is None:
+            judged = {"mode": "off", "level": None, "reason": self._watchdog_off, "would": None}
+        else:
+            with self._watchdog_lock:
+                judged = self.watchdog.status()
+        caps = self.capabilities()
+        pressure = caps["pressure"]
+        how = {
+            "pressure": pressure["via"] if pressure["how"] != "none" else "none",
+            "footprint": "polled" if caps["session_processes"]["how"] != "none" else "none",
+        }
+        return judged | {"how": how} | self.sessions.status()
 
     def register_session(
         self,
@@ -1157,7 +1271,7 @@ class MachineAgent:
     def capabilities(self) -> dict[str, dict]:
         """What the host can do for this daemon (`leasehold.host`), worked out once."""
         if self._capabilities is None:
-            found = host.current().capabilities()
+            found = self._platform().capabilities()
             self._capabilities = {
                 op: {"how": s.how, "reason": s.reason, "via": s.via} for op, s in found.items()
             }
@@ -1188,7 +1302,7 @@ class MachineAgent:
             memory_net=None if self.net is None else self.net.status(),
             contain=self.contain_settings() | {"memory_cap": cap},
             host=capabilities,
-            watchdog=self.sessions.status(),
+            watchdog=self._watchdog_status(),
             now=self._clock(),
             version=__version__,
         )
