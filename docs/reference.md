@@ -551,7 +551,9 @@ running work. Once no lease is held (standing work aside), the maintenance lease
 every slot that standing work does not hold, whatever its pool's `max` or `--weight` say, and
 nothing else starts while it is held. Of several maintenance leases, the oldest goes first.
 
-`hold --timeout` (seconds, or `30m`, `2h`) bounds the wait for the machine to empty. Still
+`hold --timeout` (seconds, or `30m`, `2h`) bounds the wait for the machine to empty.
+Under an agent, `LEASEHOLD_TOOL_TIMEOUT_S` bounds it too, as for any `hold` (see
+[`leasehold run`](#leasehold-run)). Still
 waiting at the timeout, `hold` exits 75 and gives back its place, so the queue is as it was.
 Otherwise it runs the command with the machine to itself.
 
@@ -1294,6 +1296,15 @@ code stays the agent's. `--leave-running` keeps what is left (a dev server you s
 `--session` names the session; `--no-contain`, or `[contain] mode = "off"` in the config, runs
 the agent uncontained.
 
+An agent runs each shell command with a timeout of its own, and a shim inside the command waits
+in line on that clock. `run` puts the agent's timeout in `LEASEHOLD_TOOL_TIMEOUT_S`, and a shim
+or `hold` under it waits in line at most half of that, then says why the command did not run
+and exits 75, before the agent's timeout ends the call. `--tool-timeout S` gives the timeout
+(`0`: none). Without it, `run` keeps a `LEASEHOLD_TOOL_TIMEOUT_S` already set, and for Claude
+Code (`claude`) uses its Bash tool's default: `BASH_DEFAULT_TIMEOUT_MS` when set, else 120 s.
+For any other agent, give `--tool-timeout` (or set the variable) to what its shell tool allows.
+A call that sets its own, longer timeout still gets only half the default.
+
 ### Which commands take a lease: `[commands]`
 
 The Claude Code plugin and the PATH shims decide from the same rules whether a command is heavy
@@ -1389,15 +1400,20 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
 - A renewer keeps the lease while the command runs, watches the Claude Code process, and
   stops at the Bash call's own timeout plus a minute, so an interrupted call cannot hold slots.
 - On a busy machine the command waits in line, keeping its place, for up to `wait_s` (300 s
-  by default). One that waited at least 5 s says so as it starts (`leasehold: pytest waited
-  42s in line for its lease`), so a slow start is not taken for a slow command. Still waiting
-  after `wait_s`, it is refused with a message that says the command did not run and tells
-  the agent to do lighter work first (`when_busy = "deny"`, the default), or it runs without
-  a lease and the agent is told so (`"run"`). Either message names the heaviest lease in the
-  pool, by its command and session, and the place in line the command gave up: `machine busy
-  for 300s: cargo test (session cc-ab12) holds 8 slots, 2 other leases hold 6; pool work holds
-  14 of 14; this needs 4; gave up its place in line (#1)`. `leasehold doctor` warns when
-  `wait_s` is under 120 s.
+  by default). The hook waits before the command starts, so the Bash tool's own timeout does
+  not count the wait. One that waited at least 5 s says so as it starts, to the person and to
+  the agent (`additionalContext`), with the lease it waited behind: `leasehold: pytest waited
+  42s in line for its lease, behind cargo test (session cc-ab12); the command itself has not
+  been slow.` Still waiting after `wait_s`, it is refused with a message that says the
+  command did not run and when to retry (`when_busy = "deny"`, the default), or it runs
+  without a lease and the agent is told so (`"run"`). Either message names the heaviest lease
+  in the pool, by its command and session, how long it has run and, once 3 clean runs of its
+  rule in its repository are known, how long it usually takes, and the place in line the
+  command gave up: `machine busy for 300s: cargo test (session cc-ab12) holds 8 slots,
+  running 2m10s (it usually takes ~3m), 2 other leases hold 6; pool work holds 14 of 14; this
+  needs 4; gave up its place in line (#1). The command did not run. Retry in about 1 minute,
+  or do lighter work first.` Without a usual time it says to do lighter work first, then run
+  it again. `leasehold doctor` warns when `wait_s` is under 120 s.
 - When the daemon says no, with a `refused` answer (a request that could never be granted, a
   per-user limit) or an error answer under 500 (such as 403 `forbidden`), or the command
   matches a rule that `leasehold commands` marks as never granted, the command is denied with
@@ -1411,11 +1427,12 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
 - A rule's [range](#ranges-min-max-slots), or a range in `LEASEHOLD_WANT`, is asked for as a
   range, with both ends cut to the rule's `hook_ceiling` (what the range alone would be
   granted on an idle machine). It waits for its MIN only, and admission sizes it like any
-  other range. The hook notes the size granted, with its job count and threads. When a range
-  is granted less than its most, the hook tells the agent the size before the command runs
-  (`additionalContext`): "leasehold: pytest was granted 3 of 2-6 slots; size it to 3 jobs (or
-  run the agent under `leasehold run`)". A fixed weight, or a range granted its most, tells
-  it nothing. When the hook cuts either end to `hook_ceiling`, its log says so.
+  other range. The hook notes the size granted, with its job count and threads. When the hook
+  cuts either end to `hook_ceiling`, its log says so.
+- Before every leased command runs, the hook tells the agent the size granted and the job
+  count to run it with (`additionalContext`): "leasehold: pytest was granted 4 slots; run it
+  with at most 4 jobs (or run the agent under `leasehold run`)." A range says which part of
+  it was granted: "pytest was granted 3 of 2-6 slots".
 - The hook does not change the command, so it cannot size it. Under `leasehold run`, the
   command goes through a PATH shim, which finds the hook's lease, takes no second one, and
   gives the command the job count and threads of the size granted. Outside `leasehold run`
@@ -1448,8 +1465,11 @@ process. It passes straight through, as if no shim were there, inside a lease al
 (including the lease the Claude Code plugin took for this very command, so `leasehold run --
 claude` with the plugin takes one lease per command, not two), with `LEASEHOLD_SHIMS=off`, when no rule matches, and when no daemon answers. While it
 waits it says its place on stderr, again whenever that changes and at least every 20 s. Busy
-past `wait_s`, it exits 75 and says why on stderr (`when_busy = "run"`: runs the program without a
-lease and says so). When the daemon says no (a refusal, an error answer under 500, a
+past `wait_s`, it exits 75 and says why on stderr, with when to retry as the hook does
+(`when_busy = "run"`: runs the program without a lease and says so). Under an agent whose tool
+timeout `LEASEHOLD_TOOL_TIMEOUT_S` gives (`leasehold run` sets it), it waits at most half of
+that, so the agent reads the reason before its own timeout ends the call. A program granted
+after a wait of 5 s or more says how long it waited, and behind what. When the daemon says no (a refusal, an error answer under 500, a
 matching rule never granted) it exits 77 with the daemon's text, without running the program,
 whatever `when_busy` says; when it answers with an error of 500 or more, it runs the program
 without a lease and says why, as with no daemon.
@@ -1684,7 +1704,7 @@ leasehold setup [--remove] [--upgrade-config] [--dry-run]
 run an agent as one session: its heavy commands leased and contained:
 
 ```
-leasehold run [--session SESSION] [--leave-running] [--quiet] [--no-contain] ...
+leasehold run [--session SESSION] [--leave-running] [--quiet] [--no-contain] [--tool-timeout S] ...
 ```
 
 run a command under a lease:

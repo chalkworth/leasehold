@@ -17,29 +17,41 @@ import leasehold
 from leasehold import contain
 from leasehold.client import Client
 
-#: case: (hold's options, whether a daemon is there, exit code, what it says on stderr). The one
-#: `external` slot is held throughout.
+#: case: (hold's options, whether a daemon is there, exit code, what it says on stderr, its
+#: environment beyond the tests'). The one `external` slot is held throughout.
 CASES = {
-    "granted": ([], True, 3, ""),
-    "busy": (["--kind", "external", "--timeout", "0.3"], True, 75, "gave up after 0.3s in line"),
-    "refused": (["--pool", "nope"], True, 77, "refused: there is no pool 'nope'"),
+    "granted": ([], True, 3, "", {}),
+    "busy": (
+        ["--kind", "external", "--timeout", "0.3"], True, 75, "gave up after 0.3s in line", {}
+    ),
+    "busy under an agent's tool timeout": (
+        ["--kind", "external"], True, 75, "LEASEHOLD_TOOL_TIMEOUT_S",
+        {"LEASEHOLD_TOOL_TIMEOUT_S": "0.6"},
+    ),
+    "refused": (["--pool", "nope"], True, 77, "refused: there is no pool 'nope'", {}),
     "maintenance drains": (
         ["--kind", "maintenance", "--timeout", "0.3"],
         True,
         75,
         "whole machine (maintenance): place 1; draining: waiting for the 1 lease running to end",
+        {},
     ),
-    "until without maintenance": (["--until", "07:00"], True, 1, "are for --kind maintenance"),
-    "no daemon": ([], False, 0, "running without a lease"),
-    "no daemon, fail": (["--if-unavailable", "fail"], False, 69, "is a daemon running?"),
-}
+    "until without maintenance": (["--until", "07:00"], True, 1, "are for --kind maintenance", {}),
+    "no daemon": ([], False, 0, "running without a lease", {}),
+    "no daemon, fail": (["--if-unavailable", "fail"], False, 69, "is a daemon running?", {}),
+}  # fmt: skip
 
 
-@pytest.mark.parametrize(("options", "there", "code", "says"), CASES.values(), ids=CASES.keys())
-def test_how_a_wait_ends(daemon, sock_dir, options, there, code, says):
+@pytest.mark.parametrize(
+    ("options", "there", "code", "says", "env"), CASES.values(), ids=CASES.keys()
+)
+def test_how_a_wait_ends(daemon, sock_dir, options, there, code, says, env):
     sock = daemon.path if there else sock_dir / "gone.sock"
     with leasehold.lease(kind="external", socket=daemon.path):
-        done = cli(sock, "hold", *options, "--", "sh", "-c", f"exit {code if code == 3 else 0}")
+        done = cli(
+            sock, "hold", *options, "--", "sh", "-c", f"exit {code if code == 3 else 0}",
+            env={**CHILD_ENV, **env},
+        )  # fmt: skip
     assert done.returncode == code
     assert says in done.stderr
 

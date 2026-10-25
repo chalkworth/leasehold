@@ -16,7 +16,10 @@ job count and threads the program is then given, `covered_env`), when
 set the job variables (`jobs.LEASEHOLD_SET`), a program whose own rule gives fewer threads
 (`pytest -n 4` under `hold -- make test`) runs with that thread count (`within_lease`). On a
 busy machine the shim does what `[commands] when_busy` says: wait `wait_s`, then exit 75, or
-run without a lease. When the daemon
+run without a lease. Under an agent whose tool timeout `LEASEHOLD_TOOL_TIMEOUT_S` gives, it
+waits at most half of that (`leasehold.toolwait`), so the agent hears why the command did not
+run before its own timeout ends the call. A program granted after a wait of
+`busy.WAIT_NOTED_S` or more says how long it waited, and behind what. When the daemon
 says no (a refusal, an error answer under 500, or a matching rule no lease could ever be
 granted for) the shim exits 77 without running the program; when it cannot answer (an error
 of 500 or more) the program runs without a lease, and the shim says why.
@@ -36,10 +39,10 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from leasehold import busy, discovery, hooknotes, jobs, measure, shell, weights
+from leasehold import busy, discovery, hooknotes, jobs, measure, shell, toolwait, weights
 from leasehold.client import ApiError, Client, Unavailable
 from leasehold.exits import EXIT_BUSY, EXIT_NOT_STARTED, EXIT_REFUSED, EXIT_UNAVAILABLE
-from leasehold.hold import lease_request, run_leased, wait_for_grant
+from leasehold.hold import Waited, lease_request, run_leased, wait_for_grant
 
 #: The first line after the shebang of every shim this module writes: what `remove` and
 #: `install` (without `--force`) recognise as theirs.
@@ -199,18 +202,24 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         rule=rule.key,
         repo=measure.repository() if rule.key is not None else None,
     )
-    code, answer = wait_for_grant(client, request, settings.wait_s, _say)
+    wait_s = toolwait.limit(env, settings.wait_s)
+    waited = Waited()
+    code, answer = wait_for_grant(client, request, wait_s, _say, waited=waited)
     if code is None:
+        if waited.seconds >= busy.WAIT_NOTED_S:
+            sys.stderr.write(busy.waited(program, waited.seconds, waited.behind) + "\n")
         return run_leased(
             client, argv, request, answer, memory=rule.memory, threads=threads,
             memory_per_slot=rule.memory_per_slot, rule=rule.key,
         )  # fmt: skip
+    if code == EXIT_BUSY and (cut := toolwait.said(env, settings.wait_s)):
+        _say(cut)
     if code == EXIT_BUSY and settings.when_busy == "deny":
-        why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
-        _say(f"not running {program}: {why}. {busy.ADVICE}")
+        why, todo = busy.told(client, answer, pool=rule.pool, waited_s=wait_s)
+        _say(f"not running {program}: {why}. {todo}")
         return EXIT_BUSY
     if code == EXIT_BUSY:
-        why = busy.told(client, answer, pool=rule.pool, waited_s=settings.wait_s)
+        why, _ = busy.told(client, answer, pool=rule.pool, waited_s=wait_s)
         _say(f"{why}; running {program} without a lease")
     elif code == EXIT_UNAVAILABLE:
         why = answer.get("reason") or "no daemon answers"

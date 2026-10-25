@@ -157,7 +157,9 @@ def lease_request(
     or `weight`: no range is sent). `memory` (a size such as `4g`) is the memory the work
     declares in all, `memory_per_slot` for each slot it is granted; None declares none. `rule`
     (`shell.Rule.key`) and `repo` are what the work's outcome will be filed under, so a daemon
-    can count what that rule's past runs there used (None: not sent). It never
+    can count what that rule's past runs there used (None: not sent). They are also the
+    lease's `rule` and `repo` labels, so that a request waiting behind it can tell how long it
+    usually runs (`leasehold.busy`). It never
     asks for an elastic lease: `hold` makes its lease elastic later, once the command's jobs
     show they follow the jobserver (`leasehold.follow`)."""
     if max_weight is not None and max_weight < weight:
@@ -169,7 +171,9 @@ def lease_request(
         "kind": kind,
         "pool": pool,
         "weight": weight,
-        "labels": labels or {},
+        "labels": (labels or {})
+        | ({"rule": rule} if rule else {})
+        | ({"repo": repo} if rule and repo else {}),
         "lease_id": uuid.uuid4().hex,
         "session": session,
         "ttl_s": ttl_s,

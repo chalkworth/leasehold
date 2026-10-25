@@ -25,6 +25,14 @@ def register(sub) -> None:
         action="store_true",
         help='run the agent uncontained (also: [contain] mode = "off" in the config)',
     )
+    s.add_argument(
+        "--tool-timeout",
+        type=float,
+        metavar="S",
+        help="the agent's own timeout on a shell command, in seconds: a shim waits in line at "
+        "most half of it, then says why the command did not run (0: none; default: what "
+        "leasehold knows of the agent, 120 for Claude Code)",
+    )
     s.add_argument("argv", nargs=argparse.REMAINDER, metavar="-- agent ...")
     s.set_defaults(run=_run)
 
@@ -42,6 +50,7 @@ def _run(args, ctx) -> int:
         leave_running=args.leave_running,
         contain_mode="off" if args.no_contain else _contain_mode(ctx),
         quiet=args.quiet,
+        tool_timeout_s=args.tool_timeout,
     )
 
 
