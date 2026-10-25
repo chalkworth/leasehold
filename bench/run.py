@@ -1018,7 +1018,6 @@ def summarize_condition(workdir: Path, condition: str) -> dict:
         "cpu_steal_mean": r(mean(steal)),
         "jobs_in_lease_scope": contained,
         "parks": net.get("parks"),
-        "forced_resumes": net.get("forced_resumes"),
         "park_written_mib": r(net["written_bytes"] / MIB, 0) if "written_bytes" in net else None,
         "load_before": outer.get("before", {}).get("load1"),
         "aborted": run.get("aborted") or ("" if run else "no result"),

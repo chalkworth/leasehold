@@ -4,8 +4,9 @@ The socket (mode `socket_mode`, group `socket_group`) is the only listener: whoe
 may ask for leases, and the peer's uid (`SO_PEERCRED`) names the user a lease is charged to.
 A tick thread runs `MachineAgent.tick` every `tick_s`, and with the memory net on, a thread of
 its own runs the net (`leasehold.net`). SIGTERM or SIGINT stops them cleanly: the listener
-closes, the socket file goes, the net resumes whatever it parked, and the leases stay in the
-ledger until their TTLs, so a restarted daemon picks them up again.
+closes, the socket file goes, the net lifts the swap limits it set and leaves what it parked
+paused, and the leases stay in the ledger until their TTLs, so a restarted daemon picks them
+(and what the net parked) up again.
 
 A request body is read only as far as a well-formed `Content-Length` of at most `_MAX_BODY`
 says: a missing one is no body, a malformed or negative one 400 `bad_request`, a larger one 413
