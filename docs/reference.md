@@ -1233,14 +1233,15 @@ except leasehold.Busy:
 `deploy/github-runner/` makes a self-hosted runner take an `external` lease per job:
 
 - `job-started.sh` (the runner's `ACTIONS_RUNNER_HOOK_JOB_STARTED`) runs `acquire --keep` with
-  the id `gh.<runner>.<run id>.<attempt>.<job>`, weight `LEASEHOLD_RUNNER_WEIGHT` (4) and the
+  the id `gh.<runner>.<run id>.<attempt>.<job>`, weight `LEASEHOLD_RUNNER_WEIGHT` (a number or a range `MIN-MAX`; `1-4`) and the
   labels `consumer=github-runner`, `runner`, `repository`, `run` and `job`. A runner hook cannot
   hand a job back (it runs after the job is assigned, with no timeout), so the hook *is* the
   queue: while the machine is busy the job waits in line here, before its first step, until
   capacity frees or the job's own `timeout-minutes` ends it. The renewer watches the job's
   `Runner.Worker` (an ancestor of the hook) and stops after `LEASEHOLD_RUNNER_MAX_HOLD` (21600 s)
   in any case.
-- `job-completed.sh` (`ACTIONS_RUNNER_HOOK_JOB_COMPLETED`) releases it.
+- `job-completed.sh` (`ACTIONS_RUNNER_HOOK_JOB_COMPLETED`) releases it, or says the job held no
+  lease when the daemon lists none for it.
 - `runner-slice.conf` is a systemd drop-in putting the runner service in `runner.slice`.
 
 Both hooks **fail open**: with leasehold not installed, its daemon unreachable, or the request
@@ -1554,7 +1555,9 @@ client for it.
 with the same `lease_id` keeps the place in line, and is not a new request. A place given back
 (`/v1/release`) while its `acquire` waits ends that wait, `refused`. A new request over
 its pool's per-user limits (`per_user_max_queued`, `create_rate_per_min`) is `refused` with
-`code: "quota_exceeded"`; one that fits now is granted whatever the waiting limit. A 0.2
+`code: "quota_exceeded"`; one that fits now is granted whatever the waiting limit. A request
+that could never be granted (a pool that does not exist, a weight over its pool's `max`, memory
+over the ceiling) is `refused` with `code: "never_grantable"`. A 0.2
 daemon does not take `memory`; `leasehold.client.Client` then asks again without it.
 
 `weight` is the least the lease needs and `max_weight` (at least `weight`; absent: `weight`)

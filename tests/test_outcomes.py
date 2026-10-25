@@ -10,7 +10,7 @@ import math
 import pytest
 from support import FACTS, FakeLoad, cli, machine_config
 
-from leasehold import api, template
+from leasehold import api, measure, template
 from leasehold.agent import MachineAgent
 from leasehold.client import Client
 from leasehold.server import Daemon
@@ -30,6 +30,31 @@ def outcome(peak_gib: float, **fields) -> dict:
         "wall_s": 2.0,
         "exit_status": 0,
     } | fields
+
+
+#: case: (files made, "dir/" for a directory; where to ask from; the top found, or None).
+WORK_TREES = {
+    "directory": ({"repo/.git/HEAD": "ref: refs/heads/main\n", "repo/a/": ""}, "repo/a", "repo"),
+    "linked work tree": ({"repo/.git": "gitdir: /elsewhere\n", "repo/a/": ""}, "repo/a", "repo"),
+    "empty directory": ({"x/.git/": "", "x/a/": ""}, "x/a", None),
+    "empty directory in a repository": (
+        {"top/.git/HEAD": "ref: refs/heads/main\n", "top/mid/.git/": "", "top/mid/a/": ""},
+        "top/mid/a",
+        "top",
+    ),
+}
+
+
+@pytest.mark.parametrize(("made", "start", "top"), WORK_TREES.values(), ids=WORK_TREES.keys())
+def test_a_work_tree_is_found_the_way_git_finds_it(tmp_path, made, start, top):
+    for name, text in made.items():
+        path = tmp_path / name
+        if name.endswith("/"):
+            path.mkdir(parents=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+    assert measure.repository(tmp_path / start) == (None if top is None else str(tmp_path / top))
 
 
 def granted(client: Client, **request) -> str:

@@ -72,9 +72,11 @@ def test_a_cancelled_wait_gives_its_place_back(daemon):
         assert queued(daemon.path) == []
 
 
-def test_a_refusal_is_refused(daemon):
-    with pytest.raises(leasehold.Refused):
-        leasehold.lease(pool="no-such-pool", socket=daemon.path)
+@pytest.mark.parametrize("ask", [{"pool": "no-such-pool"}, {"kind": "external", "weight": 9}])
+def test_a_request_that_can_never_be_granted_is_refused_with_its_code(daemon, ask):
+    with pytest.raises(leasehold.Refused) as refused:
+        leasehold.lease(socket=daemon.path, **ask)
+    assert refused.value.code == "never_grantable"
 
 
 def test_with_no_daemon_it_runs_unleased_or_fails(sock_dir, monkeypatch, tmp_path):

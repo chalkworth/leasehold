@@ -4,9 +4,9 @@
 # Restart=always). The commands of README.md, in order.
 #
 #   RUNNER_REPO               owner/repo the runner serves
-#   LEASEHOLD_RUNNER_WEIGHT   the job's weight in slots (default 4)
+#   LEASEHOLD_RUNNER_WEIGHT   the job's weight in slots, or a range MIN-MAX (default 1-4)
 set -eu
-weight=${LEASEHOLD_RUNNER_WEIGHT:-4}
+weight=${LEASEHOLD_RUNNER_WEIGHT:-1-4}
 
 # Register a runner that takes one job and then removes itself. A registration token lasts an
 # hour, so each pass asks for a new one.
