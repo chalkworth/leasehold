@@ -267,9 +267,8 @@ class ContainSettings(_Strict):
 DEFAULT_AGENTS = ("claude", "codex", "gemini", "cursor-agent", "aider")
 
 
-# The watchdog's defaults (`leasehold.watchdog`), in one place. They are the rule a tier-1
-# simulation of the measured build and test profiles recommends: model predictions, not yet
-# measured on real machines. Watch mode is how they are checked there before the watchdog acts.
+# The watchdog's defaults (`leasehold.watchdog`), in one place: the rule a simulation of the
+# measured build and test profiles recommends, checked in real runs in a 16 GiB VM.
 _GIB = 1 << 30
 #: `critical_below`: under this much available memory, with little swap free, the level is
 #: `critical`, the last resort before a freeze. An absolute size: what matters is the file
@@ -290,15 +289,26 @@ STALL_CRITICAL = 20.0
 MIN_SIZE = (_GIB // 4, 0.02)
 #: Without a runaway, a tree holding at least this share of RAM is chosen before the newest.
 LARGE_SHARE = 0.25
-#: `act_at`: the least level at which the watchdog would pause or stop work.
+#: `act_at`: the least level at which the watchdog pauses or stops work, and holds new work.
 ACT_AT = "critical"
-#: Command lines never chosen, besides `[watchdog] protect`: the agents themselves, and MCP
-#: servers, which start with their agent.
+#: `max_pause_s`: a tree paused this long is stopped, so a long peer cannot keep it paused.
+MAX_PAUSE_S = 900.0
+#: Command lines never chosen, matched against every process of a tree: the coding agents, so
+#: that an agent another agent started is left alone.
+PROTECT_ANY = (r"^(\S*/)?(claude|codex|gemini|cursor-agent|aider|opencode|goose)(\s|$)",)
+#: Command lines never chosen, besides `[watchdog] protect`, matched against a tree's heads (its
+#: root, and the programs its tool shells run): MCP servers, by their program, package or module
+#: name and never by a path, and the browsers and editors an agent opens for the person, unless
+#: headless (a test runner's browser, stopped with its tests).
 PROTECT = (
-    r"(^|/)(claude|codex|gemini|cursor-agent|aider)(\s|$)",
     r"@modelcontextprotocol/",
-    r"(^|[\s/])mcp[-_]server",
-    r"(^|\s)uvx\s+mcp-",
+    r"^(\S*/)?[\w.-]*mcp[\w.-]*(\s|$)",
+    r"^(\S*/)?(npx|uvx|bunx|pnpx)(\s+-\S+)*\s+(@[\w.-]+/)?[\w.-]*mcp[\w.-]*(@\S*)?(\s|$)",
+    r"^(\S*/)?uv\s+run(\s+-\S+)*\s+[\w.-]*mcp[\w.-]*(\s|$)",
+    r"^(\S*/)?(python3?|uv\s+run\s+python3?)(\s+-\S+)*\s+-m\s+[\w.]*mcp[\w.]*(\s|$)",
+    r"^(?!.*\s--?headless)(?!.*\s-marionette)(\S*/)?(xdg-open|code|code-insiders|cursor|codium"
+    r"|zed|chromium|chromium-browser|chrome|google-chrome|google-chrome-stable|firefox"
+    r"|firefox-esr)(\s|$)",
 )
 #: The watchdog's levels, least first.
 LEVELS = ("ok", "warn", "critical")
@@ -317,12 +327,13 @@ class WatchdogLimits:
 
 class WatchdogSettings(_Strict):
     """The `[watchdog]` table: the agent sessions the daemon watches (`leasehold.sessions`), and
-    how the watchdog judges the machine's memory (`leasehold.watchdog`). It decides and reports
-    what it would do; it never holds, pauses or stops anything yet."""
+    how the watchdog judges the machine's memory and acts on it (`leasehold.watchdog`)."""
 
-    #: `watch` judges the machine's memory and says what it would do (`would`) without acting;
-    #: `off` does neither. Sessions are watched either way.
-    mode: Literal["off", "watch"] = "watch"
+    #: `on` holds new heavy work, and pauses and stops session trees, when the machine runs
+    #: short of memory; `watch` judges the machine's memory and says what it would do
+    #: (`would`) without acting; `off` does neither. Sessions are watched either way. A config
+    #: with no `[watchdog]` table watches; `init` writes `on`.
+    mode: Literal["off", "watch", "on"] = "watch"
     #: Program names, as the kernel names a process (`comm`): each of the user's processes
     #: running one is watched as a session of its own (`auto-<pid>`), unless it is already
     #: part of one. Empty: only sessions that register are watched. A user's own daemon only.
@@ -331,14 +342,16 @@ class WatchdogSettings(_Strict):
     critical_below: str = CRITICAL_BELOW
     hold_below: str = HOLD_BELOW
     min_size: str = "auto"
-    #: `warn` or `critical`: below this level the watchdog would only hold new work, even once
-    #: it may act.
+    #: `warn` or `critical`: the least level at which the watchdog holds new heavy work and
+    #: pauses a tree.
     act_at: Literal["warn", "critical"] = ACT_AT
+    #: A tree paused this many seconds is stopped.
+    max_pause_s: float = Field(MAX_PAUSE_S, ge=10)
     #: Whether trees of sessions found by name (`auto-<pid>`), which never asked to join, may be
     #: chosen. They are watched and reported either way.
     choose_discovered: bool = False
     #: Regular expressions searched for in a tree's command line: a tree that matches is never
-    #: chosen. They add to the built-in ones (`PROTECT`).
+    #: chosen. They add to the built-in ones (`PROTECT`), and are tried against the same lines.
     protect: list[str] = Field(default_factory=list)
 
     @field_validator("agents")

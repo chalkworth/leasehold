@@ -19,10 +19,13 @@ for an agent's command there only counts it, and `support("adopt")` says why."""
 
 from __future__ import annotations
 
+import ctypes
 import os
+import resource
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Collection, Mapping
 
@@ -45,9 +48,22 @@ from leasehold.host import (
 )
 
 _GROUP = "signals to the tree's process group: a member that left the group is not reached"
+#: `stay_resident` locks memory only where this much may be locked: with `MCL_FUTURE` every
+#: later allocation counts against the limit, and one past it would fail.
+LOCK_AT_LEAST = 1 << 30
+#: The priority `stay_resident` asks for (a nice value), where this user may.
+NICE = -10
+#: `mlockall`'s flags on Linux (x86 and ARM) and macOS; `MCL_ONFAULT` is Linux's own.
+_MCL_CURRENT, _MCL_FUTURE, MCL_ONFAULT = 1, 2, 4
+#: The stack each thread started after `stay_resident` gets: the default 8 MiB a thread would
+#: otherwise lock.
+STACK_BYTES = 256 << 10
 
 
 class Posix:
+    #: The flags `stay_resident` locks memory with.
+    _lock_flags = _MCL_CURRENT | _MCL_FUTURE
+
     def __init__(self, env: Mapping[str, str] | None = None) -> None:
         self._env = os.environ if env is None else env
 
@@ -146,6 +162,19 @@ class Posix:
         """The command `proc` runs: not readable here."""
         return None
 
+    def freeable(self, proc: Proc) -> int | None:
+        """What stopping `proc` would return to available memory: not readable here."""
+        return None
+
+    def boot_id(self) -> str | None:
+        """What names this boot of the machine, so that a pid recorded in an earlier boot is
+        not taken for one now: not readable here."""
+        return None
+
+    def frozen_scopes(self) -> list[Tree]:
+        """leasehold's lease scopes that are frozen now: there are none here."""
+        return []
+
     def wakeup_fd(self) -> int | None:
         """A file descriptor that turns readable when a tree or the machine's memory changes,
         so that a loop can look again before its next tick; None: there is none here."""
@@ -188,6 +217,9 @@ class Posix:
             return Done("none", "the tree has no process group of its own")
         if not group_alive(tree.pgid):
             return Done("signal", empty=True)
+        if grace_s <= 0:
+            signal_group(tree.pgid, signal.SIGKILL)
+            return Done("signal")
         signal_group(tree.pgid, signal.SIGTERM)
         signal_group(tree.pgid, signal.SIGCONT)
         deadline = time.monotonic() + grace_s
@@ -195,6 +227,40 @@ class Posix:
             time.sleep(0.1)
         signal_group(tree.pgid, signal.SIGKILL)
         return Done("signal")
+
+    def stay_resident(self, *, dry: bool = False) -> Done:
+        """Lock this process's memory in RAM (`mlockall`, now and for what it allocates later),
+        where the user's locked-memory limit is at least `LOCK_AT_LEAST` or unlimited, and
+        raise its priority to `NICE` where the user may. Threads started later get a
+        `STACK_BYTES` stack. `how` names what was done (`mlockall`, `nice`, both, or `none`
+        with the `reason`); with `dry`, what would be."""
+        done, why = [], []
+        soft, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        if os.geteuid() != 0 and soft != resource.RLIM_INFINITY and soft < LOCK_AT_LEAST:
+            why.append(
+                f"memory is not locked: this user may lock {soft >> 20} MiB (ulimit -l), and "
+                f"the daemon needs {LOCK_AT_LEAST >> 30} GiB or no limit"
+            )
+        elif dry:
+            done.append("mlockall")
+        else:
+            threading.stack_size(STACK_BYTES)
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.mlockall(self._lock_flags) == 0:
+                done.append("mlockall")
+            else:
+                why.append(f"mlockall failed: {os.strerror(ctypes.get_errno())}")
+        if dry:
+            done.append("nice where allowed")
+        else:
+            try:
+                os.setpriority(os.PRIO_PROCESS, 0, min(NICE, os.getpriority(os.PRIO_PROCESS, 0)))
+                done.append("nice")
+            except OSError:
+                pass
+        if not done:
+            return Done("none", "; ".join(why))
+        return Done(" and ".join(done), "; ".join(why) or None)
 
     # --- how a command ended -----------------------------------------------------------------
 

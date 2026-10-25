@@ -54,26 +54,33 @@ def take_back(pgid: int) -> None:
             _set_foreground(os.getpgrp())
 
 
+#: The stops a terminal asks for. A SIGSTOP is not one: leasehold's watchdog pauses with it,
+#: and the command continues when it lets it.
+_JOB_STOPS = frozenset({signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU})
+
+
 def _stopped(pid: int) -> bool:
-    """Whether `pid` has stopped since last asked (its exit is left for `wait` to reap)."""
+    """Whether `pid` has stopped for the terminal since last asked (its exit is left for `wait`
+    to reap)."""
     try:
         info = os.waitid(os.P_PID, pid, os.WSTOPPED | os.WNOHANG)
     except ChildProcessError:
         return False
-    return info is not None and info.si_code == os.CLD_STOPPED
+    return info is not None and info.si_code == os.CLD_STOPPED and info.si_status in _JOB_STOPS
 
 
 @contextlib.contextmanager
 def follow_stops(pid: int) -> Iterator[None]:
-    """While inside, when the command `pid` (a group leader) stops, take the terminal back and
-    stop this process; once continued, continue the command, with the terminal if this process
-    is in the foreground again."""
+    """While inside, when the command `pid` (a group leader) stops for the terminal (job
+    control: SIGTSTP, SIGTTIN or SIGTTOU), take the terminal back and stop this process with
+    SIGTSTP, which a `hold` this one runs under follows in turn; once continued, continue the
+    command, with the terminal if this process is in the foreground again."""
 
     def on_child(_sig, _frame) -> None:
         if not _stopped(pid):
             return
         take_back(pid)
-        os.kill(os.getpid(), signal.SIGSTOP)
+        os.kill(os.getpid(), signal.SIGTSTP)
         if owned():
             hand_to(pid)
         else:

@@ -74,10 +74,11 @@ from leasehold.host import (
     signal_group,
     systemd,
 )
-from leasehold.host.posix import Posix
+from leasehold.host.posix import MCL_ONFAULT, Posix
 
-#: The variable that names the session a process belongs to.
+#: The variables that name the session a process belongs to, and the lease it runs under.
 SESSION_ENV = b"LEASEHOLD_SESSION"
+LEASE_ENV = b"LEASEHOLD_LEASE_ID"
 #: How long one scan of the user's processes' environments serves `session_processes`.
 TAGS_S = 1.0
 #: Errors that say a cgroup has gone, which no one needs to hear about.
@@ -147,14 +148,20 @@ def _cap_or_kernel(tree: Tree) -> str:
 
 
 class Linux(Posix):
+    #: Pages are locked as they are first touched, so that what was reserved and never used
+    #: (thread stacks, arenas) takes no RAM.
+    _lock_flags = Posix._lock_flags | MCL_ONFAULT
+
     def __init__(
         self,
         env: Mapping[str, str] | None = None,
         proc: Path = Path("/proc"),
         cgroup_root: Path = Path("/sys/fs/cgroup"),
+        sys_root: Path = Path("/sys"),
     ) -> None:
         super().__init__(env)
         self._proc = proc
+        self._sys = sys_root
         self._cgroup_root = cgroup_root
         #: Why no scope can be made for this caller ("" when one can; None: not asked yet).
         self._no_scope: str | None = None
@@ -163,8 +170,9 @@ class Linux(Posix):
         #: (when, microseconds every task stalled on memory) at recent `pressure` readings,
         #: the oldest at least `STALL_WINDOW_S` before the newest.
         self._stalls: list[tuple[float, int]] = []
-        #: (when, pids by session) at the last scan of the user's processes' environments.
-        self._tags: tuple[float, dict[str, list[int]]] | None = None
+        #: (when, pids by session, lease by pid) at the last scan of the user's processes'
+        #: environments.
+        self._tags: tuple[float, dict[str, list[int]], dict[int, str]] | None = None
         #: When the machine booted, in wall-clock seconds (None: not read yet, or unreadable).
         self._boot: float | None = None
 
@@ -294,17 +302,25 @@ class Linux(Posix):
 
     def _pids(self, tree: Tree) -> list[int]:
         """The pids of the tree's processes now: its cgroup's, with those of the cgroups under
-        it, or else its root (while its fence holds) and the root's descendants."""
+        it, or else its root (while its fence holds) and the root's descendants; and each of its
+        recorded `members` whose fence still holds."""
         if tree.group is not None:
             base = self._cgroup_root / tree.group.lstrip("/")
             files = [base / "cgroup.procs"]
             with contextlib.suppress(OSError):
                 files += sorted(base.rglob("*/cgroup.procs"))
             words = [w for f in files for w in (_read(f) or "").split()]
-            return [int(w) for w in words if w.isdigit()]
-        if tree.fence is not None and self._fence(tree.root) != tree.fence:
-            return []
-        return [tree.root, *self._descendants(tree.root)]
+            found = [int(w) for w in words if w.isdigit()]
+        elif tree.root and (tree.fence is None or self._fence(tree.root) == tree.fence):
+            found = [tree.root, *self._descendants(tree.root)]
+        else:
+            found = []
+        known = set(found)
+        for pid, fence in tree.members:
+            if pid not in known and (fence is None or self._fence(pid) == fence):
+                found.append(pid)
+                known.add(pid)
+        return found
 
     def members(self, tree: Tree) -> list[Proc]:
         """The tree's live processes, largest first. A process that cannot be read is left
@@ -376,6 +392,7 @@ class Linux(Posix):
                 recent = min(100.0, max(0, stalled - s0) / ((now - t0) * 1e4))
         total = info.get("SwapTotal")
         free = info.get("SwapFree")
+        kind, ratio = self._swap_kind()
         return Pressure(
             "exact",
             available=info.get("MemAvailable"),
@@ -388,7 +405,26 @@ class Linux(Posix):
             stall_how="psi" if psi else None,
             swapins_per_s=rate,
             compressed=info.get("Zswap"),
+            swap_kind=kind,
+            zram_ratio=ratio,
         )
+
+    def _swap_kind(self) -> tuple[str | None, float | None]:
+        """What the swap areas in use are (`Pressure.swap_kind`), and how much zram's pages
+        shrank: their size over the RAM zram uses (`mm_stat`'s `orig_data_size` over
+        `mem_used_total`)."""
+        kinds, orig, used = set(), 0, 0
+        for line in (_read(self._proc / "swaps") or "").splitlines()[1:]:
+            name = line.split()[0] if line.split() else ""
+            if not name.startswith("/dev/zram"):
+                kinds.add("disk")
+                continue
+            kinds.add("zram")
+            words = (_read(self._sys / "block" / Path(name).name / "mm_stat") or "").split()
+            if len(words) >= 3 and words[0].isdigit() and words[2].isdigit():
+                orig, used = orig + int(words[0]), used + int(words[2])
+        kind = None if not kinds else kinds.pop() if len(kinds) == 1 else "mixed"
+        return kind, (orig / used if used else None)
 
     def session_processes(self, session: SessionRef) -> list[Proc]:
         """Every process of `session`: its slice's, where it has one; else the agent's
@@ -427,22 +463,29 @@ class Linux(Posix):
     def _tagged(self) -> dict[str, list[int]]:
         """The user's processes by the session their environment names (`LEASEHOLD_SESSION`):
         read once for every session asked about within `TAGS_S`."""
+        return self._scan_env()[0]
+
+    def _scan_env(self) -> tuple[dict[str, list[int]], dict[int, str]]:
+        """The user's processes by the session their environment names, and the lease it names
+        (`LEASEHOLD_LEASE_ID`) by process: read once within `TAGS_S`."""
         now = time.monotonic()
         if self._tags is not None and now - self._tags[0] < TAGS_S:
-            return self._tags[1]
+            return self._tags[1], self._tags[2]
         found: dict[str, list[int]] = {}
-        prefix = SESSION_ENV + b"="
+        leases: dict[int, str] = {}
+        session, lease = SESSION_ENV + b"=", LEASE_ENV + b"="
         for pid in self._own():
             try:
                 environ = (self._proc / str(pid) / "environ").read_bytes()
             except OSError:
                 continue
             for item in environ.split(b"\0"):
-                if item.startswith(prefix):
-                    found.setdefault(item[len(prefix) :].decode(errors="replace"), []).append(pid)
-                    break
-        self._tags = (now, found)
-        return found
+                if item.startswith(session):
+                    found.setdefault(item[len(session) :].decode(errors="replace"), []).append(pid)
+                elif item.startswith(lease):
+                    leases[pid] = item[len(lease) :].decode(errors="replace")
+        self._tags = (now, found, leases)
+        return found, leases
 
     def named(self, names: Collection[str]) -> list[Proc]:
         """The user's live processes whose program is one of `names`, by the kernel's name for
@@ -454,6 +497,36 @@ class Linux(Posix):
             named = comm is not None and comm.rstrip("\n") in wanted
             if named and (got := self._proc_of(pid)) is not None:
                 found.append(got)
+        return found
+
+    def freeable(self, proc: Proc) -> int | None:
+        """What stopping `proc` would return to available memory: its proportional share of
+        the anonymous memory it holds in RAM (`Pss_Anon`), so that pages forked workers share
+        copy-on-write count once across them, and memory in swap (which frees swap, not RAM)
+        does not count. None once it has ended or when it cannot be read."""
+        text = _read(self._proc / str(proc.pid) / "smaps_rollup")
+        if text is None or (proc.fence is not None and self._fence(proc.pid) != proc.fence):
+            return None
+        for line in text.splitlines():
+            if line.startswith("Pss_Anon:"):
+                return int(line.split()[1]) << 10
+        return None
+
+    def boot_id(self) -> str | None:
+        """This boot's id (`/proc/sys/kernel/random/boot_id`), so that a pid recorded in an
+        earlier boot is not taken for one now."""
+        text = _read(self._proc / "sys" / "kernel" / "random" / "boot_id")
+        return None if text is None else text.strip() or None
+
+    def frozen_scopes(self) -> list[Tree]:
+        """leasehold's lease scopes under this user's `leasehold.slice` that are frozen now,
+        each as a tree to `resume`."""
+        base = self._cgroup_root / root_slice_cgroup()
+        found = []
+        for freeze in sorted(base.glob("**/lease-*.scope/cgroup.freeze")):
+            if (_read(freeze) or "").strip() == "1":
+                group = "/" + str(freeze.parent.relative_to(self._cgroup_root))
+                found.append(Tree(root=0, group=group))
         return found
 
     def command_line(self, proc: Proc) -> str | None:
@@ -477,6 +550,9 @@ class Linux(Posix):
         else:
             home = cgroup.own_cgroup(self._proc, str(pid)) or ""
             role = "lease" if PurePosixPath(home).name.startswith("lease-") else "tool"
+            found = self._proc_of(pid, role=role, basis=basis)
+            lease = self._scan_env()[1].get(pid)
+            return None if found is None else replace(found, group=home or None, lease=lease)
         return self._proc_of(pid, role=role, basis=basis)
 
     # --- trees -------------------------------------------------------------------------------
@@ -592,16 +668,26 @@ class Linux(Posix):
             os.close(fd)
         return Done(how)
 
+    def _cgroup_kill(self, tree: Tree) -> bool:
+        """Kill every process of the tree's kernel group at once, frozen or not (`cgroup.kill`).
+        Whether it could."""
+        assert tree.group is not None
+        try:
+            (self._cgroup_root / tree.group.lstrip("/") / "cgroup.kill").write_text("1")
+        except OSError:
+            return False
+        return True
+
     def _each(self, tree: Tree, sig: int, *, stopped: bool | None = None) -> list[int]:
-        """Signal `sig` to the tree's group (unless its keeper is in it) and to each member but
-        its keeper; with `stopped` set, only to members whose state is not already that. The
-        pids signalled."""
+        """Signal `sig` to the tree's group (unless its keeper is in it, or it spares any) and
+        to each member but its keeper and those it spares; with `stopped` set, only to members
+        whose state is not already that. The pids signalled."""
         pgid = self._group(tree)
-        if pgid is not None:
+        if pgid is not None and not tree.spare:
             signal_group(pgid, sig)
         sent = []
         for pid in self._pids(tree):
-            if pid == tree.keeper:
+            if pid == tree.keeper or pid in tree.spare:
                 continue
             if stopped is not None:
                 stat = self._stat(pid)
@@ -640,6 +726,11 @@ class Linux(Posix):
             return Done("systemd", empty=not left)
         if not self._pids(tree):
             return Done("signal", empty=True)
+        if grace_s <= 0:
+            if tree.group is not None and not tree.spare and self._cgroup_kill(tree):
+                return Done("cgroup.kill")
+            self._each(tree, signal.SIGKILL)
+            return Done("signal")
         self._each(tree, signal.SIGTERM)
         self._each(tree, signal.SIGCONT)
         deadline = time.monotonic() + grace_s

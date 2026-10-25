@@ -101,6 +101,10 @@ class Case:
     note: str | None = None
 
 
+#: Programs whose commands are never run again after the watchdog stopped them.
+NO_RERUN = frozenset({"cargo", "bazel", "bazelisk", "docker", "podman", "npm", "pnpm", "yarn"})
+
+
 @dataclass(frozen=True)
 class Rule:
     """`weight` to `max_weight` slots in `pool` for a command that runs one of `programs`
@@ -188,6 +192,13 @@ class Rule:
                     note=case.note, cases=(), hook_ceiling=None,
                 )  # fmt: skip
         return self
+
+    @property
+    def rerun(self) -> bool:
+        """Whether a command it matches is run again, once and alone, when leasehold's watchdog
+        stops it: only under a built-in rule, and not for builds and installs that may leave
+        work half done (`NO_RERUN`)."""
+        return self.source == "default" and bool(self.programs) and not self.programs & NO_RERUN
 
     @property
     def key(self) -> str | None:

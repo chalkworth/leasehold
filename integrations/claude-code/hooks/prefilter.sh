@@ -24,6 +24,10 @@
 #
 # end (SessionEnd): the Python hook unregisters the session.
 #
+# pre and post both hand over to the Python hook while the daemon has left a notice for the
+# session ($XDG_RUNTIME_DIR/leasehold-hooks-<uid>/notice.cc-<session_id>), such as that its
+# watchdog paused or stopped a command, so that the agent reads it at its next tool call.
+#
 # Either way, without `leasehold` on PATH it does nothing.
 
 stage=${1:-pre}
@@ -34,6 +38,19 @@ hook() {
     printf '%s\n' "$event" | leasehold hook claude-code "$stage"
     exit 0
 }
+
+# A notice the daemon left for this session: the Python hook passes it on.
+case $stage in
+pre | post)
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        sid=$(printf '%s\n' "$event" | LC_ALL=C sed -n \
+            's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_.:-]*\)".*/\1/p')
+        if [ -n "$sid" ] && [ "${#sid}" -le 61 ]; then
+            [ -e "$XDG_RUNTIME_DIR/leasehold-hooks-$(id -u)/notice.cc-$sid" ] && hook
+        fi
+    fi
+    ;;
+esac
 
 case $stage in
 start)

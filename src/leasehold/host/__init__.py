@@ -18,7 +18,11 @@ has one (a systemd scope on Linux). The operations:
 * `pause(tree)` stops every process in it from running, and `resume(tree)` lets them run again.
   A tree's `keeper` (the process that started it and waits for it) is never paused. `kill(tree,
   grace_s)` sends SIGTERM, and SIGCONT so that a paused member sees it, then SIGKILL to what is
-  left after `grace_s`.
+  left after `grace_s`; with no grace, SIGKILL alone, at once (a stopped process does not act
+  on SIGTERM until it runs again).
+* `stay_resident(dry=False)` keeps the calling process's memory in RAM and raises its priority
+  where this user may, so that a watchdog still runs when the machine is short of memory; with
+  `dry`, it only says whether it could.
 * `mark()` takes the counters before a command starts, and `ended(status, since)` gives the
   memory verdict on how it ended (`Ending`). For a command it started, the host owns the wait:
   `Started.wait()` and `Started.poll()` reap it, so that a platform that must read how a
@@ -116,6 +120,10 @@ class Proc:
     anon: int | None = None
     swap: int | None = None
     started: float | None = None
+    #: In `session_processes`, the kernel group it runs in (a cgroup path) and the lease its
+    #: environment names (`LEASEHOLD_LEASE_ID`); None: none, or not read.
+    group: str | None = None
+    lease: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,7 +135,10 @@ class Tree:
     service manager (a systemd unit) and `group` where the kernel keeps it (a cgroup path,
     such as `/user.slice/.../lease-x.scope`).
     `cap_bytes` is its own hard memory cap, and `limit_bytes` the lowest hard memory limit on
-    it or above it as read when it was made (None: none)."""
+    it or above it as read when it was made (None: none). `pause`, `resume` and `kill` never
+    signal a process in `spare`, and also reach each of `members` (pid, fence) still alive:
+    the processes a pause stopped, so that they run again even once the root has gone and they
+    have another parent."""
 
     root: int
     fence: str | None = None
@@ -137,6 +148,8 @@ class Tree:
     group: str | None = None
     cap_bytes: int | None = None
     limit_bytes: int | None = None
+    spare: tuple[int, ...] = ()
+    members: tuple[tuple[int, str | None], ...] = ()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -144,7 +157,10 @@ class Tree:
     @classmethod
     def from_dict(cls, data: dict) -> Tree:
         names = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in names})
+        found = {k: v for k, v in data.items() if k in names}
+        found["spare"] = tuple(int(p) for p in found.get("spare") or ())
+        found["members"] = tuple((int(p), f) for p, f in found.get("members") or ())
+        return cls(**found)
 
 
 @dataclass(frozen=True)
@@ -212,7 +228,11 @@ class Pressure:
     in which every task stalled (from the kernel's running total, so it does not lag as the
     ten-second average does; None on this host's first reading); `swapins_per_s` the pages
     read back from swap a second since the last reading by this host (None on the first);
-    `compressed` the memory held compressed (zswap). Shares are percentages. `how` is `exact`
+    `compressed` the memory held compressed (zswap). `swap_kind` is what the swap is: `disk`
+    (a file or partition, whose free space is free memory), `zram` (compressed RAM, which an
+    incompressible page fills at about one to one) or `mixed`; None with no swap.
+    `zram_ratio` is how much zram's pages shrank (their size over the RAM zram uses for
+    them; None without zram, or before it holds anything). Shares are percentages. `how` is `exact`
     when the kernel gave it, `none` with a `reason` when nothing could be read. Each value is
     None when not known."""
 
@@ -229,6 +249,8 @@ class Pressure:
     stall_how: str | None = None
     swapins_per_s: float | None = None
     compressed: int | None = None
+    swap_kind: str | None = None
+    zram_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -327,6 +349,8 @@ class Host(Protocol):
 
     def kill(self, tree: Tree, grace_s: float) -> Done: ...
 
+    def stay_resident(self, *, dry: bool = False) -> Done: ...
+
     def mark(self) -> Mark: ...
 
     def ended(
@@ -340,6 +364,12 @@ class Host(Protocol):
     def named(self, names: Collection[str]) -> list[Proc]: ...
 
     def command_line(self, proc: Proc) -> str | None: ...
+
+    def freeable(self, proc: Proc) -> int | None: ...
+
+    def boot_id(self) -> str | None: ...
+
+    def frozen_scopes(self) -> list[Tree]: ...
 
     def wakeup_fd(self) -> int | None: ...
 

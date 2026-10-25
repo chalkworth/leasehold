@@ -211,6 +211,7 @@ def run(shims: Path, program: str, args: list[str], env: Mapping[str, str]) -> i
         return run_leased(
             client, argv, request, answer, memory=rule.memory, threads=threads,
             memory_per_slot=rule.memory_per_slot, rule=rule.key, memory_max=rule.memory_max,
+            rerun=rule.rerun,
         )  # fmt: skip
     if code == EXIT_BUSY and (cut := toolwait.said(env, settings.wait_s)):
         _say(cut)

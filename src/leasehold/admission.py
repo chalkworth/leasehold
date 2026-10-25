@@ -196,6 +196,10 @@ class AdmissionPolicy:
     #: Host to why the watchdog holds new work there, in words: while it is named, nothing
     #: that counts memory there starts (nothing at all on a host with no budget).
     memory_held: Mapping[str, str] = field(default_factory=dict, hash=False)
+    #: Waiting items that run alone (a command the watchdog stopped, run again): admitted only
+    #: once their host holds no lease outside the observed pools, and nothing else is admitted
+    #: on that host in the same decision.
+    alone: frozenset[ItemKey] = frozenset()
 
     @classmethod
     def from_pools(
@@ -1004,6 +1008,7 @@ def _admit_least(
     admitted (the one blocking the pool, and those waiting for the memory allowance)."""
     admits: list[Waiting] = []
     stopped: dict[str, list[Waiting]] = {}
+    alone_hosts: set[str] = set()
     drains = draining(state, policy)
     taken = {h.host for h in state.held if h.whole}
     # Whole items go in once their host is empty, below; what waits behind one, or on a host one
@@ -1030,6 +1035,12 @@ def _admit_least(
                 continue
             session = _next_session(line[user], tally, pool, user)
             head = line[user][session][0]
+            host = policy.pools[pool].host
+            if host in alone_hosts:
+                break  # an alone item admitted on this host holds it: the pool's line waits
+            if head.key in policy.alone and _busy(state, policy, admits, pool):
+                stopped.setdefault(pool, []).append(head)
+                break  # waiting to run alone: nothing backfills around it
             if not fits(tally, policy, pool, head.weight, head.memory, head.memory_per_slot):
                 stopped.setdefault(pool, []).append(head)
                 if _only_short(tally, policy, pool, head) and _lets_by(policy, pool, head):
@@ -1039,13 +1050,14 @@ def _admit_least(
                     continue
                 break  # no backfill around the item whose turn it is
             line[user][session].pop(0)
-            host = policy.pools[pool].host
             counted = policy.counted(host, head.weight, head.memory, head.memory_per_slot)
             tally.add(pool, host, user, session, head.weight, counted)
             if counted:
                 tally.fresh_memory[host] = tally.fresh_memory.get(host, 0) + counted
             tally.serve(pool, user, session)
             admits.append(head)
+            if head.key in policy.alone:
+                alone_hosts.add(host)
     for host, first in drains.items():
         busy = any(h.host == host for h in state.held) or any(
             policy.pools[a.pool].host == host for a in admits
@@ -1058,6 +1070,14 @@ def _admit_least(
         tally.serve(first.pool, first.user, first.session)
         admits.append(first)
     return admits, stopped
+
+
+def _busy(state: State, policy: AdmissionPolicy, admits: list[Waiting], pool: str) -> bool:
+    """Whether `pool`'s host holds a lease outside the observed pools, or was just given one."""
+    host = policy.pools[pool].host
+    return any(h.host == host and h.pool not in policy.observed for h in state.held) or any(
+        policy.pools[a.pool].host == host for a in admits
+    )
 
 
 def positions(state: State, policy: AdmissionPolicy) -> dict[ItemKey, int]:
@@ -1137,6 +1157,11 @@ def blocker(
         return f"memory is short{why}: nothing new starts until the pressure eases"
     if policy.held_back(pool.host, item.weight, item.memory, item.memory_per_slot):
         return f"the watchdog holds new work: {policy.memory_held[pool.host]}"
+    if key in policy.alone and _busy(state, policy, [], item.pool):
+        return (
+            "it runs alone, as the watchdog stopped it when memory ran short: waiting for the "
+            "other leases to end"
+        )
     need = policy.counted(pool.host, item.weight, item.memory, item.memory_per_slot)
     free_now = policy.memory_free.get(pool.host)
     if pool.host in policy.memory and free_now is not None and need > free_now:

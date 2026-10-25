@@ -13,9 +13,13 @@ the user who names it.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import json
 import os
 import pwd
 import re
+import sys
 import threading
 import time
 import uuid
@@ -27,12 +31,14 @@ from leasehold import (
     __version__,
     contain,
     estimate,
+    hooknotes,
     host,
     maintenance,
     observe,
     outcomes,
     proctable,
     status,
+    verdict,
 )
 from leasehold.access import Forbidden
 from leasehold.admission import AdmissionPolicy, alone
@@ -44,10 +50,11 @@ from leasehold.ledger import Admitted, Holder, Ledger, LedgerItem, Queued
 from leasehold.lend import LendGate, Observation, Verdict
 from leasehold.load import LoadReader, available, some_avg10
 from leasehold.machine import MachineConfig, lease_memory_limit
+from leasehold.paths import user_socket
 from leasehold.proctable import Proc
 from leasehold.sessions import Branch, Session, Sessions
 from leasehold.units import CAP_OFF, cap_to_bytes, declared_to_bytes, memory_to_bytes
-from leasehold.watchdog import Memory, Watchdog, Work
+from leasehold.watchdog import Act, Memory, Watchdog, Work
 
 #: The ledger scope observed processes' leases are filed under; no client may name it.
 OBSERVED_SCOPE = "leasehold.observed"
@@ -63,6 +70,14 @@ _LENDING_OFF = "lending switched off"
 LEARNED_TTL_S = 300.0
 #: How often the watched sessions' processes are read again, in seconds.
 SESSIONS_S = 2.0
+#: After the watchdog stops a command, how long its rule's next request from that session runs
+#: alone.
+TICKET_S = 1800.0
+#: The agents are told memory is short outside the sessions at most this often.
+OUTSIDE_TOLD_S = 300.0
+#: The lease ids the Claude Code hook takes (`claude_code.LEASE_PREFIX`): its `post` reports a
+#: stop to the agent.
+HOOK_LEASE_PREFIX = "cc."
 
 __all__ = ["SCOPE", "AcquireRequest", "Conflict", "Forbidden", "MachineAgent"]
 
@@ -185,19 +200,120 @@ def _expected(row: Mapping) -> int | None:
     return None if per_slot is None else per_slot * row["weight"]
 
 
-#: A command line that runs leasehold: `leasehold ...`, or `python -m leasehold...`.
-_LEASEHOLD_LINE = re.compile(r"(^|[\s/])leasehold(\s|$)|(^|\s)-m\s+leasehold(\.|\s|$)")
+#: A command line that runs leasehold as its program: `leasehold ...`, `python -m leasehold...`
+#: or `python .../leasehold ...` (an entry point's script). A program that only names
+#: leasehold among its arguments (one that runs `hold` in turn) is not leasehold.
+_LEASEHOLD_LINE = re.compile(
+    r"^(\S*/)?leasehold(\s|$)"
+    r"|^(\S*/)?python[\d.]*(\s+-[^m\s]\S*)*\s+(-m\s+leasehold(\.\S*)?|\S*/leasehold)(\s|$)"
+)
 
 
-def _work(session: Session, branch: Branch, own: set[int], expected: dict[int, int]) -> Work:
+def _quoted(work: Work) -> str:
+    """A tree's command, quoted, for a line an agent reads."""
+    return f'"{(work.command or work.name)[:120]}"'
+
+
+def _clock_time(when: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(when))
+
+
+#: The scope a lease's command runs in: `lease-<id>.scope` (`contain.lease_unit`).
+_LEASE_SCOPE = re.compile(r"^lease-(.+)\.scope$")
+
+
+def _leases(members) -> set[str]:
+    """The leases processes run under: named in their environment, or by their scope."""
+    found = {p.lease for p in members if p.lease}
+    for p in members:
+        if p.group and (m := _LEASE_SCOPE.match(p.group.rsplit("/", 1)[-1])):
+            found.add(m.group(1))
+    return found
+
+
+#: The programs an agent's tool runs commands in: a tree of a hook session rooted at one is a
+#: tool's command.
+_SHELLS = frozenset({"bash", "sh", "dash", "zsh", "fish", "ksh"})
+
+
+def _together(done: list[host.Done]) -> host.Done:
+    """What acting on several host trees did, as one: done when any was, empty when all were."""
+    acted = [d for d in done if d.how != "none"]
+    if acted:
+        return host.Done(acted[0].how)
+    reasons = [d.reason for d in done if d.reason]
+    return host.Done(
+        "none", reasons[0] if reasons else "nothing to act on", empty=all(d.empty for d in done)
+    )
+
+
+def _spare(branch: Branch, own: set[int]) -> set[int]:
+    """leasehold's own processes in `branch` (`own`), and the shells they run under in it, up to
+    the first other program: acting on the tree never signals these, so that `hold` lives to
+    report the stop. A program that runs a shim (a test run calling `make`) is not spared: it
+    is what holds the memory."""
+    by_pid = {p.pid: p for p in branch.members}
+    spare = set(own) & set(by_pid)
+    for pid in own:
+        up = by_pid.get(pid)
+        up = None if up is None else by_pid.get(up.parent)
+        while up is not None and up.name in _SHELLS and up.pid not in spare:
+            spare.add(up.pid)
+            up = by_pid.get(up.parent)
+    return spare
+
+
+def _heads(branch: Branch) -> set[int]:
+    """`branch`'s heads: its root, and each program a shell among its heads runs (what a tool
+    shell runs, not what that program starts in turn)."""
+    heads = {branch.root.pid}
+    names = {p.pid: p.name for p in branch.members}
+    grew = True
+    while grew:
+        grew = False
+        for p in branch.members:
+            if p.pid not in heads and p.parent in heads and names.get(p.parent) in _SHELLS:
+                heads.add(p.pid)
+                grew = True
+    return heads
+
+
+def _work(
+    session: Session,
+    branch: Branch,
+    own: set[int],
+    expected: dict[int, int],
+    alone: bool,
+    lines: dict[int, str] | None = None,
+    frees: dict[int, int] | None = None,
+) -> Work:
     """`branch` of `session` as the watchdog weighs it (`leasehold.watchdog.Work`); `own` are
-    the pids of leasehold's own processes."""
+    the pids of leasehold's own processes, `lines` its processes' command lines, and `frees`
+    what stopping each would return to available memory, where it was measured."""
     reading = session.reading
     agent = None if reading is None else reading.agent
+    lines = lines or {}
     kept = tuple(p.pid for p in branch.members if p.pid in own)
-    others = [p for p in branch.members if p.pid not in own]
-    sizes = [expected[p.pid] for p in branch.members if p.pid in expected]
     root = branch.root
+    spare = _spare(branch, own)
+    others = [p for p in branch.members if p.pid not in spare]
+    sizes = [expected[p.pid] for p in branch.members if p.pid in expected]
+    measured = None
+    if frees is not None and all(p.pid in frees for p in others):
+        measured = sum(frees[p.pid] for p in others)
+    heads = _heads(branch)
+    scopes = tuple(
+        sorted(
+            {
+                p.group
+                for p in branch.members
+                if p.group and _LEASE_SCOPE.match(p.group.rsplit("/", 1)[-1])
+            }
+        )
+    )
+    leases = tuple(sorted(_leases(branch.members)))
+    # A lease's scope is paused and stopped as a whole: its processes are not signalled one by one.
+    spare |= {p.pid for p in branch.members if p.group in scopes}
     return Work(
         session=session.id,
         source=session.source,
@@ -209,9 +325,18 @@ def _work(session: Session, branch: Branch, own: set[int], expected: dict[int, i
         started=root.started,
         agent_started=None if agent is None else agent.started,
         spared=kept,
-        leasehold=not others,
+        leasehold=not [p for p in branch.members if p.pid not in own],
         agent_line=branch.agent_line,
         expected=sum(sizes) if sizes else None,
+        leases=leases,
+        alone=alone,
+        members=tuple((p.pid, p.fence) for p in branch.members if p.pid not in spare),
+        spare=tuple(sorted(spare)),
+        scopes=scopes,
+        lines=tuple(lines.get(p.pid, p.name) for p in branch.members),
+        heads=tuple(lines.get(p.pid, p.name) for p in branch.members if p.pid in heads),
+        frees=measured,
+        tool=session.source != "hook" or root.name in _SHELLS or bool(scopes or leases),
     )
 
 
@@ -321,12 +446,43 @@ class MachineAgent:
         self._watchdog_lock = threading.Lock()
         #: Whether each process read in a session (by pid and fence) is leasehold's own.
         self._own_cache: dict[tuple[int, str | None], bool] = {}
+        #: Each process's command line as read, by pid and fence.
+        self._lines_cache: dict[tuple[int, str | None], str] = {}
+        #: When the agents were last told memory is short outside the sessions.
+        self._outside_told: float | None = None
         if not config.for_user:
             self._watchdog_off = "the machine's daemon has no watchdog: each user's daemon has one"
         elif config.watchdog.mode == "off":
             self._watchdog_off = "[watchdog] mode is off"
         else:
             self.watchdog = Watchdog(config.watchdog, config.watchdog.limits(memory))
+        #: Why the watchdog holds new work (None: it does not), as of its last reading.
+        self._held: str | None = None
+        #: The leases of each tree it paused, by the tree's key.
+        self._paused_leases: dict[tuple, set[str]] = {}
+        #: Per lease: [times paused, seconds paused, when its pause began (None: running)].
+        self._pauses: dict[str, list] = {}
+        #: The host trees each paused tree was paused as, by the tree's key: its leases'
+        #: scopes, and its other processes with those it stopped.
+        self._trees: dict[tuple, list[host.Tree]] = {}
+        #: Per lease the watchdog stopped: what renewals tell its holder (`stopped`).
+        self._stops: dict[str, dict] = {}
+        #: (user, session, rule) whose next request runs alone, after a stop; the waiting items
+        #: that run alone, with their ticket; and the leases granted alone.
+        self._tickets: dict[tuple, float] = {}
+        self._alone_items: dict[tuple[str, str], tuple] = {}
+        self._alone_leases: set[str] = set()
+        #: Where the trees paused are kept, so that a daemon that did not stop cleanly lets
+        #: them run again when it starts (`watchdog.json` beside the ledger).
+        self._paused_file = (
+            None if config.ledger_dir is None else config.ledger_dir / "watchdog.json"
+        )
+        if config.for_user:
+            self._let_recorded_run()
+            # Only the user's own daemon, on its own socket: lease scopes are the user's, and a
+            # daemon on another socket (a test's) may not thaw what that one paused.
+            if config.socket is None or config.socket == user_socket(os.environ):
+                self._thaw_left_frozen()
         self._seen = self._snapshot()
 
     def _guard_cgroups(self) -> tuple[str, ...]:
@@ -353,11 +509,14 @@ class MachineAgent:
     # --- decisions -----------------------------------------------------------------------------
 
     def policy(self) -> AdmissionPolicy:
+        with self._watchdog_lock:
+            held = self._held
+            alone = frozenset(self._alone_items)
         closed = frozenset() if self.verdict.eligible and not self._lend_off else self.lend_pools
         guarding = self.config.guarded and self.guard.on
         counting = self.budget is not None
         free = self.memory_free() if guarding and counting else None
-        return self.config.policy(
+        policy = self.config.policy(
             closed=closed,
             max_overrides=self._max_overrides,
             capped=guarding and not counting,
@@ -369,8 +528,9 @@ class MachineAgent:
             memory_overdue=self._overdue() if free is not None else frozenset(),
             lease_memory=self.limits.memory_bytes,
             maintenance=None if (info := self.maintenance()) is None else info["message"],
-            memory_held=None,
+            memory_held=held,
         )
+        return dataclasses.replace(policy, alone=alone)
 
     def maintenance(self) -> dict | None:
         """The maintenance lease waiters are told about (`leasehold.maintenance.describe`):
@@ -548,6 +708,8 @@ class MachineAgent:
     def tick(self) -> dict:
         """Measure, decide on lending, revoke what must stop, admit what fits."""
         load = self.loader.read()
+        with self._watchdog_lock:
+            paused = self._paused_ids()
         with self._lock:
             self.last_load = load
             if self.config.guarded:
@@ -564,7 +726,12 @@ class MachineAgent:
             reason = _LENDING_OFF if self._lend_off else self.verdict.revoke
             revoked = self._revoke(reason) if reason else []
             self._watch_processes()
+            for lid in paused:
+                # A paused holder cannot renew: its lease is kept while its tree is paused.
+                self.ledger.renew((SCOPE, lid))
             admitted = self.ledger.settle(self.policy())
+            self._note_alone()
+            self._forget_ended()
             self._record()
         if revoked or admitted:
             self._notify()
@@ -587,9 +754,17 @@ class MachineAgent:
         if events:
             self.events.emit(events, now=self._clock())
         if self.watchdog is not None:
-            trees = self._watched_work()
             with self._watchdog_lock:
-                self.watchdog.work(trees, now=mono)
+                trees = self._watched_work()
+                ended = self.watchdog.work(trees, now=mono)
+                for paused in ended:
+                    self._close_pauses(self._paused_leases.pop(paused.key, set()))
+                    # Its root ended while it was paused: what it left is let run.
+                    for tree in self._trees.pop(paused.key, []):
+                        self.sessions.host.resume(tree)
+                if ended:
+                    self._save_paused()
+                    self._held = self.watchdog.held()
 
     def _watched_work(self) -> list[Work]:
         """The watched sessions' trees as the watchdog weighs them: leasehold's own processes
@@ -603,6 +778,10 @@ class MachineAgent:
                 if size is not None:
                     expected[row["holder_pid"]] = expected.get(row["holder_pid"], 0) + size
         seen: dict[tuple[int, str | None], bool] = {}
+        lines: dict[tuple[int, str | None], str] = {}
+        # What stopping a process would free is read only while memory is short: it walks
+        # each process's memory map.
+        measure = self.watchdog is not None and self.watchdog.short()
         out = []
         for session, branch in self.sessions.work():
             own = set()
@@ -614,9 +793,32 @@ class MachineAgent:
                         seen[key] = self._leasehold(p)
                 if seen[key]:
                     own.add(p.pid)
-            out.append(_work(session, branch, own, expected))
+            alone = bool(self._alone_leases & _leases(branch.members))
+            said = {}
+            for p in branch.members:
+                key = (p.pid, p.fence)
+                if key not in lines:
+                    line = self._lines_cache.get(key)
+                    if line is None:
+                        line = self.sessions.host.command_line(p) or p.name
+                    lines[key] = line
+                said[p.pid] = lines[key]
+            frees = None
+            if measure:
+                frees = {
+                    p.pid: got
+                    for p in branch.members
+                    if (got := self.sessions.host.freeable(p)) is not None
+                }
+            out.append(_work(session, branch, own, expected, alone, said, frees))
         self._own_cache = seen
+        self._lines_cache = lines
         return out
+
+    def _leases_of(self, work: Work) -> set[str]:
+        """The leases a tree runs under that this daemon holds."""
+        held = {r["item_id"] for r in self.ledger.leases() if r["scope"] == SCOPE}
+        return held & set(work.leases)
 
     def _leasehold(self, proc: host.Proc) -> bool:
         """Whether `proc` is one of leasehold's own processes: this daemon, or a process
@@ -645,13 +847,295 @@ class MachineAgent:
             os_level=got.level,
             how=got.how,
             reason=got.reason,
+            swap_kind=got.swap_kind,
+            zram_ratio=got.zram_ratio,
         )
         with self._watchdog_lock:
             events = self.watchdog.observe(reading)
+            mono = self._monotonic()
+            told = self._outside_told
+            if any(e.get("outside") for e in events) and (
+                told is None or mono - told >= OUTSIDE_TOLD_S
+            ):
+                self._outside_told = mono
+                for session in self.sessions.listed():
+                    self._tell(
+                        session.id,
+                        "memory is short outside leasehold's sessions, so new heavy work waits "
+                        "until it frees; nothing of yours is paused or stopped for it.",
+                    )
+            for act in self.watchdog.decide():
+                events += self._act(act)
             wait = self.watchdog.interval()
+            held, self._held = self._held, self.watchdog.held()
+            changed = held != self._held
         if events:
             self.events.emit(events, now=self._clock())
+        if changed:
+            with self._lock:
+                admitted = self.ledger.settle(self.policy())
+                self._record()
+            if admitted:
+                self._notify()
         return wait
+
+    def _host_trees(self, w: Work) -> list[host.Tree]:
+        """What acting on `w` touches, as host trees: each of its leases' scopes as a whole
+        (frozen, and killed with `cgroup.kill`), and its other processes one by one, recorded so
+        that they are let run even after its root has gone. leasehold's own processes, and the
+        shells they run under, are spared."""
+        trees = [host.Tree(root=0, group=group) for group in w.scopes]
+        if w.members:
+            trees.append(host.Tree(root=w.pid, fence=w.fence, spare=w.spare, members=w.members))
+        return trees
+
+    def _act(self, act: Act) -> list[dict]:
+        """Do what the watchdog decided through the host, and say so: the events. Under
+        `_watchdog_lock`."""
+        assert self.watchdog is not None
+        w = act.work
+        doing = self.sessions.host
+        about = act.choice.public() | {"would": False, "reason": self.watchdog.status()["reason"]}
+        now = self._clock()
+        if act.action == "pause":
+            trees = self._host_trees(w)
+            done = _together([doing.pause(t) for t in trees])
+            if done.how == "none":
+                for tree in trees:
+                    doing.resume(tree)
+                self.watchdog.failed(act)
+                return []
+            self.watchdog.paused(act)
+            self._trees[w.key] = trees
+            leases = self._leases_of(w)
+            self._paused_leases[w.key] = leases
+            for lid in leases:
+                counts = self._pauses.setdefault(lid, [0, 0.0, None])
+                counts[0] += 1
+                counts[2] = self._monotonic()
+            self._save_paused()
+            self._tell(
+                w.session,
+                f"your command {_quoted(w)} has been paused since "
+                f"{_clock_time(now)} because the machine is short of memory. It continues "
+                "on its own when memory frees; do not start it again. Lighter work is fine.",
+            )
+            return [{"type": EventType.PAUSED, "how": done.how} | about]
+        if act.action == "resume":
+            trees = self._trees.get(w.key) or self._host_trees(w)
+            done = _together([doing.resume(t) for t in trees])
+            if done.how == "none" and not done.empty:
+                self.watchdog.failed(act)
+                return []
+            took = self.watchdog.resumed(act)
+            self._trees.pop(w.key, None)
+            self._close_pauses(self._paused_leases.get(w.key, set()))
+            self._save_paused()
+            paused_s = self._monotonic_paused(took)
+            if not done.empty:
+                self._tell(
+                    w.session,
+                    f"your command {_quoted(w)} runs again after {paused_s:.0f}s paused.",
+                )
+            return [{"type": EventType.RESUMED, "paused_s": round(paused_s, 1)} | about]
+        # What it recorded at the pause, and what the tree has gained since (a lease's scope).
+        trees = self._trees.pop(w.key, None) or []
+        groups = {t.group for t in trees}
+        trees += [t for t in self._host_trees(w) if not trees or t.group not in groups]
+        done = _together([doing.kill(t, 0) for t in trees])
+        if done.how == "none" and not done.empty:
+            self.watchdog.failed(act)
+            return []
+        record = self.watchdog.stopped_tree(act)
+        leases = self._paused_leases.pop(w.key, set()) | self._leases_of(w)
+        self._close_pauses(leases)
+        runaway = act.choice.why == "runaway"
+        paused_s = None if record is None else self._monotonic_paused(record)
+        rows = {r["item_id"]: r for r in self.ledger.leases() if r["scope"] == SCOPE}
+        test = verdict.test_like(w.command)
+        told = {
+            "why": act.why,
+            "runaway": runaway,
+            "rerun": False,
+            "alone": False,
+            "test": test,
+            "paused_s": None if paused_s is None else round(paused_s, 1),
+            "available_bytes": self.watchdog.status()["available_bytes"],
+        }
+        for lid in leases:
+            row = rows.get(lid)
+            rule = ((row or {}).get("labels") or {}).get("rule")
+            alone = lid in self._alone_leases
+            # A command stopped even running alone is not run alone again: it would loop.
+            rerun = not runaway and not alone and rule is not None and row is not None
+            if rerun:
+                self._tickets[(row["user"], row["session"], rule)] = self._monotonic()
+            self._stops[lid] = told | {
+                "rerun": rerun,
+                "alone": alone,
+                "test": test or verdict.test_like(rule),
+            }
+            told = self._stops[lid]
+        self._save_paused()
+        if not self._reported(w, leases):
+            self._tell(
+                w.session,
+                f"your command {_quoted(w)} was stopped at {_clock_time(now)}: leasehold's "
+                "watchdog paused and stopped it to keep the machine responsive, as memory ran "
+                f"short. {verdict.stopped_note(told)} {verdict.stopped_todo(told)}".replace(
+                    "  ", " "
+                ),
+            )
+        return [
+            {
+                "type": EventType.STOPPED,
+                "stopped_for": act.why,
+                "runaway": runaway,
+                "paused_s": paused_s,
+            }
+            | about
+        ]
+
+    def _reported(self, w: Work, leases: set[str]) -> bool:
+        """Whether the stop of `w` reaches its agent through the command's own verdict: `hold`
+        or a PATH shim in the tree prints it, and the Claude Code hook's `post` returns it for
+        a lease it took. Only otherwise does the daemon leave a notice."""
+        if any(lid.startswith(HOOK_LEASE_PREFIX) for lid in leases):
+            return True
+        return bool(leases) and bool(w.spared)
+
+    def _paused_for(self, lease_id: str) -> str | None:
+        """Why the watchdog chose the tree it paused with `lease_id` in it (None: not paused)."""
+        if self.watchdog is None:
+            return None
+        for p in self.watchdog.paused_trees():
+            if p.resumed is None and lease_id in self._paused_leases.get(p.key, set()):
+                return p.choice.why
+        return None
+
+    def _ticket(self, ticket: tuple) -> bool:
+        """Whether `ticket` (user, session, rule) still runs its next request alone: for
+        `TICKET_S` after the stop."""
+        with self._watchdog_lock:
+            when = self._tickets.get(ticket)
+            if when is not None and self._monotonic() - when > TICKET_S:
+                del self._tickets[ticket]
+                return False
+            return when is not None
+
+    def _forget_ended(self) -> None:
+        """Forget what the watchdog noted of leases that ended without a release (expired, or
+        their holder died)."""
+        held = {r["item_id"] for r in self.ledger.leases() if r["scope"] == SCOPE}
+        with self._watchdog_lock:
+            for noted in (self._pauses, self._stops):
+                for lid in set(noted) - held:
+                    del noted[lid]
+            self._alone_leases &= held
+
+    def _note_alone(self) -> None:
+        """A waiting item that runs alone and is now granted uses up its ticket, and its tree
+        is the last the watchdog pauses; one no longer waiting is forgotten."""
+        held = {(r["scope"], r["item_id"]) for r in self.ledger.leases()}
+        waiting = {(r["scope"], r["item_id"]) for r in self.ledger.queued()}
+        with self._watchdog_lock:
+            if not self._alone_items:
+                return
+            for key, ticket in list(self._alone_items.items()):
+                if key in held:
+                    self._tickets.pop(ticket, None)
+                    self._alone_leases.add(key[1])
+                if key in held or key not in waiting:
+                    del self._alone_items[key]
+
+    def _monotonic_paused(self, paused) -> float:
+        """How long a tree the watchdog paused was paused, in seconds."""
+        end = paused.resumed if paused.resumed is not None else self.watchdog._state.now
+        return max(0.0, end - paused.since)
+
+    def _close_pauses(self, leases: set[str], *, keep: bool = False) -> None:
+        """The leases' pauses end now: their time paused is counted."""
+        now = self._monotonic()
+        for lid in leases:
+            counts = self._pauses.get(lid)
+            if counts is not None and counts[2] is not None:
+                counts[1] += now - counts[2]
+                counts[2] = None
+
+    def _paused_ids(self) -> set[str]:
+        """The leases whose command is paused now."""
+        if self.watchdog is None:
+            return set()
+        live = {p.key for p in self.watchdog.paused_trees() if p.resumed is None}
+        return {lid for key, ids in list(self._paused_leases.items()) if key in live for lid in ids}
+
+    def _tell(self, session: str, text: str) -> None:
+        """Leave `text` for the agent of `session`, which its hooks pass on at its next tool
+        call (`hooknotes.notices`): only a session its hooks registered."""
+        found = next((s for s in self.sessions.listed() if s.id == session), None)
+        if found is None or found.source != "hook":
+            return
+        directory = hooknotes.state_dir(os.environ)
+        if directory is not None:
+            hooknotes.notice(directory, session, f"leasehold: {text}")
+
+    def _save_paused(self) -> None:
+        """Keep the trees paused now in `watchdog.json`, so that a daemon that did not stop
+        cleanly lets them run again."""
+        if self._paused_file is None or self.watchdog is None:
+            return
+        trees = [
+            tree.to_dict()
+            for p in self.watchdog.paused_trees()
+            if p.resumed is None
+            for tree in self._trees.get(p.key, [])
+        ]
+        with contextlib.suppress(OSError):
+            tmp = self._paused_file.with_suffix(".tmp")
+            boot = self.sessions.host.boot_id()
+            tmp.write_text(json.dumps({"boot": boot, "paused": trees}))
+            tmp.replace(self._paused_file)
+
+    def _let_recorded_run(self) -> None:
+        """Let every tree `watchdog.json` names run again: a pause is never taken over, since a
+        stale stop would hold work for ever. A file from an earlier boot names processes that
+        are gone, and pids that may be others' now: it is only removed."""
+        if self._paused_file is None:
+            return
+        try:
+            saved = json.loads(self._paused_file.read_text())
+            trees = saved.get("paused", [])
+            boot = saved.get("boot")
+        except (OSError, ValueError, AttributeError):
+            return
+        if boot != self.sessions.host.boot_id():
+            trees = []
+        for tree in trees:
+            with contextlib.suppress(TypeError, ValueError):
+                self.sessions.host.resume(host.Tree.from_dict(tree))
+        with contextlib.suppress(OSError):
+            self._paused_file.unlink()
+
+    def _thaw_left_frozen(self) -> None:
+        """Thaw every lease scope still frozen as this daemon starts, saying so on standard
+        error: nothing is paused yet, so it is left over from a daemon that died."""
+        for tree in self.sessions.host.frozen_scopes():
+            done = self.sessions.host.resume(tree)
+            if done.how != "none":
+                sys.stderr.write(f"leasehold: thawed {tree.group}, left frozen\n")
+
+    def let_paused_run(self) -> None:
+        """Let every tree the watchdog paused run again: the daemon is stopping."""
+        if self.watchdog is None:
+            return
+        with self._watchdog_lock:
+            for p in self.watchdog.paused_trees():
+                if p.resumed is None:
+                    for tree in self._trees.get(p.key, []):
+                        self.sessions.host.resume(tree)
+        with contextlib.suppress(OSError):
+            if self._paused_file is not None:
+                self._paused_file.unlink()
 
     def _watchdog_status(self) -> dict:
         """The status object's `watchdog`: the watchdog's decision, how it reads memory, and
@@ -863,6 +1347,10 @@ class MachineAgent:
             if in_line and not known:
                 reason = "its place in line was given back while it waited"
                 return {"status": "refused", "lease_id": lease_id, "reason": reason}
+            ticket = (user, item.session, req.rule)
+            if req.rule is not None and self._ticket(ticket):
+                with self._watchdog_lock:
+                    self._alone_items[(SCOPE, lease_id)] = ticket
             limits = self.config.pool_set().pools[pool]
             rate = limits.create_rate_per_min
             if not known and rate is not None and self.ledger.recent_submits(user, pool) >= rate:
@@ -890,6 +1378,7 @@ class MachineAgent:
                 )
                 if self._revoke("non-lend work waiting"):
                     self._notify()
+            self._note_alone()
             self._record()
         if isinstance(outcome, Admitted):
             lease = self._lease(lease_id)
@@ -1011,6 +1500,13 @@ class MachineAgent:
                 "target_jobs": self.config.jobs.for_weight(renewal.target or renewal.weight),
                 "elastic": renewal.elastic,
             }
+        if renewal.status == "ok":
+            # Under the watchdog's lock: a renewal sent as its command is killed waits for the
+            # stop to be recorded, and so hears of it.
+            with self._watchdog_lock:
+                answer["paused"] = lease_id in self._paused_ids()
+                answer["paused_for"] = self._paused_for(lease_id)
+                answer["stopped"] = self._stops.get(lease_id)
         return answer
 
     def resize(self, lease_id: str, weight: int, *, user: str | None) -> dict:
@@ -1070,8 +1566,16 @@ class MachineAgent:
         held (`Ledger.record_outcome`), when the lease is still held."""
         with self._lock:
             self._check_owner(lease_id, user)
+            with self._watchdog_lock:
+                counts = self._pauses.pop(lease_id, None)
+                self._stops.pop(lease_id, None)
+                self._alone_leases.discard(lease_id)
             if outcome is not None:
-                self.ledger.record_outcome((SCOPE, lease_id), outcome.model_dump())
+                paused = {}
+                if self.watchdog is not None:
+                    times, seconds = (counts or [0, 0.0])[:2]
+                    paused = {"pauses": times, "paused_s": round(seconds, 1)}
+                self.ledger.record_outcome((SCOPE, lease_id), outcome.model_dump() | paused)
                 self._forget_learned(outcome.rule, outcome.repo)
             self._released.add((SCOPE, lease_id))
             self.ledger.release((SCOPE, lease_id))

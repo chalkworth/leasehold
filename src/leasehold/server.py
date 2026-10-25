@@ -3,9 +3,12 @@
 The socket (mode `socket_mode`, group `socket_group`) is the only listener: whoever may open it
 may ask for leases, and the peer's uid (`SO_PEERCRED`) names the user a lease is charged to.
 A tick thread runs `MachineAgent.tick` every `tick_s`; with the watchdog on, a thread reads the
-machine's memory as often as the watchdog asks (`MachineAgent.watch_memory`). SIGTERM or SIGINT
-stops them cleanly: the listener closes, the socket file goes, and the leases stay in the ledger
-until their TTLs, so a restarted daemon picks them up again.
+machine's memory as often as the watchdog asks (`MachineAgent.watch_memory`), and acts on it.
+With the watchdog acting, `serve` keeps the daemon's memory in RAM and raises its priority where
+this user may (`host.stay_resident`), so that it still runs when memory is short. SIGTERM or
+SIGINT stops them cleanly: the listener closes, the socket file goes, whatever the watchdog
+paused runs again, and the leases stay in the ledger until their TTLs, so a restarted daemon
+picks them up again.
 
 A request body is read only as far as a well-formed `Content-Length` of at most `_MAX_BODY`
 says: a missing one is no body, a malformed or negative one 400 `bad_request`, a larger one 413
@@ -214,6 +217,7 @@ class Daemon:
             self._server = None
         for t in self._threads:
             t.join(timeout=5)
+        self.agent.let_paused_run()
         with contextlib.suppress(FileNotFoundError):
             self.path.unlink()
 
@@ -221,6 +225,11 @@ class Daemon:
 def serve(config: MachineConfig, *, verbose: bool = False) -> int:
     """Serve `config` (resolved for its mode, `machine.resolve`) until SIGTERM or SIGINT."""
     daemon = Daemon(config, verbose=verbose)
+    watchdog = daemon.agent.watchdog
+    if watchdog is not None and watchdog.acting:
+        done = daemon.agent.sessions.host.stay_resident()
+        if done.reason:
+            sys.stderr.write(f"leasehold: watchdog: {done.reason}\n")
     daemon.start()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: daemon.stopping.set())

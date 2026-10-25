@@ -9,6 +9,11 @@ before the command started (`leasehold.host.Mark`): `pre` writes it once the lea
 lease covers that program run under that agent: `covering` finds it for a PATH shim, which
 then runs inside that lease rather than taking a second one for the same command, sized to it
 (`sizing`, `weight`).
+
+The daemon leaves notices there too, for an agent session its hooks registered: one file per
+session (`notice.<session>`), a line per notice, appended (`notice`). The session's next hook
+takes them (`notices`) and passes them on to the agent. The pre-filter tests for the file, so
+a hook starts Python for them only while one is pending.
 """
 
 from __future__ import annotations
@@ -190,3 +195,37 @@ def under_agent(env: Mapping[str, str], start: int, proc: Path = Path("/proc")) 
     """Whether `start` runs under an agent whose hook holds a lease now, for any program: a note
     whose agent is `start` or above it and whose renewer still lives."""
     return bool(_live(env, start, proc))
+
+
+#: A session's notices file in the notes directory, by session.
+NOTICE_PREFIX = "notice."
+
+
+def notice(directory: Path, session: str, text: str) -> bool:
+    """Leave `text` (one line) for the agent of `session`. Whether it was left."""
+    line = " ".join(text.split())
+    try:
+        with open(directory / f"{NOTICE_PREFIX}{session}", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        return False
+    return True
+
+
+def notices(directory: Path | None, session: str | None) -> list[str]:
+    """Take the notices left for `session`, oldest first: each is passed on once."""
+    if directory is None or not session:
+        return []
+    found = directory / f"{NOTICE_PREFIX}{session}"
+    taken = directory / f".taken.{session}.{os.getpid()}"
+    try:
+        found.rename(taken)
+    except OSError:
+        return []
+    try:
+        return [line for line in taken.read_text(encoding="utf-8").splitlines() if line]
+    except OSError:
+        return []
+    finally:
+        with contextlib.suppress(OSError):
+            taken.unlink()

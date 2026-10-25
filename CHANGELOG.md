@@ -191,26 +191,83 @@ here.
   `session_ended` (with a `reason`) say when one starts and ends.
 - `host.named(names)` lists the user's processes by program name, and a `Proc` has `anon` and
   `swap`. A polled `Footprint` has `anon` and `swap`, summed over its processes.
-- The watchdog, in watch mode. Your own daemon judges how short of memory the machine is and
-  says what it would do. `critical`: under 2 GiB available once swap is nearly full (or there
-  is none), or every task stalled on memory over 20% of the last 2 seconds. `warn`: under
-  3 GiB available once swap is nearly full. At `warn` it would hold new heavy work; at
-  `critical` it would pause a session tree: a runaway first (judged by the tree's own growth,
-  or more than twice what its leases declared or learned), then a tree over a quarter of
-  memory, then the newest. It holds, pauses and stops nothing yet. Trees of sessions found by
-  name, the agent process, trees of only leasehold's own processes, small trees, trees that
-  started with their agent and trees matching a protect pattern are never chosen. See "The
+- The watchdog. Your own daemon judges how short of memory the machine is. `critical`: under
+  2 GiB available once swap is nearly full (or there is none), or every task stalled on memory
+  over 20% of the last 2 seconds. `warn`: under 3 GiB available once swap is nearly full. With
+  `[watchdog] mode = "on"`, at `act_at` (`critical` by default) it holds new heavy work and
+  pauses a session's tree. A runaway goes first: one growing over two 5 second windows, and
+  either over twice what its leases declared or learned or growing by half the machine's fall
+  in available memory. Then comes a tree whose stop would free a quarter of memory, then the
+  newest. It picks only a tree whose stop would help: a runaway, or one that would return a
+  quarter of what available memory lacks of `hold_below`, measured from each process's
+  `Pss_Anon`. It pauses the next tree after 2 seconds, and only while available memory keeps
+  falling. Once the level has been `critical` for 5 seconds it kills one tree paused for at
+  least 5 seconds, a runaway first, with SIGKILL. A paused runaway is killed 5 seconds after its
+  pause while the level is `warn` or worse, and any tree paused over `max_pause_s` is killed
+  whatever else holds. When no tree paused or in line would help, the shortage is outside the
+  sessions: the paused trees run again, new heavy work waits while the level is at `act_at`,
+  and the agents are told. Once the level has been `ok` for 10 seconds the oldest paused tree
+  runs again, and new heavy work waits until it settles (flat for 30 seconds with room) or
+  `max_pause_s` has passed. `hold`, the shims and the shells they run under are never paused
+  or stopped; a program that runs a shim is. It never chooses trees of sessions found by name,
+  the agent process, trees of only leasehold's own processes, small trees, trees that started
+  with their agent, trees with a coding agent in them, or trees whose first process (or what
+  its tool shells run) matches a protect pattern. The built-in patterns cover MCP servers by
+  program, package or module name, and browsers and editors that are not headless. Where the
+  machine's memory cannot be read (macOS for now) it never acts. `mode = "watch"` only says
+  what it would do. A simulation and real runs in a 16 GiB VM set the defaults. See "The
   watchdog" in docs/reference.md.
-- `[watchdog]` keys: `mode` (`"watch"`, or `"off"`), `act_at` (`"critical"`, or `"warn"`),
-  `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`, or a size),
-  `choose_discovered` (false) and `protect` (regular expressions). `critical_below` at or
-  above `hold_below` is a config error.
+- `[watchdog]` keys: `mode` (`"watch"`, `"on"` or `"off"`), `act_at` (`"critical"`, or
+  `"warn"`), `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`, or a
+  size), `max_pause_s` (900, at least 10), `choose_discovered` (false) and `protect` (regular
+  expressions). `critical_below` at or above `hold_below` is a config error. `init` writes
+  `mode = "on"`; a config without the table gets `"watch"`.
 - The status object's `watchdog` has `mode`, `act_at`, `level`, `reason`, `available_bytes`,
-  `swap_free_bytes`, `available_counts`, `stall_recent`, `limits`, `how`, `candidates`,
-  `passed_over`, `victim` and `would`. Where the machine's memory cannot be read (macOS for
-  now), `level` is null and `reason` says the watchdog cannot see memory there.
-- Events `held`, `paused` and `runaway` from the watchdog, each with `would` (true while it
-  only decides).
+  `swap_free_bytes`, `available_counts`, `stall_recent`, `limits` (with `max_pause_s`), `how`,
+  `candidates`, `passed_over`, `victim`, `would`, `held` (why new heavy work waits), `outside`
+  (true while no tree in a session would help), `paused` and `stopped`. A tree in it has
+  `frees_bytes`. Where the machine's memory cannot be read, `level` is null and `reason` says
+  the watchdog cannot see memory there.
+- Events `held`, `paused`, `resumed`, `stopped` and `runaway` from the watchdog, each with
+  `would` (true while it only decides). `top` shows `paused`, `resumed` and `stopped`.
+- `POST /v1/renew` answers `paused` (whether the watchdog has paused the lease's command),
+  `paused_for` (`newest`, `runaway` or `large`) and `stopped` (null, or `why`, `runaway`,
+  `rerun`, `alone`, `test`, `paused_s` and `available_bytes` once it killed it). A command
+  stopped while it ran alone gets `rerun: false`. `hold`'s pause line says why. The daemon keeps a paused command's leases alive. An outcome records `pauses`
+  and `paused_s`.
+- A memory verdict of `kind` `leasehold` when the watchdog stopped the command, with a
+  `watchdog` field (`why`, `runaway`, `rerun`, `alone`, `test`, `paused_s`). Its line says
+  leasehold's watchdog stopped the command to keep the machine responsive, and that this is not
+  a test failure for a test run, or not a failure of the command otherwise. The command keeps
+  its own exit code. `Verdict.watchdog`, `verdict.test_like`, `verdict.stopped_note` and
+  `verdict.stopped_todo` are new. The Claude Code hook's `post` returns this verdict for a
+  command it leased.
+- After the watchdog stops a command that was not a runaway, the next request from that session
+  under the same `[commands]` rule runs alone: it waits until no other lease is held, and its
+  `blocked` says so. `hold` and the PATH shims run the command again once, on their own, under a
+  built-in rule, except for `cargo`, `bazel`, `docker`, `podman`, `npm`, `pnpm` and `yarn`
+  (`shell.Rule.rerun`, `shell.NO_RERUN`).
+- The daemon leaves the agent one line when the watchdog pauses, lets run or stops its command,
+  for a session its hooks registered. A stop the hook's `post` or `hold` already reports gets
+  no notice, and a run alone is forgotten after 30 minutes. The Claude Code hook passes it on at the next Bash call,
+  as `additionalContext` and as a `systemMessage`; `prefilter.sh` hands over to Python only
+  while a notice waits. `hooknotes.notice` and `hooknotes.notices` are new.
+- `watchdog.json` beside the ledger keeps the trees the watchdog paused, with each process and
+  its start time. A daemon that stops lets them run, and one that starts lets any it finds
+  there run, even when a tree's first process has ended.   `host.Tree` has `spare` (processes
+  pause, resume and kill leave alone) and `members` (the processes recorded at a pause). The
+  file names the boot it was written in (`host.boot_id`), and a daemon only removes one from an
+  earlier boot. The host's `freeable(proc)` says what stopping a process would free.
+- The user's daemon, as it starts, thaws every lease scope it finds frozen (one a daemon that
+  died left paused, or the memory net of a development build), and says so on standard error.
+  The host's `frozen_scopes()` lists them.
+- With the watchdog on, `leasehold serve` locks the daemon's memory in RAM (`mlockall`) and
+  raises its priority where the user may (`host.stay_resident`). On Linux it locks with
+  `MCL_ONFAULT`, and threads started after it get a 256 KiB stack. `leasehold doctor` has a
+  `watchdog` check that warns when the locked-memory limit is too low.
+- `host.Pressure` has `swap_kind` (`zram`, `disk`, `mixed` or null) and `zram_ratio`, the
+  compression ratio zram reports. `host.Proc` has `group` and `lease`. The host's
+  `kill(tree, 0)` sends SIGKILL at once.
 - `host.Proc` has `started` (when the process started, in wall-clock seconds), the host has
   `command_line(proc)`, and `host.Pressure` has `stall_full_recent`, the share of the last
   `host.STALL_WINDOW_S` seconds every task stalled, from the PSI `full` total.
@@ -233,6 +290,10 @@ here.
     and a request it holds says `the watchdog holds new work: <why>`.
   - `leasehold doctor` no longer checks swap and the kernel for the net.
   - The benchmark no longer takes `net=park` or `overflow=SIZE`.
+- A command's group stopped by SIGSTOP no longer stops `hold` with it: `hold` follows only the
+  stops a terminal asks for (SIGTSTP, SIGTTIN, SIGTTOU), so a pause by the watchdog leaves
+  `hold` running. When its command stops for the terminal, `hold` stops itself with SIGTSTP,
+  so Ctrl-Z works through a `hold` that runs another.
 - `leasehold.contain` now only names scopes and slices. Making scopes (`probe`, `spawn`,
   `adopt`, `scope_argv`, `update_scope`, `neutral_scope`, `stop_slice`) moved behind
   `leasehold.host`, and `contain.Containment` is gone: ask `host.current().support("start")`.
@@ -282,6 +343,9 @@ here.
 
 ### Fixed
 
+- A SIGTERM, SIGINT or SIGHUP that reached `hold` just as its command started now reaches the
+  command too. Before, `hold` stopped the command and exited 128 plus the signal, even when
+  the command would have handled it.
 - A directory's empty or stray `.git` no longer counts as a repository. Outcomes, and the
   memory learned from them, are filed under the work tree git would find: the nearest
   directory up whose `.git` is a repository (it holds a `HEAD`) or a `gitdir:` file. Before,

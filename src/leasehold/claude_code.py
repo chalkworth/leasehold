@@ -108,6 +108,8 @@ class Reply:
 
     output: dict | None = None
     log: list[str] = field(default_factory=list)
+    #: Whether `post` found that the watchdog stopped the command.
+    stopped: bool = False
 
     def text(self) -> str:
         return json.dumps(self.output) if self.output is not None else ""
@@ -154,6 +156,34 @@ def max_hold(event: Mapping) -> float:
 def _message(text: str) -> dict:
     """A line the user sees in the transcript; the agent does not."""
     return {"systemMessage": f"leasehold: {text}"}
+
+
+def tell(event: Mapping, env: Mapping[str, str], reply: Reply, stage: str) -> None:
+    """Add what the daemon left for this session (`hooknotes.notices`) to `reply`: the agent
+    reads it as context, and the user sees it in the transcript."""
+    said = hooknotes.notices(hooknotes.state_dir(env, create=False), session(event))
+    if reply.stopped:
+        # The command was stopped, so a pause it was told of before is no longer true.
+        paused = [line for line in said if "has been paused" in line]
+        command = (event.get("tool_input") or {}).get("command")
+        needle = " ".join(command.split())[:120] if isinstance(command, str) else ""
+        matches = [line for line in paused if needle and needle in line]
+        stale = set(matches or paused)
+        said = [line for line in said if line not in stale]
+    if not said:
+        return
+    text = " ".join(said)
+    out = reply.output or {}
+    message = " ".join(x for x in (out.get("systemMessage"), text) if x)
+    specific = dict(out.get("hookSpecificOutput") or {})
+    specific.setdefault(
+        "hookEventName",
+        "PreToolUse" if stage == "pre" else event.get("hook_event_name") or "PostToolUse",
+    )
+    specific["additionalContext"] = " ".join(
+        x for x in (specific.get("additionalContext"), text) if x
+    )
+    reply.output = out | {"systemMessage": message, "hookSpecificOutput": specific}
 
 
 def _threads(
@@ -448,11 +478,23 @@ def post(event: Mapping, client: Client, *, env: Mapping[str, str]) -> Reply:
     noted = hooknotes.noted(directory, lid)
     hooknotes.stop(directory, lid)
     collected = attach.collect(directory, lid)
+    stopped = None
+    with contextlib.suppress(Unavailable, ApiError):
+        # Whether the daemon's watchdog stopped it: that verdict reaches the agent here, once.
+        renewal = client.renew(lid)
+        stopped = renewal.get("stopped") if renewal.get("status") == "ok" else None
     with contextlib.suppress(Unavailable, ApiError):
         # One never taken, or already gone, is no error.
         client.release(lid, _outcome(event, collected))
-    found = None if noted is None else _memory(event, *noted, collected=collected, env=env)
     program = noted[0] if noted else "the command"
+    reply.stopped = stopped is not None
+    if stopped is not None:
+        found = verdict.describe(
+            host.Ending("leasehold", "certain", how="exact"), program,
+            status=exit_code(event) or 137, watchdog=stopped,
+        )  # fmt: skip
+    else:
+        found = None if noted is None else _memory(event, *noted, collected=collected, env=env)
     said = []
     if collected is not None and collected.attached is None:
         reply.log.append(f"{program} was not contained: {collected.reason}")
