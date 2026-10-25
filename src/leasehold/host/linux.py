@@ -36,7 +36,9 @@ and those above it (`leasehold.cgroup`).
 
 **Sessions.** A `leasehold run` session's processes are its slice's. Any other session's are the
 agent's descendants, and the user's processes whose environment names the session
-(`LEASEHOLD_SESSION`), which finds what was started and then left to run on its own.
+(`LEASEHOLD_SESSION`), which finds what was started and then left to run on its own. An agent is
+found by name (`named`) among the user's processes, by the kernel's name for it (`comm`). One
+scan of the user's processes' environments serves every session asked about within a second.
 """
 
 from __future__ import annotations
@@ -46,11 +48,11 @@ import errno
 import os
 import signal
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
-from leasehold import cgroup, proctable
+from leasehold import cgroup
 from leasehold.contain import lease_slice, root_slice_cgroup
 from leasehold.facts import meminfo
 from leasehold.host import (
@@ -74,6 +76,8 @@ from leasehold.host.posix import Posix
 
 #: The variable that names the session a process belongs to.
 SESSION_ENV = b"LEASEHOLD_SESSION"
+#: How long one scan of the user's processes' environments serves `session_processes`.
+TAGS_S = 1.0
 #: Errors that say a cgroup has gone, which no one needs to hear about.
 _GONE = (errno.ENOENT, errno.ENODEV, errno.ENOTDIR)
 
@@ -142,6 +146,8 @@ class Linux(Posix):
         self._no_scope: str | None = None
         #: (when, pages swapped in) at the last `pressure`.
         self._swapins: tuple[float, int] | None = None
+        #: (when, pids by session) at the last scan of the user's processes' environments.
+        self._tags: tuple[float, dict[str, list[int]]] | None = None
 
     # --- what works here ---------------------------------------------------------------------
 
@@ -215,18 +221,24 @@ class Linux(Posix):
         status = _read(self._proc / str(pid) / "status") or ""
         if stat is None or stat[0] == "Z":
             return None
-        kib = name = None
+        name = None
+        kib: dict[str, int] = {}
         for line in status.splitlines():
             key, _, value = line.partition(":")
             if key == "Name":
                 name = value.strip()
-            elif key in ("VmRSS", "VmSwap") and value.split() and value.split()[0].isdigit():
-                kib = (kib or 0) + int(value.split()[0])
-        if name is None or kib is None:
+            elif key in ("VmRSS", "VmSwap", "RssAnon") and value.split()[:1] != []:
+                number = value.split()[0]
+                if number.isdigit():
+                    kib[key] = int(number)
+        if name is None or ("VmRSS" not in kib and "VmSwap" not in kib):
             return None
+        held = (kib.get("VmRSS", 0) + kib.get("VmSwap", 0)) << 10
+        anon, swap = kib.get("RssAnon"), kib.get("VmSwap")
         return Proc(
-            pid, stat[2], name, kib << 10, stat[1], self._fence(stat[1]), role=role, basis=basis
-        )
+            pid, stat[2], name, held, stat[1], self._fence(stat[1]), role=role, basis=basis,
+            anon=None if anon is None else anon << 10, swap=None if swap is None else swap << 10,
+        )  # fmt: skip
 
     def _children(self, pid: int) -> list[int]:
         out = []
@@ -275,7 +287,16 @@ class Linux(Posix):
             if not found:
                 return Footprint(reason="no process of the tree is left")
             total = sum(p.bytes or 0 for p in found)
-            return Footprint("polled", current=total, peak_low=total, largest=found[0])
+            anon = [p.anon for p in found if p.anon is not None]
+            swap = [p.swap for p in found if p.swap is not None]
+            return Footprint(
+                "polled",
+                current=total,
+                peak_low=total,
+                anon=sum(anon) if anon else None,
+                swap=sum(swap) if swap else None,
+                largest=found[0],
+            )
         base = self._cgroup_root / tree.group.lstrip("/")
         current = _number(_read(base / "memory.current"))
         stat = _fields(_read(base / "memory.stat"))
@@ -344,21 +365,54 @@ class Linux(Posix):
             for pid in [agent, *self._descendants(agent)]:
                 if (got := self._of_session(pid, session, "lineage")) is not None:
                     found[pid] = got
+        for pid in self._tagged().get(session.id, ()):
+            if pid not in found and (got := self._of_session(pid, session, "env")) is not None:
+                found[pid] = got
+        return list(found.values())
+
+    def _own(self) -> list[int]:
+        """The pids of the user's processes now."""
         uid = os.getuid()
-        tag = SESSION_ENV + b"=" + session.id.encode()
-        for pid, row in proctable.scan(self._proc).items():
-            if pid in found or row.uid != uid:
-                continue
+        out = []
+        with contextlib.suppress(OSError):
+            for name in os.listdir(self._proc):
+                if name.isdigit():
+                    with contextlib.suppress(OSError):
+                        if os.stat(self._proc / name).st_uid == uid:
+                            out.append(int(name))
+        return out
+
+    def _tagged(self) -> dict[str, list[int]]:
+        """The user's processes by the session their environment names (`LEASEHOLD_SESSION`):
+        read once for every session asked about within `TAGS_S`."""
+        now = time.monotonic()
+        if self._tags is not None and now - self._tags[0] < TAGS_S:
+            return self._tags[1]
+        found: dict[str, list[int]] = {}
+        prefix = SESSION_ENV + b"="
+        for pid in self._own():
             try:
                 environ = (self._proc / str(pid) / "environ").read_bytes()
             except OSError:
                 continue
-            got = None
-            if tag in environ.split(b"\0"):
-                got = self._of_session(pid, session, "env")
-            if got is not None:
-                found[pid] = got
-        return list(found.values())
+            for item in environ.split(b"\0"):
+                if item.startswith(prefix):
+                    found.setdefault(item[len(prefix) :].decode(errors="replace"), []).append(pid)
+                    break
+        self._tags = (now, found)
+        return found
+
+    def named(self, names: Collection[str]) -> list[Proc]:
+        """The user's live processes whose program is one of `names`, by the kernel's name for
+        it (`comm`: at most 15 characters, a script's own name for a script)."""
+        wanted = set(names)
+        found = []
+        for pid in self._own() if wanted else []:
+            comm = _read(self._proc / str(pid) / "comm")
+            named = comm is not None and comm.rstrip("\n") in wanted
+            if named and (got := self._proc_of(pid)) is not None:
+                found.append(got)
+        return found
 
     def _of_session(self, pid: int, session: SessionRef, basis: str) -> Proc | None:
         if pid == session.agent_pid:

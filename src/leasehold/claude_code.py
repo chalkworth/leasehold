@@ -10,8 +10,11 @@ killer was ending processes (`leasehold.host`, from counters `pre` noted), `post
 the agent, as context it reads, that the command was most likely killed for memory and is not
 a test failure, and tells the person the same in the transcript (`leasehold.verdict`).
 
-`SessionStart` runs `... start`, which adds to the session's `CLAUDE_ENV_FILE` the lines that
-put a leased command's shell in its lease's scope as it starts (`leasehold.attach`). Claude Code
+`SessionStart` runs `... start`, which registers the session with the daemon, so that it
+watches everything the session's Claude Code process starts (`leasehold.sessions`), and adds to
+the session's `CLAUDE_ENV_FILE` the line that names the session (`LEASEHOLD_SESSION`) to every
+command, and the lines that put a leased command's shell in its lease's scope as it starts
+(`leasehold.attach`). `SessionEnd` runs `... end`, which unregisters it. Claude Code
 runs that file in each Bash command's shell, before the command. So a leased command is
 contained, measured and, with a `memory_max`, capped, as under `hold`. When its scope counted
 an OOM kill, `post` says so for certain, a worker's kill that made pytest exit 1 included.
@@ -74,6 +77,7 @@ from leasehold import (
     handoff,
     hooknotes,
     host,
+    joining,
     measure,
     programs,
     shell,
@@ -363,27 +367,63 @@ def _uncapped(program: str, cap: int, why: str | None) -> str:
     return f"leasehold: no memory cap of {size(cap)} on {program}: {why}"
 
 
-def start(event: Mapping, env: Mapping[str, str], *, python: str = sys.executable) -> Reply:
-    """At a session's start: add the lines that attach each leased command's shell to its
-    lease's scope (`leasehold.attach.env_lines`) to the session's `CLAUDE_ENV_FILE`, once.
-    Where nothing can be attached here, add none, and say why on stderr."""
+def start(
+    event: Mapping,
+    env: Mapping[str, str],
+    *,
+    python: str = sys.executable,
+    client: Client | None = None,
+    agent_pid: int | None = None,
+) -> Reply:
+    """At a session's start: register it with the daemon `client` reaches, its agent the
+    Claude Code process `agent_pid` (`leasehold.joining`; none without that process), and add
+    to the session's `CLAUDE_ENV_FILE`, once each, the line that names the session to its
+    commands (`LEASEHOLD_SESSION`) and the lines that attach each leased command's shell to
+    its lease's scope (`leasehold.attach.env_lines`). Where nothing can be attached here, add
+    none of those, and say why on stderr."""
     reply = Reply()
+    sid = session(event)
+    if client is not None and sid is not None:
+        why = "no Claude Code process found above the hook"
+        if agent_pid is not None:
+            why = joining.join(client, sid, pid=agent_pid, source="hook", agent="claude")
+        if why is not None:
+            reply.log.append(f"the session is not watched: {why}")
     target = env.get("CLAUDE_ENV_FILE")
     if not target:
         return reply
-    lines, why = attach.env_lines(env, session(event), python)
-    if not lines:
+    lines = [] if sid is None else [f"export {joining.ENV_SESSION}={sid}"]
+    attached, why = attach.env_lines(env, sid, python)
+    if not attached:
         reply.log.append(f"commands are leased, not contained: {why}")
-        return reply
+    lines += attached
     try:
         path = Path(target)
         have = path.read_text() if path.exists() else ""
-        if lines[-1] not in have.splitlines():
+        missing = [line for line in lines if line not in have.splitlines()]
+        if missing:
             with path.open("a") as out:
                 out.write("" if not have or have.endswith("\n") else "\n")
-                out.write("\n".join(lines) + "\n")
+                out.write("\n".join(missing) + "\n")
     except OSError as exc:
-        reply.log.append(f"cannot add the attach lines to {target}: {exc}")
+        reply.log.append(f"cannot add leasehold's lines to {target}: {exc}")
+    return reply
+
+
+def end(event: Mapping, client: Client) -> Reply:
+    """At a session's end: unregister it. A session the daemon does not watch (it never
+    registered, or the daemon restarted since) is no error."""
+    reply = Reply()
+    sid = session(event)
+    if sid is None:
+        return reply
+    try:
+        client.unregister_session(sid)
+    except ApiError as exc:
+        if exc.payload.get("error") not in ("unknown_session", "not_found"):
+            reply.log.append(f"cannot unregister session {sid}: {exc}")
+    except Unavailable:
+        pass
     return reply
 
 

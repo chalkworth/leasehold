@@ -27,7 +27,7 @@ layers =
     template
     api
     agent
-    status | lend | guard | events | outcomes | net
+    status | lend | guard | events | outcomes | net | sessions
     machine
     quota | observe | commands
     shell
@@ -56,6 +56,7 @@ source_modules =
     leasehold.claude_code
     leasehold.shims
     leasehold.mcp_server
+    leasehold.joining
 forbidden_modules =
     leasehold.agent
     leasehold.api

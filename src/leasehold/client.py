@@ -127,6 +127,27 @@ class Client:
         gone, or the daemon (one from before elastic leases) has no such route."""
         return self.request("POST", "/v1/elastic", {"lease_id": lease_id})
 
+    def register_session(
+        self,
+        session: str,
+        *,
+        pid: int | None = None,
+        agent: str | None = None,
+        slice_: str | None = None,
+        source: str = "api",
+    ) -> dict:
+        """Have the daemon watch `session`, whose agent is process `pid` (`POST /v1/sessions`);
+        fields that are None are left out. An `ApiError` with status 404 means a daemon from
+        before sessions."""
+        body = {"session": session, "pid": pid, "agent": agent, "slice": slice_, "source": source}
+        body = {k: v for k, v in body.items() if v is not None}
+        return self.request("POST", "/v1/sessions", body)
+
+    def unregister_session(self, session: str) -> dict:
+        """Stop the daemon watching `session` (`DELETE /v1/sessions/<id>`). An `ApiError` with
+        status 404 and error `unknown_session` means no session has that id."""
+        return self.request("DELETE", f"/v1/sessions/{quote(session, safe='')}")
+
     def lend(self, open: bool) -> dict:
         return self.request("POST", "/v1/lend", {"open": open})
 

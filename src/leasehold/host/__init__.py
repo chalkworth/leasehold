@@ -12,7 +12,8 @@ has one (a systemd scope on Linux). The operations:
   weight, and `release` takes a lease's limits off a tree that outlives its lease.
 * `members(tree)` are its live processes and `footprint(tree)` what it costs the machine in
   memory; `pressure()` is one reading of the machine's memory; `session_processes(session)` is
-  everything an agent session started.
+  everything an agent session started, and `named(names)` the user's processes whose program is
+  one of `names` (how agent sessions nobody registered are found).
 * `pause(tree)` stops every process in it from running, and `resume(tree)` lets them run again.
   A tree's `keeper` (the process that started it and waits for it) is never paused. `kill(tree,
   grace_s)` sends SIGTERM, and SIGCONT so that a paused member sees it, then SIGKILL to what is
@@ -51,6 +52,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Collection
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Protocol
@@ -92,8 +94,9 @@ class Support:
 @dataclass(frozen=True)
 class Proc:
     """One live process. `fence` is the platform's token for it (None: the platform has none),
-    `name` its program, `bytes` its resident and swapped memory (None: not read), `parent` its
-    parent's pid and `parent_fence` that parent's token as read now. In `session_processes`,
+    `name` its program, `bytes` its resident and swapped memory (None: not read), `anon` the
+    anonymous memory it has resident and `swap` what it has in swap (None: not read), `parent`
+    its parent's pid and `parent_fence` that parent's token as read now. In `session_processes`,
     `role` is `agent`, `tool`, `lease` or `orphan`, and `basis` how it was found to belong to
     the session: `slice`, `lineage` or `env`."""
 
@@ -105,6 +108,8 @@ class Proc:
     parent_fence: str | None = None
     role: str | None = None
     basis: str | None = None
+    anon: int | None = None
+    swap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -171,11 +176,12 @@ class Footprint:
     cache the kernel can reclaim) plus what it has in swap. The most it held is a range:
     `peak_low` is the most seen by reading (a lower bound), and `peak_high` the most the
     platform says it held (`memory.peak` on Linux, equal to `peak_low`; None: not known).
-    `anon` is its anonymous memory, `swap` the most swap it used, and `largest` its largest
-    process. `oom_kills` and `high_events` are what its kernel group counted (OOM kills, and
-    passes over its soft limit) and `cpu_usec` the CPU time it used. `how` is `exact` when the
-    kernel counted it for the whole tree, `polled` for a sum of its processes' readings, and
-    `none` with a `reason` when nothing could be read. Each value is None when not read."""
+    `anon` is its anonymous memory, `swap` the most swap it used (for a `polled` tree, the swap
+    its processes hold now), and `largest` its largest process. `oom_kills` and `high_events`
+    are what its kernel group counted (OOM kills, and passes over its soft limit) and
+    `cpu_usec` the CPU time it used. `how` is `exact` when the kernel counted it for the whole
+    tree, `polled` for a sum of its processes' readings, and `none` with a `reason` when
+    nothing could be read. Each value is None when not read."""
 
     how: str = "none"
     reason: str | None = None
@@ -320,6 +326,8 @@ class Host(Protocol):
     def memory_max(self, pid: int) -> int | None: ...
 
     def session_processes(self, session: SessionRef) -> list[Proc]: ...
+
+    def named(self, names: Collection[str]) -> list[Proc]: ...
 
     def wakeup_fd(self) -> int | None: ...
 

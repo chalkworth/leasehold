@@ -98,6 +98,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._answer("POST")
 
+    def do_DELETE(self) -> None:
+        self._answer("DELETE")
+
     def address_string(self) -> str:
         return "unix"
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # leasehold's Claude Code hooks, without starting Python for a Bash command that cannot need
-# a lease. Usage: prefilter.sh pre|post|start, with the hook's event JSON on stdin.
+# a lease. Usage: prefilter.sh pre|post|start|end, with the hook's event JSON on stdin.
 #
 # pre: exits 0 at once when a lease is held already (LEASEHOLD_LEASE_ID), or when no word of
 # the command is in the word list `leasehold commands --programs --write` writes (and the
@@ -17,8 +17,12 @@
 # CLAUDE_ENV_FILE as LEASEHOLD_TOOL_TIMEOUT_S: BASH_DEFAULT_TIMEOUT_MS when set, else 120. A
 # PATH shim inside a Bash command then waits in line at most half of it, so the agent hears
 # why its command did not run before the tool's timeout ends it. A value already set is kept.
-# Then the Python hook adds the line that puts a leased command's shell in its lease's scope
-# before the command runs. For a command with no lease, that line costs one directory test.
+# Then the Python hook registers the session with the daemon, so that it watches what the
+# session starts, and adds to the env file the session's LEASEHOLD_SESSION and the line that
+# puts a leased command's shell in its lease's scope before the command runs. For a command
+# with no lease, that line costs one directory test.
+#
+# end (SessionEnd): the Python hook unregisters the session.
 #
 # Either way, without `leasehold` on PATH it does nothing.
 

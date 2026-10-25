@@ -24,7 +24,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from leasehold.host import (
     OPERATIONS,
@@ -135,6 +135,11 @@ class Posix:
         return Pressure(reason=self.support("pressure").reason)
 
     def session_processes(self, session: SessionRef) -> list[Proc]:
+        return []
+
+    def named(self, names: Collection[str]) -> list[Proc]:
+        """The user's live processes whose program is one of `names`: none can be listed here
+        (`support("session_processes")` says why)."""
         return []
 
     def wakeup_fd(self) -> int | None:

@@ -741,6 +741,7 @@ an example machine. An unknown key is an error.
 | `[memory_net]` | `mode = "off"` | see [Memory net](#memory-net): `mode` (`"off"` or `"park"`), `overflow` (`"1g"`, or `"max"`), `write_per_day` (`"16g"`) |
 | `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again; at least 1 |
 | `[elastic] headroom` | `"keep"` | how much of the pools' and the machine's headroom an [elastic lease](#elastic-leases) leaves free as it grows: `"keep"` all of it, `"leave-one"` one slot, `"use"` none |
+| `[watchdog] agents` | `["claude", "codex", "gemini", "cursor-agent", "aider"]` | the program names your own daemon [watches as sessions](#watched-sessions) without being asked; `[]` for none |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
 
 The ceiling clamps the pools: a pool's `max` is clamped to what the pool could ever hold, the
@@ -1215,6 +1216,24 @@ raises `LeaseLost` once that has happened, for code that would rather check betw
 `work` or `external` lease is never revoked; one the daemon forgot (say, after its ledger was
 reset) is asked for again with the same id, and `lost` is set only if that is refused.
 
+#### Agent sessions
+
+`leasehold.session()` makes the calling process one agent session's agent for a `with` block,
+so that the daemon [watches](#watched-sessions) what it starts. It sets `LEASEHOLD_SESSION`
+in `os.environ` (or in the `env` mapping you pass) for the processes it starts, and puts it
+back as it was when the block ends.
+
+```python
+with leasehold.session("nightly-agents") as s:
+    run_the_agents()  # their processes are counted as the session's
+print(s.id, s.registered, s.reason)
+```
+
+`name` is the session's id when it is a valid one (letters, digits and `_.:-`, at most 64),
+else the start of one with a tag added. `agent` says what to call the agent. `socket=` or
+`client=` names the daemon. Watching never gets in the way: with no daemon, or one from before
+sessions, the block runs all the same, `s.registered` is false and `s.reason` says why.
+
 #### Running a command under the lease
 
 `lease.run(argv)` runs a command as `hold` would and returns its exit status; `lease.popen(argv)`
@@ -1359,7 +1378,8 @@ slice. When the agent exits, whatever it left running there gets SIGTERM, and SI
 later; nothing outside the slice is touched. A clean-up that fails is reported, and the exit
 code stays the agent's. `--leave-running` keeps what is left (a dev server you still want).
 `--session` names the session; `--no-contain`, or `[contain] mode = "off"` in the config, runs
-the agent uncontained.
+the agent uncontained. When a daemon answers, `run` registers the session with it, so that the
+daemon [watches](#watched-sessions) what the agent runs.
 
 An agent runs each shell command with a timeout of its own, and a shim inside the command waits
 in line on that clock. `run` puts the agent's timeout in `LEASEHOLD_TOOL_TIMEOUT_S`, and a shim
@@ -1490,6 +1510,47 @@ A command line is read as the shell would split it, without running anything: `&
 `sh -c '...'` are seen through. What a literal `false &&` or `true ||` skips is left out. A
 program reached through a variable, an alias, a function or a script is not seen.
 
+### Watched sessions
+
+Your own daemon watches agent sessions and reports how much memory everything each agent
+started holds. It only watches, and never pauses or stops a process.
+
+A session joins in one of these ways:
+
+- `leasehold run` registers the session it starts, with the agent's process and its slice.
+- The [Claude Code plugin](#the-claude-code-plugin) registers each session at `SessionStart` and
+  unregisters it at `SessionEnd`. It also adds `export LEASEHOLD_SESSION=cc-<id>` to the
+  session's `CLAUDE_ENV_FILE`, so every Bash command carries the session's id.
+- A Python program: `with leasehold.session("nightly") as s:` registers the calling process for
+  the block, and sets `LEASEHOLD_SESSION` for the processes it starts ([From
+  Python](#from-python)).
+- Any other harness: `leasehold session register --pid PID` prints the session's id, which you
+  export to the agent's commands as `LEASEHOLD_SESSION`, and `leasehold session unregister ID`
+  ends the session (exit 77 for an id no session has). `--session` names it and `--agent` says
+  what to call the agent. `--pid` defaults to the process that runs the command. Or use
+  `POST /v1/sessions` ([the HTTP API](#the-http-api)).
+- Found by name: your own daemon also watches each of your processes whose name (the kernel's
+  `comm`; for a script, the script's name) is in `[watchdog] agents`, as a session `auto-<pid>`,
+  unless it is already part of a session. This reaches agents started from an editor or a
+  desktop app. Such a session never asked to join, so it is only ever reported. The default is
+  `["claude", "codex", "gemini", "cursor-agent", "aider"]`, and `agents = []` turns it off.
+
+Under `leasehold run`, a session's processes are those in its slice. Otherwise they are the
+agent's descendants, plus your processes whose environment holds the session's
+`LEASEHOLD_SESSION`. That second part finds a server the session left running after its shell
+exited. The agent process itself is left out of the count. The rest is counted in trees, one
+for each process whose parent is the agent (a shell command, an MCP server) or is outside the
+session. A session's footprint is the anonymous memory of its trees, in RAM or in swap. File
+cache is left out, because a build reads a lot of it and the kernel takes it back first.
+
+A registered session ends when it unregisters or its agent process exits. A session found by
+name ends when its agent exits. The daemon reads every session again every 2 seconds.
+`leasehold status --json` lists them under `watchdog.sessions`, `leasehold top` shows each
+one's footprint, and the events say when one starts and ends.
+
+Where leasehold cannot list a session's processes yet (macOS among such systems), each session
+has `how` set to `none` and a `reason`, and its footprint is null, so it never looks idle.
+
 ### The Claude Code plugin
 
 ```
@@ -1519,6 +1580,11 @@ wrote. When the command ends, `PostToolUse` or `PostToolUseFailure` gives the le
   `leasehold: pytest was most likely killed by Claude Code's tool memory limit (CLAUDE_CODE_TOOL_MEMORY_LIMIT=4G, shared by every command of this session). This is not a test failure. Run it alone, or raise the limit.`
   On systems other than Linux it says nothing yet.
 - Sub-agents run in their parent's session, so a session's agents share its turns.
+- `SessionStart` registers the session with the daemon, which then
+  [watches](#watched-sessions) everything the Claude Code process starts, and `SessionEnd`
+  unregisters it. `SessionStart` also adds `export LEASEHOLD_SESSION=cc-<id>` to the session's
+  `CLAUDE_ENV_FILE`, so `hold`, the shims and the processes a command leaves running all carry
+  the session's id.
 - A renewer keeps the lease while the command runs, watches the Claude Code process, and
   stops at the Bash call's own timeout plus a minute, so an interrupted call cannot hold slots.
 - On a busy machine the command waits in line, keeping its place, for up to `wait_s` (300 s
@@ -1680,8 +1746,9 @@ a repository's `AGENTS.md` or `CLAUDE.md`, for agents that use none of the above
 - `leasehold top` is the machine live in the terminal: the slots as numbered bays, each
   lease spanning as many as it weighs and each waiting one in a second lane; PSI pressure with a
   sparkline; the pools; the leases; the queue with why each waits and, with memory counted,
-  what each counts; the memory budget in the header (`mem 5.9/11.7 GiB`); lending; recent
-  events.
+  what each counts; the memory budget in the header (`mem 5.9/11.7 GiB`); the
+  [watched sessions](#watched-sessions), each with what its work holds in memory; lending;
+  recent events.
   Keys: `q` quits, `p` pauses, `s` changes the order of the leases, `?` shows help. It follows
   `NO_COLOR` and draws in ASCII outside a UTF-8 locale. Off a terminal, on one smaller than
   80x20, or with `--once`, it prints one plain view and exits.
@@ -1738,6 +1805,8 @@ client for it.
 | `GET /v1/outcomes` | | `outcomes`, newest first, and `groups`, one for each rule and repository: the asking user's, or every user's for an administrator. A group has `learned_per_slot_bytes`, the [learned figure](#learned-memory) a slot the asking user's own runs there give (null while fewer than 3 clean runs are known, and for a group with no rule), and `learned_runs`, the clean runs behind it |
 | `POST /v1/lend` | `open`: true or false | the lend state; administrators only |
 | `POST /v1/pools/<name>` | `max`: a number, or null to reset | the pool; administrators only |
+| `POST /v1/sessions` | `session` (its id, what its processes have in `LEASEHOLD_SESSION`), `pid` (the agent's process; without one, the session lasts until it is unregistered), `agent` (what to call the agent; default its program's name), `slice` (a `leasehold run` session's slice), `source` (`api`, the default, `run`, `hook` or `sdk`) | `registered`, with the `session` as the [status object](#the-status-object) shows it; registering an id again replaces it. 400 for a `pid` that is not running, 403 for another user's session |
+| `DELETE /v1/sessions/<id>` | | `unregistered`, with the `session`; 404 `unknown_session` when no session has that id, 403 for another user's |
 
 `acquire` waits up to `wait_s` (at most 300) for the lease, then answers `queued`; asking again
 with the same `lease_id` keeps the place in line, and is not a new request. A place given back
@@ -1777,7 +1846,8 @@ or with an error of 500 or more, `leasehold.client.Client` sends it again withou
 
 An error is answered with an `error` and a `detail`: 400 `bad_request` (a malformed request,
 including a `Content-Length` that is not a non-negative integer), 403 `forbidden` (another
-user's lease, or an administrator's route), 404 `not_found`, 409 `conflict` (a request that
+user's lease, or an administrator's route), 404 `not_found` (and `unknown_session`, for a
+session that is not watched), 409 `conflict` (a request that
 cannot be done now but may be later: an elastic lease that cannot grow now, or a lease no longer
 held), 413 `too_large` (a body over 64 KiB, which is not read), 500 `internal` (the daemon
 failed on the request; its traceback goes to the daemon's stderr), and 503 `ledger_unavailable`
@@ -1790,7 +1860,10 @@ Events are kept in memory, the last 500, each with a `type`: `granted` (and whet
 `ended` (with a `reason`: `expired`, `holder gone`, or `no longer matched` for an observed
 program), `revoked`, `resized` (an elastic lease's size changed, from `previous_weight`),
 `parked` and `resumed` (the [memory net](#memory-net) paused a lease's command, or let it run
-again), `lend_opened` and `lend_closed`. A restarted daemon numbers them afresh. An event about a lease
+again), `lend_opened` and `lend_closed`, and `session_started` and `session_ended` (a
+[watched session](#watched-sessions), with its `session`, `source`, `user`, `agent` and
+`agent_pid`; an end has a `reason`: `unregistered`, `agent ended`, or `joined` when a registered
+session took in an agent that was found by name). A restarted daemon numbers them afresh. An event about a lease
 or a place in line carries its `weight` (a lease's size, a waiting item's least),
 `min_weight` and `max_weight`.
 
@@ -1841,6 +1914,14 @@ when a field is removed or changes meaning:
   24 hours), `watched` (the scopes it watches), `parked` (each with `lease_id`, `since` and
   `memory_bytes`, what it held in memory and swap when parked), `settling` (each with
   `lease_id` and `since`), and since the daemon started, `parks` and `written_bytes`;
+- `watchdog`: the [watched sessions](#watched-sessions). `processes` says whether a session's
+  processes can be found here (`how`: `polled` or `none`, and `reason`), `discover` lists the
+  `[watchdog] agents` names this daemon looks for (empty for the machine's daemon), and
+  `sessions` lists each session, oldest first: `session`, `source` (`run`, `hook`, `sdk`, `api`
+  or `auto`), `user`, `agent`, `agent_pid`, `slice`, `since`, `how` and `reason` (as for
+  `processes`, null until first read), `footprint_bytes` (the anonymous memory of everything
+  the agent started, in RAM or swap; null when it cannot be read), `processes` (not counting
+  the agent), `trees`, and `largest` (`pid`, `name` and `bytes` of the process with the most);
 - `standing`, `leases`, and `queue`, each queued item with its `position` and why it waits
   (`blocked`). Each lease and queued item has `memory_bytes` (what it declared, or null; a
   lease declaring memory per slot gives the total it was granted, its weight times the size),
@@ -1864,7 +1945,7 @@ when a field is removed or changes meaning:
 Every command takes `--config PATH` and `--socket PATH`, before or after the command's name.
 `leasehold --help` lists the everyday commands; the rest (`acquire`, `keep`, `release`,
 `outcomes`, `hook`, `shims`, `facts`, `ui`, `metrics`, `mcp`, `report`, `observe`, `lend`,
-`pool`) work the same and
+`pool`, `session`) work the same and
 are named at its end. `leasehold COMMAND --help` says more; `mcp`, `ui`, `metrics`, `report`,
 `observe` and `lend` are experimental and may change before 1.0.
 
@@ -1936,6 +2017,18 @@ write a commented config sized for this machine:
 leasehold init [--system | --user] [--print] [--force]
 ```
 
+watch a session; prints its id, for LEASEHOLD_SESSION:
+
+```
+leasehold session register [--session SESSION] [--pid PID] [--agent AGENT]
+```
+
+stop watching a session:
+
+```
+leasehold session unregister SESSION
+```
+
 what the config's [[observe]] rules match right now:
 
 ```
@@ -1951,7 +2044,7 @@ leasehold acquire --lease-id LEASE_ID [--kind {work,external,lend,maintenance}] 
 renew a lease until it is released or a limit is hit:
 
 ```
-leasehold keep --ttl TTL [--max-hold MAX_HOLD] [--watch-pid WATCH_PID] lease_id
+leasehold keep --ttl TTL [--max-hold MAX_HOLD] [--watch-pid WATCH_PID] [--attach] lease_id
 ```
 
 give a lease back:
@@ -2005,7 +2098,7 @@ leasehold report --url URL [--token-file TOKEN_FILE] [--header 'NAME: VALUE'] [-
 a coding agent's hook (reads its event on stdin):
 
 ```
-leasehold hook {claude-code} {pre,post}
+leasehold hook {claude-code} {start,pre,post,end}
 ```
 
 write a shim for each program the rules name:

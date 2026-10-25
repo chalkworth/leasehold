@@ -1,22 +1,25 @@
 """The Python API (`leasehold.leasing`) against a real daemon: what a lease is granted, how a wait
-ends without one, and what a lease the daemon takes back or forgets tells its holder."""
+ends without one, what a lease the daemon takes back or forgets tells its holder, and the agent
+sessions the daemon watches."""
 
 from __future__ import annotations
 
 import inspect
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 
 import pytest
-from support import NO_SCOPE, gone, make_agent, until
+from support import FACTS, NO_SCOPE, FakeLoad, Orphan, gone, machine_config, make_agent, until
 
 import leasehold
 from leasehold import host
-from leasehold.agent import AcquireRequest
-from leasehold.client import Client
+from leasehold.agent import AcquireRequest, MachineAgent
+from leasehold.client import ApiError, Client
+from leasehold.server import Daemon
 
 
 def held(sock) -> set[str]:
@@ -30,12 +33,16 @@ def queued(sock) -> list:
 def test_the_supported_names():
     assert sorted(leasehold.__all__) == [
         "Busy", "Cancelled", "Command", "DaemonError", "Lease", "LeaseError", "LeaseLost",
-        "NotStarted", "Refused", "Unavailable", "Waiting", "__version__", "find_daemon", "lease",
+        "NotStarted", "Refused", "Session", "Unavailable", "Waiting", "__version__",
+        "find_daemon", "lease", "session",
     ]  # fmt: skip
     # Callers pass these by keyword, so their names are part of the API.
     assert list(inspect.signature(leasehold.lease).parameters) == [
         "weight", "kind", "pool", "labels", "session", "timeout", "ttl", "memory",
         "memory_per_slot", "if_unavailable", "on_wait", "on_lost", "cancel", "socket", "client",
+    ]  # fmt: skip
+    assert list(inspect.signature(leasehold.session).parameters) == [
+        "name", "agent", "socket", "client", "env",
     ]  # fmt: skip
     with pytest.raises(ValueError, match=r"\(least, most\)"):
         leasehold.lease((3, 1))
@@ -213,3 +220,45 @@ def test_the_daemon_hands_out_its_memory_caps_in_bytes(tmp_path):
     # The status says what the host can do, by operation, the cap among them.
     assert list(status["host"]) == list(host.OPERATIONS)
     assert status["host"]["memory_hard"]["how"] == status["contain"]["memory_cap"]["how"]
+
+
+def test_a_session_is_watched_with_its_footprint_and_an_agent_is_found_by_name(sock_dir, tmp_path):
+    config = machine_config(
+        tmp_path, socket=str(sock_dir / "s.sock"), watchdog={"agents": ["lh-fake-agent"]}
+    )
+    daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
+    daemon.start()
+    fake = tmp_path / "lh-fake-agent"
+    shutil.copy(shutil.which("sleep"), fake)
+    agent = Orphan([str(fake), "30"])
+    try:
+
+        def watched() -> dict:
+            found = Client(daemon.path).status()["watchdog"]["sessions"]
+            return {s["session"]: s for s in found}
+
+        with leasehold.session("sdk-test", socket=daemon.path) as joined:
+            assert (joined.id, joined.registered) == ("sdk-test", True)
+            assert os.environ["LEASEHOLD_SESSION"] == "sdk-test"
+            work = subprocess.Popen(["sleep", "30"])
+            until(lambda: (watched()["sdk-test"]["footprint_bytes"] or 0) > 0)
+            mine = watched()["sdk-test"]
+            assert (mine["source"], mine["agent_pid"], mine["how"]) == (
+                "sdk",
+                os.getpid(),
+                "polled",
+            )
+            assert mine["trees"] >= 1
+            work.kill()
+            work.wait()
+        assert "LEASEHOLD_SESSION" not in os.environ
+        until(lambda: f"auto-{agent.pid}" in watched())
+        found = watched()[f"auto-{agent.pid}"]
+        assert (found["source"], found["agent_pid"]) == ("auto", agent.pid)
+        assert "sdk-test" not in watched()
+        with pytest.raises(ApiError) as unknown:
+            Client(daemon.path).unregister_session("sdk-test")
+        assert (unknown.value.status, unknown.value.payload["error"]) == (404, "unknown_session")
+    finally:
+        agent.kill()
+        daemon.stop()

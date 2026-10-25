@@ -300,6 +300,28 @@ class MemoryNetSettings(_Strict):
         return memory_to_bytes(self.write_per_day)
 
 
+#: The agents a user's own daemon watches without being asked, by program name.
+DEFAULT_AGENTS = ("claude", "codex", "gemini", "cursor-agent", "aider")
+
+
+class WatchdogSettings(_Strict):
+    """The `[watchdog]` table: which agent sessions the daemon watches (`leasehold.sessions`).
+    Watching only reads and reports: it never pauses or stops anything."""
+
+    #: Program names, as the kernel names a process (`comm`): each of the user's processes
+    #: running one is watched as a session of its own (`auto-<pid>`), unless it is already
+    #: part of one. Empty: only sessions that register are watched. A user's own daemon only.
+    agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
+
+    @field_validator("agents")
+    @classmethod
+    def _names(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if not name or "/" in name or name != name.strip():
+                raise ValueError(f"{name!r} is not a program name")
+        return value
+
+
 class ElasticSettings(_Strict):
     """How elastic leases move (`leasehold.elastic`)."""
 
@@ -394,6 +416,8 @@ class MachineConfig(_Strict):
     memory: MemorySettings | None = None
     #: What happens when memory under a limit runs out (`leasehold.net`).
     memory_net: MemoryNetSettings = Field(default_factory=MemoryNetSettings)
+    #: Which agent sessions are watched (`leasehold.sessions`).
+    watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
 
     @field_validator("socket_mode")
     @classmethod
