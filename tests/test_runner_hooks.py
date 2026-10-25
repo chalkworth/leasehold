@@ -26,6 +26,8 @@ def run_hook(tmp_path, sock, name: str) -> str:
         "LEASEHOLD_SOCKET": str(sock),
         "RUNNER_NAME": "r",
         "GITHUB_JOB": "j",
+        "GITHUB_RUN_ID": "0",
+        "GITHUB_RUN_ATTEMPT": "1",
     }
     done = subprocess.run(
         ["bash", "-e", str(HOOKS / name)],
