@@ -3,21 +3,36 @@ behind `[watchdog]`. The machine agent feeds it readings from `leasehold.host` (
 memory, and the trees of the sessions it watches), carries out what it decides through the
 host, and reports it.
 
-**Levels** (`judge`, a pure function of one reading, so that the trigger is one place to
-change). Available memory counts only once swap is nearly full (`Memory.swap_open`): with no
-swap, or with less swap free than `SWAP_FREE` allows. While the kernel swaps, it keeps
-available memory near a floor that says nothing of a freeze, and the stall share is the signal
-instead. A reading says what the swap is (`swap_kind`) and, for zram, how well its pages
+**Levels** (`judge`, a pure function of one reading and the floor, so that the trigger is one
+place to change). Available memory counts only once swap is nearly full (`Memory.swap_open`):
+with no swap, or with less swap free than `SWAP_FREE` allows. While the kernel swaps, it keeps
+available memory near a level that says nothing of a freeze, and the stall shares are the
+signal instead. A reading says what the swap is (`swap_kind`) and, for zram, how well its pages
 compress (`zram_ratio`), for a rule that treats compressed swap differently.
 
-* `critical`, the last resort before the machine freezes: available memory under
-  `critical_below` while swap is nearly full, or every task stalled on memory for more than
-  `STALL_CRITICAL` percent of the last couple of seconds (`Pressure.stall_full_recent`, from
-  the kernel's running total: the ten-second average lags, and stays high after the cause has
-  gone), or the OS's own level `critical` (macOS).
-* `warn`: available memory under `hold_below` while swap is nearly full, or the OS's level
+**The floor** (`floor`) is `critical_below`, or the highest `Mapped` over the last
+`mapped_window_s` plus `MAPPED_MARGIN` where that is more: the file cache the desktop needs hot
+is about what it maps, and the machine thrashes once available memory falls under it. It takes
+the highest because `Mapped` falls as that cache is evicted. The line for `warn` is the floor
+plus the distance from `critical_below` to `hold_below`.
+
+* `critical`, the last resort before the machine freezes: available memory under the floor
+  while swap is nearly full; or every task stalled on memory for more than `STALL_CRITICAL`
+  percent of the last couple of seconds (`Pressure.stall_full_recent`, from the kernel's
+  running total: the ten-second average lags, and stays high after the cause has gone); or
+  some task waited on the disk for more than `io_stall_critical` percent of them
+  (`Pressure.stall_io_recent`) with available memory under the floor plus `IO_NEAR`, whatever
+  the swap, which is how evicted file cache being read back shows; or the OS's own level
+  `critical` (macOS).
+* `warn`: available memory under the `warn` line while swap is nearly full, or the OS's level
   `warn`.
 * `ok`: anything else.
+
+**An episode** of `critical` begins at a `critical` reading and ends only once the readings
+have been calm for `CALM_S`: a brief dip under the line keeps the episode, and the time it has
+lasted. A reading is calm under `critical`, and also, once the watchdog has stopped a tree and
+until the level is next `ok`, when only the disk stall makes it `critical`: the file cache read
+back after a stop keeps the disk busy, and that is no reason to stop another tree.
 
 Where the machine's memory cannot be read, there is no level, and the reason says why: not
 knowing is never reported as `ok`, and the watchdog never acts on it.
@@ -31,11 +46,11 @@ knowing is never reported as `ok`, and the watchdog never acts on it.
 * it pauses the first tree in line, and the next one after `STEP_S` only while available
   memory is still falling (by `FALLING` over the last `STEP_S`);
 * it stops (SIGKILL at once: a stopped process does not act on SIGTERM) a tree paused for at
-  least `KILL_AFTER_S`: the newest, once the level has been `critical` for `KILL_AFTER_S` since
-  the episode began or since the last stop; a paused runaway while the level is at least
-  `warn`. One at a time. Any tree paused for `max_pause_s` is stopped whatever else holds;
+  least `KILL_AFTER_S`: the newest, at a reading that is not calm, once the episode has lasted
+  `KILL_AFTER_S` since it began or since the last stop; a paused runaway while the level is at
+  least `warn`. One at a time. Any tree paused for `max_pause_s` is stopped whatever else holds;
 * it pauses or stops only a tree that would help (`_helps`): a runaway, or one whose stop
-  would return at least `HELPS` of the deficit (what available memory lacks of `hold_below`)
+  would return at least `HELPS` of the deficit (what available memory lacks of the `warn` line)
   to available memory (`Work.frees`, measured before choosing: forked workers' shared pages
   count once, and memory in swap not at all). When no tree paused or in line would help, the
   shortage is outside the sessions (`outside`): the trees it paused run again, since they
@@ -43,7 +58,7 @@ knowing is never reported as `ok`, and the watchdog never acts on it.
   enough to help ends that at once;
 * it resumes the tree paused longest once the level has been `ok` for `SETTLE_S`, and, while
   available memory counts, once what is available less the tree's growth before its pause over
-  `LEAD_S` is at least `hold_below`; then the next, `SETTLE_S` later.
+  `LEAD_S` is at least the `warn` line; then the next, `SETTLE_S` later.
 
 In `watch` mode it does none of this: `would` says what it would do now (`hold`, or `pause` and
 the tree), and the events it would send carry `would: true`.
@@ -78,7 +93,10 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 
 from leasehold.machine import (
+    IO_NEAR,
+    IO_STALL_CRITICAL,
     LEVELS,
+    MAPPED_MARGIN,
     PROTECT,
     PROTECT_ANY,
     STALL_CRITICAL,
@@ -112,8 +130,10 @@ COMMAND_CHARS = 200
 #: fallen by `FALLING` bytes since: pausing more while memory is flat pauses everything.
 STEP_S = 2.0
 FALLING = 50 << 20
-#: How long a tree stays paused, and the level `critical`, before the watchdog stops it.
+#: How long a tree stays paused, and the episode `critical`, before the watchdog stops it.
 KILL_AFTER_S = 5.0
+#: How long the readings stay calm before the episode ends.
+CALM_S = 5.0
 #: A tree helps when stopping it would return at least this share of the deficit to available
 #: memory; a paused one keeps helping down to `KEEPS`, so that a deficit near the line does not
 #: pause and resume it in turn.
@@ -134,9 +154,9 @@ STOPPED_KEPT = 20
 @dataclass(frozen=True)
 class Memory:
     """One reading of the machine's memory, at `now` (a clock that never steps). `stall_recent`
-    is the share of the last couple of seconds every task stalled (a percentage). `swap_kind`
-    and `zram_ratio` are as `host.Pressure` has them. `how` is `none` when nothing could be
-    read, and then `reason` says why."""
+    is the share of the last couple of seconds every task stalled (a percentage). `swap_kind`,
+    `zram_ratio`, `mapped` and `stall_io_recent` are as `host.Pressure` has them. `how` is
+    `none` when nothing could be read, and then `reason` says why."""
 
     now: float
     available: int | None
@@ -149,6 +169,8 @@ class Memory:
     reason: str | None = None
     swap_kind: str | None = None
     zram_ratio: float | None = None
+    mapped: int | None = None
+    stall_io_recent: float | None = None
 
     def swap_free(self) -> int | None:
         if not self.swap_total or self.swap_used is None:
@@ -168,21 +190,58 @@ def _gib(n: int) -> str:
     return f"{n / 2**30:.1f} GiB"
 
 
-def judge(m: Memory, limits: WatchdogLimits) -> tuple[str, str]:
-    """The level `m` is at, and why, in words. `m` has an `available` reading."""
+@dataclass(frozen=True)
+class Floor:
+    """Under `critical` bytes available the level is `critical`, and under `hold` it is `warn`
+    (while available memory counts); `reason` says where `critical` comes from, in words."""
+
+    critical: int
+    hold: int
+    reason: str
+
+
+def floor(limits: WatchdogLimits, mapped: int | None) -> Floor:
+    """The floor for the highest `Mapped` over the window (None: not known)."""
+    gap = limits.hold_below - limits.critical_below
+    assert gap > 0
+    if mapped is None or mapped + MAPPED_MARGIN <= limits.critical_below:
+        line = limits.critical_below
+        return Floor(line, line + gap, f"{_gib(line)}: critical_below")
+    line = mapped + MAPPED_MARGIN
+    reason = f"{_gib(line)}: mapped {_gib(mapped)} + {MAPPED_MARGIN / 2**30:g}"
+    return Floor(line, line + gap, reason)
+
+
+def judge(
+    m: Memory,
+    limits: WatchdogLimits,
+    under: Floor | None = None,
+    io_stall_critical: float = IO_STALL_CRITICAL,
+) -> tuple[str, str]:
+    """The level `m` is at, and why, in words, under floor `under` (None: `critical_below`'s).
+    `m` has an `available` reading."""
     avail = m.available
     assert avail is not None
+    if under is None:
+        under = floor(limits, None)
     counts = m.swap_open()
     free = m.swap_free()
     swap = "" if free is None else f", {_gib(free)} of swap free"
-    if counts and avail < limits.critical_below:
-        return "critical", f"{_gib(avail)} available, under {_gib(limits.critical_below)}{swap}"
+    if counts and avail < under.critical:
+        return "critical", f"{_gib(avail)} available, under {_gib(under.critical)}{swap}"
     if m.stall_recent is not None and m.stall_recent > STALL_CRITICAL:
         return "critical", f"every task stalled on memory {m.stall_recent:.0f}% of the last 2 s"
+    io = m.stall_io_recent
+    near = under.critical + IO_NEAR
+    if io is not None and io > io_stall_critical and avail < near:
+        return "critical", (
+            f"tasks waited on the disk {io:.0f}% of the last 2 s, "
+            f"with {_gib(avail)} available, under {_gib(near)}"
+        )
     if m.os_level == "critical":
         return "critical", "the system says memory is critical"
-    if counts and avail < limits.hold_below:
-        return "warn", f"{_gib(avail)} available, under {_gib(limits.hold_below)}{swap}"
+    if counts and avail < under.hold:
+        return "warn", f"{_gib(avail)} available, under {_gib(under.hold)}{swap}"
     if m.os_level == "warn":
         return "warn", f"the system warns of memory, with {_gib(avail)} available"
     return "ok", f"{_gib(avail)} available{swap}"
@@ -346,6 +405,9 @@ class _State:
     swap_free: int | None = None
     swap_open: bool = True
     stall_recent: float | None = None
+    stall_io_recent: float | None = None
+    floor: Floor | None = None
+    calm: bool = True
     victim: Choice | None = None
     would: dict | None = None
     candidates: int = 0
@@ -366,6 +428,9 @@ class Watchdog:
         self._growth: dict[tuple[int, str | None], list[tuple[float, int]]] = {}
         #: Available memory as read, two windows back: how fast the machine is falling.
         self._available: list[tuple[float, int]] = []
+        #: `Mapped` over `mapped_window_s`, each value under every one before it: the first is
+        #: the highest.
+        self._mapped: deque[tuple[float, int]] = deque()
         self._runaways: set[tuple[int, str | None]] = set()
         self._state = _State()
         #: The level at the last reading, set once it is judged: what `short` reads, from
@@ -377,8 +442,10 @@ class Watchdog:
         self._paused: dict[tuple[int, str | None], Paused] = {}
         #: Trees not to choose again until they are read anew: being stopped, or not paused.
         self._skip: set[tuple[int, str | None]] = set()
-        #: When the level last turned `critical` and `ok` (None: it is not at that level).
+        #: When the episode began, and when its readings turned calm (None: no episode, or the
+        #: last reading was not calm); when the level last turned `ok` (None: it is not `ok`).
         self._critical_since: float | None = None
+        self._calm_since: float | None = None
         self._ok_since: float | None = None
         #: When the last tree was paused or stopped, and the last stopped (this episode).
         self._last_act: float | None = None
@@ -423,18 +490,24 @@ class Watchdog:
         if memory.how == "none" or memory.available is None:
             state.reason = f"the watchdog cannot see memory here: {memory.reason or 'not read'}"
             self._last = None
-            self._critical_since = self._ok_since = self._level = None
+            self._critical_since = self._calm_since = self._ok_since = self._level = None
             return []
         state.available = memory.available
         state.swap_free = memory.swap_free()
         state.swap_open = memory.swap_open()
         state.stall_recent = memory.stall_recent
-        state.level, state.reason = judge(memory, self.limits)
-        _keep(self._available, memory.now, memory.available)
+        state.stall_io_recent = memory.stall_io_recent
+        state.floor = floor(self.limits, self._highest_mapped(memory))
+        io = self.settings.io_stall_critical
+        state.level, state.reason = judge(memory, self.limits, state.floor, io)
         if state.level != "critical":
-            self._critical_since = None
-        elif self._critical_since is None:
-            self._critical_since = memory.now
+            state.calm = True
+        else:
+            quiet_disk = replace(memory, stall_io_recent=None)
+            disk_only = judge(quiet_disk, self.limits, state.floor, io)[0] != "critical"
+            state.calm = disk_only and self._last_stop is not None
+        _keep(self._available, memory.now, memory.available)
+        self._episode(state)
         if state.level != "ok":
             self._ok_since = None
         else:
@@ -445,6 +518,35 @@ class Watchdog:
         self._choose(state)
         self._level = state.level
         return self._events(state)
+
+    def _highest_mapped(self, m: Memory) -> int | None:
+        """The highest `Mapped` over the last `mapped_window_s`, `m`'s included (None: none
+        read)."""
+        kept = self._mapped
+        if m.mapped is not None:
+            while kept and kept[-1][1] <= m.mapped:
+                kept.pop()
+            kept.append((m.now, m.mapped))
+        while kept and kept[0][0] < m.now - self.settings.mapped_window_s:
+            kept.popleft()
+        return kept[0][1] if kept else None
+
+    def _episode(self, s: _State) -> None:
+        """Begin an episode at a reading that is not calm, and end it once the readings have
+        been calm for `CALM_S`."""
+        if not s.calm:
+            self._calm_since = None
+            if self._critical_since is None:
+                self._critical_since = s.now
+        elif self._critical_since is not None:
+            if self._calm_since is None:
+                self._calm_since = s.now
+            if s.now - self._calm_since >= CALM_S:
+                self._critical_since = self._calm_since = None
+
+    def _hold_line(self, s: _State) -> int:
+        """Available memory under which the level is `warn`, while it counts."""
+        return self.limits.hold_below if s.floor is None else s.floor.hold
 
     def _let_go(self, s: _State) -> None:
         """Stop holding new work for a tree that runs again once it has settled: its footprint
@@ -457,7 +559,7 @@ class Watchdog:
             room = (
                 not s.swap_open
                 or s.available is None
-                or s.available >= self.limits.hold_below + max(0.0, growth) * LEAD_S
+                or s.available >= self._hold_line(s) + max(0.0, growth) * LEAD_S
             )
             settled = (
                 s.level == "ok"
@@ -481,12 +583,12 @@ class Watchdog:
 
     def _helps(self, w: Work, why: str | None, share: float = HELPS) -> bool:
         """Whether stopping `w` would help: a runaway, or a stop that returns `share` of the
-        deficit (what available memory lacks of `hold_below`) to available memory. Every tree
-        helps while available memory does not count, or nothing lacks."""
+        deficit (what available memory lacks of the `warn` line) to available memory. Every
+        tree helps while available memory does not count, or nothing lacks."""
         s = self._state
         if why == "runaway" or not s.swap_open or s.available is None:
             return True
-        deficit = self.limits.hold_below - s.available
+        deficit = self._hold_line(s) - s.available
         return deficit <= 0 or w.gain >= share * deficit
 
     def _falling(self, s: _State) -> bool:
@@ -659,7 +761,7 @@ class Watchdog:
                 start = max(start, self._last_stop)
             if runaway is not None and self._at(s.level, "warn"):
                 acts.append(Act("stop", self._as_read(runaway), "runaway"))
-            elif s.level == "critical" and start is not None and now - start >= KILL_AFTER_S:
+            elif not s.calm and start is not None and now - start >= KILL_AFTER_S:
                 acts.append(Act("stop", self._as_read(ripe[0]), "critical"))
         if self._at_act(s.level) and s.victim is not None and not acts:
             spaced = self._last_act is None or now - self._last_act >= STEP_S
@@ -670,9 +772,7 @@ class Watchdog:
             oldest = min(paused, key=lambda p: p.since)
             margin = max(0.0, oldest.choice.growth or 0.0) * LEAD_S
             room = (
-                not s.swap_open
-                or s.available is None
-                or s.available - margin >= self.limits.hold_below
+                not s.swap_open or s.available is None or s.available - margin >= self._hold_line(s)
             )
             if now - self._ok_since >= SETTLE_S and room:
                 acts.append(Act("resume", oldest.choice, "ok"))
@@ -746,7 +846,7 @@ class Watchdog:
         if s.level != "ok" or self._paused:
             return WARN_STEP_S
         roomy = not s.swap_open or (
-            s.available is not None and s.available >= FAR * self.limits.hold_below
+            s.available is not None and s.available >= FAR * self._hold_line(s)
         )
         quiet = s.stall_recent is None or s.stall_recent < QUIET_STALL
         return IDLE_S if roomy and quiet else STEP_S_READ
@@ -771,12 +871,18 @@ class Watchdog:
             "swap_free_bytes": s.swap_free,
             "available_counts": s.swap_open if s.level is not None else None,
             "stall_recent": None if s.stall_recent is None else round(s.stall_recent, 1),
+            "stall_io_recent": None if s.stall_io_recent is None else round(s.stall_io_recent, 1),
+            "floor_bytes": None if s.floor is None else s.floor.critical,
+            "floor_reason": None if s.floor is None else s.floor.reason,
+            "hold_line_bytes": None if s.floor is None else s.floor.hold,
             "limits": {
                 "critical_below": lim.critical_below,
                 "hold_below": lim.hold_below,
                 "min_size": lim.min_size,
                 "large": lim.large,
                 "max_pause_s": self.settings.max_pause_s,
+                "mapped_window_s": self.settings.mapped_window_s,
+                "io_stall_critical": self.settings.io_stall_critical,
             },
             "candidates": s.candidates,
             "passed_over": dict(s.passed_over),

@@ -18,9 +18,11 @@ the kernel reclaims first, `memory.peak`, `memory.stat`, `memory.swap.*`, `memor
 `cpu.stat`), its members from `cgroup.procs`, each with its resident and swapped memory
 (`VmRSS` and `VmSwap`). A tree without one is its root's descendants, found through procfs
 (`/proc/<pid>/task/*/children`), its footprint the sum of theirs (`polled`). The machine's
-pressure is `MemAvailable` and swap from `/proc/meminfo`, PSI from `/proc/pressure/memory`, and
-pages swapped in from `/proc/vmstat`. The recent share of time every task stalled comes from the
-PSI file's running `full` total, compared across readings. A process's fence is its start time
+pressure is `MemAvailable`, `Mapped` and swap from `/proc/meminfo`, PSI from
+`/proc/pressure/memory` and `/proc/pressure/io`, and pages swapped in from `/proc/vmstat`. The
+recent share of time every task stalled on memory comes from the memory PSI file's running
+`full` total, and the share in which some task waited on the disk from the io file's `some`
+total, each compared across readings. A process's fence is its start time
 (field 22 of `/proc/<pid>/stat`).
 
 **Pausing.** A tree in a cgroup is frozen (`cgroup.freeze`), which its parent cannot see. A tree
@@ -125,16 +127,32 @@ def _psi(text: str | None) -> dict[str, float]:
     return out
 
 
-def _psi_full_total(text: str | None) -> int | None:
-    """The `full` line's `total` of a PSI file: microseconds every task stalled, since boot."""
+def _psi_total(text: str | None, which: str) -> int | None:
+    """The `total` of a PSI file's `which` line (`some` or `full`): microseconds some task, or
+    every task, stalled since boot."""
     for line in (text or "").splitlines():
         kind, *parts = line.split()
-        if kind == "full":
+        if kind == which:
             for part in parts:
                 name, _, value = part.partition("=")
                 if name == "total" and value.isdigit():
                     return int(value)
     return None
+
+
+def _recent(samples: list[tuple[float, int]], now: float, total: int | None) -> float | None:
+    """The share (a percentage) of the time since the oldest of `samples` that a PSI `total`
+    grew by, adding (`now`, `total`) to them and keeping the oldest at least `STALL_WINDOW_S`
+    back. None when `total` is unknown, or on the first reading."""
+    if total is None:
+        return None
+    samples.append((now, total))
+    while len(samples) > 2 and samples[1][0] <= now - STALL_WINDOW_S:
+        del samples[0]
+    (t0, s0) = samples[0]
+    if now <= t0:
+        return None
+    return min(100.0, max(0, total - s0) / ((now - t0) * 1e4))
 
 
 def _cap_or_kernel(tree: Tree) -> str:
@@ -167,9 +185,11 @@ class Linux(Posix):
         self._no_scope: str | None = None
         #: (when, pages swapped in) at the last `pressure`.
         self._swapins: tuple[float, int] | None = None
-        #: (when, microseconds every task stalled on memory) at recent `pressure` readings,
-        #: the oldest at least `STALL_WINDOW_S` before the newest.
+        #: (when, microseconds every task stalled on memory) and (when, microseconds some task
+        #: waited on the disk) at recent `pressure` readings, the oldest at least
+        #: `STALL_WINDOW_S` before the newest.
         self._stalls: list[tuple[float, int]] = []
+        self._io_stalls: list[tuple[float, int]] = []
         #: (when, pids by session, lease by pid) at the last scan of the user's processes'
         #: environments.
         self._tags: tuple[float, dict[str, list[int]], dict[int, str]] | None = None
@@ -212,7 +232,9 @@ class Linux(Posix):
             if not (self._proc / "meminfo").is_file():
                 return Support("none", f"cannot read {self._proc / 'meminfo'}")
             psi = (self._proc / "pressure" / "memory").is_file()
-            return Support("exact", via="MemAvailable and PSI" if psi else "MemAvailable, no PSI")
+            return Support(
+                "exact", via="MemAvailable, Mapped and PSI" if psi else "MemAvailable, no PSI"
+            )
         if operation in ("pause", "resume"):
             via = "cgroup.freeze, or SIGSTOP and SIGCONT to each process without a cgroup"
             return Support("exact", via=via)
@@ -375,21 +397,16 @@ class Linux(Posix):
             return Pressure(reason=self.support("pressure").reason)
         text = _read(self._proc / "pressure" / "memory")
         psi = _psi(text)
-        stalled = _psi_full_total(text)
+        stalled = _psi_total(text, "full")
+        io_waited = _psi_total(_read(self._proc / "pressure" / "io"), "some")
         swapped_in = _fields(_read(self._proc / "vmstat")).get("pswpin")
         now, rate = time.monotonic(), None
         if swapped_in is not None:
             if self._swapins is not None and now > self._swapins[0]:
                 rate = max(0, swapped_in - self._swapins[1]) / (now - self._swapins[0])
             self._swapins = (now, swapped_in)
-        recent = None
-        if stalled is not None:
-            self._stalls.append((now, stalled))
-            while len(self._stalls) > 2 and self._stalls[1][0] <= now - STALL_WINDOW_S:
-                del self._stalls[0]
-            (t0, s0) = self._stalls[0]
-            if now > t0:
-                recent = min(100.0, max(0, stalled - s0) / ((now - t0) * 1e4))
+        recent = _recent(self._stalls, now, stalled)
+        io_recent = _recent(self._io_stalls, now, io_waited)
         total = info.get("SwapTotal")
         free = info.get("SwapFree")
         kind, ratio = self._swap_kind()
@@ -407,6 +424,8 @@ class Linux(Posix):
             compressed=info.get("Zswap"),
             swap_kind=kind,
             zram_ratio=ratio,
+            mapped=info.get("Mapped"),
+            stall_io_recent=io_recent,
         )
 
     def _swap_kind(self) -> tuple[str | None, float | None]:

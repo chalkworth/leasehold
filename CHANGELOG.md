@@ -190,19 +190,27 @@ here.
 - `leasehold top` shows each watched session and its footprint. Events `session_started` and
   `session_ended` (with a `reason`) say when one starts and ends.
 - `host.named(names)` lists the user's processes by program name, and a `Proc` has `anon` and
-  `swap`. A polled `Footprint` has `anon` and `swap`, summed over its processes.
+  `swap`. `host.Pressure` has `mapped` (`Mapped` from `/proc/meminfo`) and `stall_io_recent`
+  (from the running total of `/proc/pressure/io`); hosts that cannot read them, macOS among
+  them, leave them null. A polled `Footprint` has `anon` and `swap`, summed over its processes.
 - The watchdog. Your own daemon judges how short of memory the machine is. `critical`: under
-  2 GiB available once swap is nearly full (or there is none), or every task stalled on memory
-  over 20% of the last 2 seconds. `warn`: under 3 GiB available once swap is nearly full. With
+  the floor once swap is nearly full (or there is none); or every task stalled on memory over
+  20% of the last 2 seconds; or some task waited on the disk over 30% of the last 2 seconds
+  (PSI io `some`) with under the floor plus 1 GiB available, whatever the swap. The floor is
+  2 GiB (`critical_below`), or the highest `Mapped` over the last 5 minutes plus 0.5 GiB where
+  that is more. `warn`: under the floor plus 1 GiB (the distance from `critical_below` to
+  `hold_below`) once swap is nearly full. A `critical` episode ends only after 5 seconds without
+  `critical`, so a brief flap does not restart the 5 seconds before a kill. After a kill, a disk
+  stall alone neither keeps an episode going nor starts one until the level is `ok` again. With
   `[watchdog] mode = "on"`, at `act_at` (`critical` by default) it holds new heavy work and
   pauses a session's tree. A runaway goes first: one growing over two 5 second windows, and
   either over twice what its leases declared or learned or growing by half the machine's fall
   in available memory. Then comes a tree whose stop would free a quarter of memory, then the
   newest. It picks only a tree whose stop would help: a runaway, or one that would return a
-  quarter of what available memory lacks of `hold_below`, measured from each process's
+  quarter of what available memory lacks of the `warn` line, measured from each process's
   `Pss_Anon`. It pauses the next tree after 2 seconds, and only while available memory keeps
-  falling. Once the level has been `critical` for 5 seconds it kills one tree paused for at
-  least 5 seconds, a runaway first, with SIGKILL. A paused runaway is killed 5 seconds after its
+  falling. Once the episode has lasted 5 seconds it kills one tree paused for at least
+  5 seconds, at a `critical` reading, a runaway first, with SIGKILL. A paused runaway is killed 5 seconds after its
   pause while the level is `warn` or worse, and any tree paused over `max_pause_s` is killed
   whatever else holds. When no tree paused or in line would help, the shortage is outside the
   sessions: the paused trees run again, new heavy work waits while the level is at `act_at`,
@@ -219,17 +227,22 @@ here.
   watchdog" in docs/reference.md.
 - `[watchdog]` keys: `mode` (`"watch"`, `"on"` or `"off"`), `act_at` (`"critical"`, or
   `"warn"`), `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`, or a
-  size), `max_pause_s` (900, at least 10), `choose_discovered` (false) and `protect` (regular
-  expressions). `critical_below` at or above `hold_below` is a config error. `init` writes
+  size), `max_pause_s` (900, at least 10), `mapped_window_s` (300, at least 10: how far back
+  the highest `Mapped` sets the floor), `io_stall_critical` (30, a percentage over 0 and at most
+  100), `choose_discovered` (false) and `protect` (regular expressions). `critical_below` at or above `hold_below` is a config error. `init` writes
   `mode = "on"`; a config without the table gets `"watch"`.
 - The status object's `watchdog` has `mode`, `act_at`, `level`, `reason`, `available_bytes`,
-  `swap_free_bytes`, `available_counts`, `stall_recent`, `limits` (with `max_pause_s`), `how`,
+  `swap_free_bytes`, `available_counts`, `stall_recent`, `stall_io_recent` (the share of the
+  last 2 seconds some task waited on the disk), `floor_bytes` and `floor_reason` (the floor in
+  use and why, such as `2.6 GiB: mapped 2.1 GiB + 0.5`), `hold_line_bytes` (the `warn` line),
+  `limits` (with `max_pause_s`, `mapped_window_s` and `io_stall_critical`), `how`,
   `candidates`, `passed_over`, `victim`, `would`, `held` (why new heavy work waits), `outside`
   (true while no tree in a session would help), `paused` and `stopped`. A tree in it has
   `frees_bytes`. Where the machine's memory cannot be read, `level` is null and `reason` says
   the watchdog cannot see memory there.
 - Events `held`, `paused`, `resumed`, `stopped` and `runaway` from the watchdog, each with
-  `would` (true while it only decides). `top` shows `paused`, `resumed` and `stopped`.
+  `would` (true while it only decides). Their `reason` can name the disk stall (`tasks waited on
+  the disk ...`) or a floor above `critical_below`. `top` shows `paused`, `resumed` and `stopped`.
 - `POST /v1/renew` answers `paused` (whether the watchdog has paused the lease's command),
   `paused_for` (`newest`, `runaway` or `large`) and `stopped` (null, or `why`, `runaway`,
   `rerun`, `alone`, `test`, `paused_s` and `available_bytes` once it killed it). A command

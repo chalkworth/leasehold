@@ -656,7 +656,7 @@ an example machine. An unknown key is an error.
 | `[elastic] settle_s` | `15` | how long an [elastic lease](#elastic-leases)'s size stays put after it was granted or last changed before it may grow again; at least 1 |
 | `[elastic] headroom` | `"keep"` | how much of the pools' and the machine's headroom an [elastic lease](#elastic-leases) leaves free as it grows: `"keep"` all of it, `"leave-one"` one slot, `"use"` none |
 | `[watchdog] agents` | `["claude", "codex", "gemini", "cursor-agent", "aider"]` | the program names your own daemon [watches as sessions](#watched-sessions) without being asked; `[]` for none |
-| `[watchdog]` | `mode = "watch"` (`init` writes `"on"`) | see [The watchdog](#the-watchdog): `mode` (`"off"`, `"watch"` or `"on"`), `act_at` (`"critical"`), `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`), `max_pause_s` (900), `choose_discovered` (false), `protect` (`[]`). A `[memory_net]` table is a config error |
+| `[watchdog]` | `mode = "watch"` (`init` writes `"on"`) | see [The watchdog](#the-watchdog): `mode` (`"off"`, `"watch"` or `"on"`), `act_at` (`"critical"`), `critical_below` (`"2g"`), `hold_below` (`"3g"`), `min_size` (`"auto"`), `max_pause_s` (900), `mapped_window_s` (300), `io_stall_critical` (30), `choose_discovered` (false), `protect` (`[]`). A `[memory_net]` table is a config error |
 | `[contain]` | `mode = "auto"`, `hard_cpu = false` | see [Containment](#containment): whether commands go in systemd user scopes, and whether a scope is also capped at its weight in CPUs |
 
 The ceiling clamps the pools: a pool's `max` is clamped to what the pool could ever hold, the
@@ -1477,15 +1477,42 @@ off; sessions are still watched. `leasehold init` writes `mode = "on"`; a config
 
 Available memory counts only once swap is nearly full: when there is no swap, or less swap free
 than the larger of 1 GiB and 10% of the swap. While the kernel swaps, it keeps available memory
-near a floor that says nothing about a freeze (idle browser tabs going to swap), so with swap
-room the stall share is the signal. The level is one of three:
+near a level that says nothing about a freeze (idle browser tabs going to swap), so with swap
+room the stall shares are the signal.
 
-- `critical`, the last resort before the machine freezes: available memory under
-  `critical_below` (2 GiB) while it counts, or every task stalled on memory more than 20% of the
-  last 2 seconds. The stall share comes from the kernel's running PSI `full` total. The
-  ten-second average lags by about 10 seconds and stays high after the cause has gone.
-- `warn`: available memory under `hold_below` (3 GiB) while it counts.
+The floor is where a freeze starts. A desktop slows to a crawl once available memory falls
+under the file cache it keeps hot (program text, the files a browser or editor has open). That
+size is absolute, and does not grow with RAM. The kernel's `Mapped` (in `/proc/meminfo`) is a
+cheap stand-in for it. So the floor is `critical_below` (2 GiB), or the highest `Mapped` over
+the last `mapped_window_s` (5 minutes) plus 0.5 GiB, whichever is more. It uses the highest
+value, because `Mapped` falls as the cache is evicted, which is just when the floor matters.
+`hold_below` moves with it and stays the same distance above (1 GiB by default). Status shows
+the floor in use and why (`floor_reason`, such as `2.6 GiB: mapped 2.1 GiB + 0.5`). A file
+read with `read()` and not mapped is not in `Mapped`; the disk stall below covers that case.
+
+The level is one of three:
+
+- `critical`, the last resort before the machine freezes:
+  - available memory under the floor while it counts;
+  - every task stalled on memory more than 20% of the last 2 seconds. This share comes from the
+    kernel's running PSI `full` total. The ten-second average lags by about 10 seconds and
+    stays high after the cause has gone;
+  - some task waited on the disk more than `io_stall_critical` (30%) of the last 2 seconds (PSI
+    io `some`, from its running total) while available memory is under the floor plus 1 GiB,
+    whatever the swap. When the kernel evicts file cache that is still in use and has to read
+    it back, the wait counts as io, not memory. In real runs in a 16 GiB VM this was the only
+    signal that tracked the freeze: under 6% on every level where the desktop was fine, and
+    40% or more on every level where it was not. It needs low memory as well, since io stalls for
+    any disk-bound work.
+- `warn`: available memory under the floor plus the distance from `critical_below` to
+  `hold_below` (1 GiB by default; `hold_line_bytes`) while it counts.
 - `ok`: anything else.
+
+A `critical` episode starts at the first `critical` reading and ends only once 5 seconds have
+passed with no `critical` reading. A brief flap out of `critical` keeps the episode, and the
+time it has lasted. After the watchdog kills a tree, and until the level is next `ok`, a disk
+stall on its own neither keeps an episode going nor starts one: the cache read back after a
+kill keeps the disk busy for a while, and that is no reason to kill another tree.
 
 At `act_at` and above (`critical` by default) the watchdog acts: it holds new heavy work and
 pauses a tree. `would` says what it would do now: `action` `pause` and the tree, or
@@ -1509,7 +1536,7 @@ order:
    do, so the commands the agent ran go first.
 
 Each is chosen only when stopping it would help: when it is a runaway, or would return at least
-a quarter of the deficit (what available memory lacks of `hold_below`) to available memory.
+a quarter of the deficit (what available memory lacks of the `warn` line) to available memory.
 While memory is short, the daemon measures what a stop would free as each process's
 proportional share of the anonymous memory it holds in RAM (`Pss_Anon`). Pages that forked
 workers share count once across them, and memory in swap, which a stop returns to swap and not
@@ -1550,22 +1577,34 @@ min_size = "auto"         # the larger of 256 MiB and 2% of memory: smaller tree
 choose_discovered = false
 protect = []              # regular expressions searched for in a tree's command line
 max_pause_s = 900         # a tree paused this long is stopped (at least 10)
+mapped_window_s = 300     # the floor follows the highest Mapped over this many seconds
+io_stall_critical = 30    # % of the last 2 s some task waited on the disk: critical near the floor
 ```
 
 `critical_below` must be under `hold_below`. The sizes are absolute, not shares of memory: what
 decides a freeze is the file cache the machine needs to keep, plus the fall in available memory
 while the watchdog reacts, and neither grows with RAM. The defaults come from a simulation of
 the measured profiles of real builds and test runs, and real runs in a 16 GiB VM confirmed
-that pausing at `critical` and stopping after 5 seconds keeps such a machine responsive.
+that pausing at `critical` and stopping after 5 seconds keeps such a machine responsive. In
+those runs a 2.5 GiB hot file set slowed the desktop in 4 of 4 runs with a 2 GiB floor, and in
+none with the floor from `Mapped`. Without the episode's 5 seconds of calm, a level that
+flapped across the floor restarted the clock, and 2 of 4 runs never killed anything.
 
 The daemon reads the machine's memory every 2 seconds while memory is plentiful (level `ok`,
-swap room or at least twice `hold_below` available, and under 1% of the time stalled), every
+swap room or at least twice the `warn` line available, and under 1% of the time stalled), every
 half second when it is nearer, and four times a second while the level is not `ok`. Sessions
 are read every 2 seconds whatever the level; the watchdog adds no scan of its own.
 
 The machine's daemon has no watchdog. Where leasehold cannot read the machine's memory (macOS
 for now), the level is null, the reason says the watchdog cannot see memory there, and it never
-acts.
+acts. A host that reads memory but not `Mapped` or io stalls leaves them null: the floor is then
+`critical_below`, and the disk stall never counts.
+
+On macOS the swap gate can't be ported as it is. macOS creates swap files as it needs them, so
+free swap has no fixed size to fall below. The kernel's memory pressure level (warn or
+critical) would take its place. With no PSI, the rates of page-ins and of decompressions from
+the memory compressor would stand in for the disk stall, against the same floor. None of this
+is built or measured yet.
 
 #### What it does when it acts
 
@@ -1576,8 +1615,8 @@ With `mode = "on"`:
   tool runs them under. It pauses the next tree only 2 seconds later, and only while available
   memory is still falling. A paused tree's leases are kept alive for it, and a renewal of one
   answers `paused: true` and `paused_for` (`newest`, `runaway` or `large`).
-- Once the level has been `critical` for 5 seconds, counted from the start of the episode or
-  from the last stop, it kills one paused tree that has been paused for at least 5 seconds,
+- Once the episode has lasted 5 seconds, counted from its start or from the last stop, it
+  kills, at a `critical` reading, one paused tree that has been paused for at least 5 seconds,
   a runaway first, then the newest, with SIGKILL (a scope with `cgroup.kill`). A paused
   runaway is killed 5 seconds after its pause while the level is `warn` or worse, and a large
   tree waits for `critical` like any other. It kills a paused tree only while the tree still
@@ -1591,7 +1630,7 @@ With `mode = "on"`:
   enough to help ends this at the next reading.
 - Once the level has been `ok` for 10 seconds, with room for the tree to grow again, it lets
   the oldest paused tree run. New heavy work then waits until that tree settles: the level is
-  `ok`, available memory is at least `hold_below` and a margin, and the tree's footprint has
+  `ok`, available memory is at least the `warn` line and a margin, and the tree's footprint has
   been flat for 30 seconds. After `max_pause_s` from the resume it waits no longer.
 - While a tree is paused or settling, or the level is at `act_at`, a new request that counts
   memory waits, and its `blocked` says `the watchdog holds new work: <why>`.
@@ -2013,8 +2052,12 @@ when a field is removed or changes meaning:
   `level` (`ok`, `warn`, `critical`, or null when memory cannot be read or the watchdog is off),
   `reason`, `available_bytes`, `swap_free_bytes` (null without swap), `available_counts`
   (whether available memory counts, with swap nearly full or none), `stall_recent` (the
-  percentage of the last 2 seconds every task stalled on memory), `limits` (`critical_below`,
-  `hold_below`, `min_size` and `large`, a quarter of memory, in bytes, and `max_pause_s`), `how` (`pressure` and
+  percentage of the last 2 seconds every task stalled on memory), `stall_io_recent` (the
+  percentage of the last 2 seconds some task waited on the disk, or null where it cannot be
+  read), `floor_bytes` and `floor_reason` (the floor in use and why, such as
+  `2.6 GiB: mapped 2.1 GiB + 0.5` or `2.0 GiB: critical_below`), `hold_line_bytes` (the `warn`
+  line), `limits` (`critical_below`, `hold_below`, `min_size` and `large`, a quarter of memory,
+  in bytes, and `max_pause_s`, `mapped_window_s` and `io_stall_critical`), `how` (`pressure` and
   `footprint`: how each is read, or `none`), `candidates` (the trees it could choose),
   `passed_over` (how many it may not choose, by why: `agent`, `leasehold`, `discovered`,
   `protected`, `started with its agent`, `small`), `victim` (the tree first in line whenever

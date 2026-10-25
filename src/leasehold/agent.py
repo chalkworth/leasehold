@@ -849,6 +849,8 @@ class MachineAgent:
             reason=got.reason,
             swap_kind=got.swap_kind,
             zram_ratio=got.zram_ratio,
+            mapped=got.mapped,
+            stall_io_recent=got.stall_io_recent,
         )
         with self._watchdog_lock:
             events = self.watchdog.observe(reading)
