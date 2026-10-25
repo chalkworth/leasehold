@@ -60,23 +60,26 @@ def _commands(args, ctx) -> int:
     if args.programs:
         return _programs(settings, write=args.write, env=ctx.env)
     if args.test is not None:
-        found = shell.match(settings.rules, args.test)
+        found = shell.explain(settings.rules, args.test)
         line = list(shell.programs(args.test))
         threads = shell.threads(settings.rules, line, env=ctx.env, cwd=Path.cwd)
+        leased = found is not None and found.rule.weight > 0
         if args.json:
             print(json.dumps(None if found is None else _describe(found, threads)))
         elif found is None:
             print("no rule: it runs without a lease")
         else:
-            described = _rule_line(found.rule, threads)
+            described = _rule_line(found.rule, threads if leased else None)
             print(f"{found.program}: {described} ({found.rule.source} rule)")
-        return 0 if found is not None else 1
+        return 0 if leased else 1
     if args.json:
         print(json.dumps(answer, indent=2))
         return 0
     print(f"agents wait up to {answer['wait_s']:g}s, then {_busy(answer['when_busy'])}")
     for rule in settings.rules:
         print(f"  {rule.source:7}  {', '.join(sorted(rule.programs))}: {_rule_line(rule)}")
+        for case in rule.cases:
+            print(f"             unless {_case_line(case)}")
     return 0
 
 
@@ -122,8 +125,13 @@ def _threads_text(threads: int | str) -> str:
 
 
 def _rule_line(rule: shell.Rule, threads: int | str | None = None) -> str:
-    """A rule in words; `threads`, when given, is the whole command line's (`shell.threads`)."""
+    """A rule in words; `threads`, when given, is the whole command line's (`shell.threads`).
+    A rule weighed by a case of weight 0 (`shell.Rule.weighed`) is said as no lease."""
     args = f" with arguments matching {rule.args!r}" if rule.args else ""
+    if rule.weight == 0:
+        return f"no lease: {rule.note or 'a case of weight 0'}{args}"
+    if rule.note:
+        args = f": {rule.note}{args}"
     never = f"; never granted, so refused: {rule.never}" if rule.never else ""
     count = _threads_text(rule.threads if threads is None else threads)
     weight = weights.text(rule.weight, rule.max_weight)
@@ -133,14 +141,22 @@ def _rule_line(rule: shell.Rule, threads: int | str | None = None) -> str:
     )
 
 
+def _case_line(case: shell.Case) -> str:
+    """A rule's case in words."""
+    weight = "no lease" if case.weight == 0 else f"weight {case.weight}"
+    note = f"{case.note}, " if case.note else ""
+    return f"{note}arguments matching {case.args!r}: {weight}"
+
+
 def _describe(found: shell.Match, threads: int | str | None) -> dict:
-    """`--test --json`: the rule matched, and the command line's `threads` as `hold` or a shim
-    would use it."""
+    """`--test --json`: the rule matched, weighed by its case when one matched (weight 0: no
+    lease), and the command line's `threads` as `hold` or a shim would use it."""
     rule = found.rule
     return {
         "program": found.program,
         "programs": sorted(rule.programs),
         "args": rule.args,
+        "note": rule.note,
         "weight": rule.weight,
         "max_weight": rule.max_weight,
         "memory_per_slot": rule.memory_per_slot,

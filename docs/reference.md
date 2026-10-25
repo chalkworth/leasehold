@@ -761,9 +761,9 @@ leasehold hold -- cargo test --workspace
 
 Without `--weight`, `hold` weighs the command as the [`[commands]`
 rules](#which-commands-take-a-lease-commands) weigh it (cargo test: `heavy_weight` slots, cut to
-what its pool may hold; a rule's range as a range), and anything they do not name as 1 slot. A
-training script or other single process that runs many threads weighs 1 slot unless a rule names
-it, so give it `--weight N` for the N slots it uses. `--weight 2-4` asks for a
+what its pool may hold; a rule's range as a range), and anything else (no rule, or a case of
+no lease) as 1 slot. A training script or other single process that runs many threads weighs 1
+slot unless a rule names it, so give it `--weight N` for the N slots it uses. `--weight 2-4` asks for a
 [range](#ranges-min-max-slots) and runs the command sized to the weight granted. With
 `--jobserver` the range is [elastic](#elastic-leases) unless `--no-elastic` is given: once the
 command's jobs take jobserver tokens, its jobserver's tokens and its scope follow the lease as
@@ -1316,7 +1316,7 @@ their arguments must contain:
 wait_s = 300           # how long an agent's hook or a shim waits in line (at most 540)
 when_busy = "deny"     # then: "deny" the command, or "run" it without a lease and say so
 # heavy_weight = 3     # the built-in build and test rules' weight (default 4)
-# light_weight = 2     # the built-in JavaScript tooling rules' weight (default 2)
+# light_weight = 2     # the built-in install and bundler rules' weight (default 2)
 
 [[commands.rule]]
 programs = ["pytest"]
@@ -1337,23 +1337,71 @@ memory_per_slot = "1g"   # instead of memory: counted, and held to, per slot gra
 ```
 
 The config's rules are tried first, then the built-in ones (`defaults = false` drops those):
-pytest and py.test (with xdist workers, and without), tox and nox; cargo build, test, check, clippy, bench, run and doc; make, ninja and
-bazel; `cmake --build`; go build and test; mvn and gradle; docker and podman build; npm, pnpm,
-yarn and bun install, test and build; jest, vitest, playwright, tsc, webpack and vite. The
-builds and test runs weigh `heavy_weight` (4), the JavaScript tooling `light_weight` (2); lower
-them to run more at once (a new config on 4 to 7 slots offers this as comments: [two at
-once](#your-own-daemon)).
+pytest and py.test (with xdist workers, and without), tox and nox; cargo build, test, check,
+clippy, bench, run and doc; make, ninja and bazel; `cmake --build`; go build and test; mvn and
+gradle; docker and podman build; npm, pnpm, yarn and bun test, build, install, and the test
+tools run through them (`pnpm vitest`); jest, vitest, playwright, tsc, webpack and vite; and
+`just test`, `build` and `check`. Builds and test runs, JavaScript test runners and `tsc`
+included, weigh `heavy_weight` (4). Package installs, webpack and vite weigh `light_weight`
+(2). Lower them to run more at once (a new config on 4 to 7 slots offers this as comments:
+[two at once](#your-own-daemon)).
+
+A rule's cases weigh a command by its arguments. Each `[[commands.rule.case]]` has `args`, a regular
+expression searched in the arguments joined by spaces; `weight`, a count, or 0 for no lease;
+and an optional `note`, which `leasehold commands` prints. They are tried in order on a
+command the rule matches, and the first that matches gives its weight. A command no case
+matches weighs the rule's own weight, so arguments leasehold does not recognise never weigh
+less than the rule:
+
+```toml
+[[commands.rule]]
+programs = ["pytest"]
+weight = 4
+
+[[commands.rule.case]]
+args = "(^| )--collect-only( |$)"
+weight = 0             # no lease
+note = "collection only"
+
+[[commands.rule.case]]
+args = "::"
+weight = 1
+note = "named tests"
+```
+
+The built-in rules have these cases:
+
+| Program | No lease | Weight 1 |
+|---|---|---|
+| pytest, py.test | `-h`, `--help`, `--version`, `-V`, `--collect-only`, `--co`, `--fixtures`, `--fixtures-per-test`, `--markers` | named tests, without xdist workers: a node id (`tests/test_x.py::test_y`, but not one given to `--deselect`), or a `-k` selection that does not start with `not` |
+| tox, nox | help, version, `-l`, `--list`, `--listenvs` | |
+| cargo, cmake, docker, podman, webpack, vite | help or version before a `--` (`cargo run -- --help` still builds) | |
+| make, gmake | help, version, `-n` and the other dry runs, `-q`; or only `clean`, `distclean`, `mrproper` and `help` targets (with `-C`, `-f`, `-j` or `-s`) | |
+| ninja | help, version, `-n`, `-t` | |
+| bazel, bazelisk | help, version; `info`, `version`, `query`, `shutdown`, `help`, `clean` and `license`, after startup options | |
+| go | help | `go test -run NAME` in named packages: no `./...`, no `-bench` |
+| mvn, gradle | help, version, `-v` | |
+| npm, pnpm, yarn, bun | help or version before a `--`; the test script's or test tool's help or version after one (`npm test -- --help`) | |
+| jest, vitest, playwright, tsc | help, version, `-v`, `--listTests`, `--list`, `--showConfig`, `--init`, `--all`, `vitest list` | |
+
+Everything else a rule matches weighs its weight: a serial `pytest -q` and `pytest
+tests/test_x.py` weigh `heavy_weight` like `pytest -n auto`, and so do `cargo run`, `make
+clean all` and `go test ./...`. A command with no lease runs at once and is not counted. A
+command that a config rule matches is weighed by the config's rules alone, so a config rule
+for pytest needs cases of its own to weigh `pytest --version` as none.
+
 A weight is both what a command costs in slots and the job count it is given. It is a
 count (`weight = 4`) or a [range](#ranges-min-max-slots) (`weight = "2-4"`), whose command is
-granted a size between the two when admitted and run sized to it. A rule's
+granted a size between the two when admitted and run sized to it. A case's weight is a count.
+A rule's
 `threads` sets the parallelism inside each process ([sizing](#sizing-the-command-to-its-lease)):
 `"jobs"`, the job count (the default), or a count of at least 1. The built-in xdist rule has
 1, and a pytest run that starts xdist workers, under any rule, shares the job count among
 them; a rule's own `threads` can only lower that
 ([sizing](#sizing-the-command-to-its-lease)). Among one source's rules the heaviest match
-wins, by the least of a range; of equals, the first. The daemon clamps each weight, and each
-end of a range, to the most its pool could ever grant one lease, beside the other pools'
-reservations and standing work.
+wins, each weighed by its case, by the least of a range; of equals, the first. The daemon
+clamps each weight, each end of a range and each case's weight to the most its pool could
+ever grant one lease, beside the other pools' reservations and standing work.
 
 A caller can ask for its own size with `LEASEHOLD_WANT=2-4` (or `=3`). A PATH shim reads it
 from its command's environment, so `LEASEHOLD_WANT=2-4 pytest -n auto` works through a shim;
@@ -1366,7 +1414,8 @@ the size granted, within the cut range; the hook does so only when the command t
 through a shim. A value that is not a weight is ignored, and said. `hold` removes it from
 the environment of the command it runs, and a shim ignores it while the agent it runs under
 holds a hook's lease for any command. `leasehold commands` lists the rules;
-`leasehold commands --test "CMD"` says which one a command matches and the threads it gets.
+`leasehold commands --test "CMD"` says which rule and case a command matches and the threads it
+gets, and exits 0 when it takes a lease and 1 when it runs without one.
 
 A command line is read as the shell would split it, without running anything: `&&`, `||`,
 `;`, pipes, groups, redirections, `VAR=1` assignments, wrappers (`env`, `time`, `nice`,
@@ -1561,7 +1610,7 @@ client for it.
 | `GET /v1/status` | | the machine: [below](#the-status-object) |
 | `GET /v1/leases` | | `leases` and `queue` |
 | `GET /v1/events?since=N&limit=M` | | `events` after number N, oldest first, and `next` |
-| `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, and `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it); a rule no lease could ever be granted for carries `never`, the reason |
+| `GET /v1/commands` | | the `[commands]` rules, each `weight` and `max_weight` clamped as the daemon would grant it, with `ceiling` (the most one lease under the rule could ever be granted), `hook_ceiling` (what the rule's range alone would be granted on an idle machine: an agent hook caps both ends of its range at this), all computed when served, `memory_per_slot` (a rule declaring only that is also served `memory`, its least weight's worth, for clients from before it), and `case`, its cases, each with `args`, `weight` (clamped the same way; 0 is no lease) and `note`; a rule no lease could ever be granted for carries `never`, the reason |
 | `POST /v1/acquire` | `kind`, `pool`, `weight`, `max_weight`, `labels`, `session`, `lease_id`, `wait_s`, `ttl_s`, `memory` or `memory_per_slot` (a size such as `"6g"`), `elastic`, `rule` and `repo` (what the work's outcome will be filed under; with a rule, a request that declares no memory may count a [learned figure](#learned-memory)) | `status`: `granted` (with `lease`, and `elastic`, the daemon's `[elastic]` settings; the lease has `max_jobs`, the job count of its `max_weight`, and `memory_counted_bytes`, the memory admission counts for it at the weight granted), `queued` (with `position`, `blocked`, the `min_weight` and `max_weight` it waits with, as admission would cut them now, and, while a maintenance lease holds or drains the machine, `maintenance` as in [status](#the-status-object)) or `refused` (with `reason`) |
 | `POST /v1/renew` | `lease_id`, `ttl_s` | `ok`, `revoked` (with `reason`), `queued` or `unknown`; for a lease, its `weight`, `min_weight`, `max_weight`, `pool`, `jobs`, `elastic`, `target` and `target_jobs`; with `ok`, `parked`: whether the [memory net](#memory-net) has its command paused |
 | `POST /v1/resize` | `lease_id`, `weight` | `resized`, with the lease's `weight`, `jobs`, `target` and `target_jobs`; 409 `conflict` when it cannot grow now or is not held, 400 for a lease that is not elastic or a `weight` outside its range |
