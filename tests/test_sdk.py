@@ -283,8 +283,9 @@ def test_a_session_is_watched_with_its_footprint_and_an_agent_is_found_by_name(s
 class FakeHost(Posix):
     """A machine whose processes and memory a test sets: `procs` by pid, each with its
     anonymous memory and start time, `commands` by pid, `available`, `swap` (total and free),
-    `stall` (the recent share every task stalled) and `frees` (what stopping a process would
-    free, by pid: its anonymous memory where not set)."""
+    `stall` (the recent share every task stalled), `mapped`, `io` (the recent share some task
+    waited on the disk) and `frees` (what stopping a process would free, by pid: its anonymous
+    memory where not set)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -294,6 +295,8 @@ class FakeHost(Posix):
         self.available = 12 << 30
         self.swap = (0, 0)
         self.stall = 0.0
+        self.mapped: int | None = None
+        self.io: float | None = None
         self.frees: dict[int, int] = {}
 
     def freeable(self, proc: host.Proc) -> int | None:
@@ -324,7 +327,8 @@ class FakeHost(Posix):
         total, free = self.swap
         return host.Pressure(
             "exact", available=self.available, total=16 << 30, swap_total=total,
-            swap_used=total - free, stall_full_recent=self.stall,
+            swap_used=total - free, stall_full_recent=self.stall, mapped=self.mapped,
+            stall_io_recent=self.io,
         )  # fmt: skip
 
     def command_line(self, proc: host.Proc) -> str | None:
@@ -349,8 +353,9 @@ GIB = 1 << 30
 
 def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
     # On a 16 GiB machine, two agents: 100 registers, 200 is only found by name. Each reading is
-    # (available GiB, swap total and free GiB, the recent stall %, the level it gives); each
-    # tree (pid, parent, start after its agent in s, command, anonymous GiB at each reading).
+    # (available GiB, swap total and free GiB, the recent stall %, the level it gives), and may
+    # add (Mapped GiB, the recent disk stall %); each tree (pid, parent, start after its agent in
+    # s, command, anonymous GiB at each reading).
     calm, swap = (0, 0), (8, 6)
     cases = [
         ("the newest", [
@@ -423,6 +428,25 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
             (102, 100, 120, "python mcpbench/run.py", [1, 1]),
             (103, 100, 130, "firefox -headless -marionette", [1, 1]),
         ], (103, "newest", [])),
+        ("a heavy mapped set raises the floor", [
+            (6, calm, 0, "ok", 2.5, 0), (3.2, calm, 0, "warn", 2.5, 0),
+            (2.8, calm, 0, "critical", 2.5, 0),
+        ], [
+            (101, 100, 60, "make -j8", [1, 1, 1]),
+            (102, 100, 120, "pytest -n 4", [1, 1, 1]),
+        ], (102, "newest", [])),
+        ("the floor holds after Mapped falls", [
+            (6, calm, 0, "ok", 2.5, 0), (6, calm, 0, "ok", 1, 0), (2.8, calm, 0, "critical", 1, 0),
+        ], [
+            (101, 100, 60, "make -j8", [1, 1, 1]),
+            (102, 100, 120, "pytest -n 4", [1, 1, 1]),
+        ], (102, "newest", [])),
+        ("a disk stall is critical near the floor, whatever the swap, and not far above it", [
+            (6, swap, 0, "ok", 1, 50), (2.5, swap, 0, "critical", 1, 50),
+        ], [
+            (101, 100, 60, "make -j8", [1, 1]),
+            (102, 100, 120, "pytest -n 4", [1, 1]),
+        ], (102, "newest", [])),
         ("never a session found by name", [
             (6, calm, 0, "ok"), (1.5, calm, 0, "critical"),
         ], [
@@ -450,7 +474,7 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
         try:
             Client(daemon.path).register_session("mine", pid=100, agent="fake-agent")
             levels = []
-            for step, (free, (total, unused), stall, _) in enumerate(readings):
+            for step, (free, (total, unused), stall, _, *more) in enumerate(readings):
                 for pid, parent, after, command, sizes in trees:
                     fake.procs[pid] = host.Proc(
                         pid, str(pid), command.split()[0], parent=parent,
@@ -459,6 +483,8 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
                     fake.commands[pid] = command
                 fake.available, fake.stall = int(free * GIB), stall
                 fake.swap = (total * GIB, unused * GIB)
+                mapped, fake.io = more or (None, None)
+                fake.mapped = None if mapped is None else int(mapped * GIB)
                 mono.now += 2.5
                 agent.tick()
                 agent.watch_memory()
@@ -467,6 +493,8 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
                 if watchdog["level"] != "critical":  # it acts at critical by default
                     assert watchdog["would"] is None, name
             assert levels == [r[3] for r in readings], name
+            if name.startswith(("a heavy mapped", "the floor holds")):
+                assert "(mapped 2.5 GiB + 0.5)" in watchdog["reason"], name
             would = watchdog["would"]
             assert (would["action"], would["pid"], would["why"]) == ("pause", chosen, why), name
             assert would["spared"] == spared, name
@@ -484,15 +512,17 @@ def test_the_watchdog_says_what_it_would_do(sock_dir, tmp_path):
     watchdog = agent.status()["watchdog"]
     assert (watchdog["level"], watchdog["would"]) == (None, None)
     assert watchdog["reason"].startswith("the watchdog cannot see memory here")
+    assert (watchdog["floor_bytes"], watchdog["stall_io_recent"]) == (None, None)
 
 
 def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, monkeypatch):
     # Acting: at critical it pauses the newest tree, and stops it once it has been paused, and
     # the level critical, for 5 s. The next is paused only while memory falls again. Once memory
     # has been fine for a while the oldest paused runs again, and new work waits until it has
-    # been flat for 30 s. A stop that frees nothing means the shortage is elsewhere: nothing
-    # more is paused or stopped. Each step: (available GiB, trees alive, what the host was told
-    # to do, what is paused, why new work waits).
+    # been flat for 30 s. A brief flap out of critical does not restart the clock. A stop that
+    # frees nothing means the shortage is elsewhere: nothing more is paused or stopped. Each
+    # step: (available GiB, trees alive, what the host was told to do, what is paused, why new
+    # work waits), and may add the recent disk stall %.
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     paused_now, settling = "is paused until memory frees", "new work waits until it settles"
     steps = [
@@ -506,6 +536,16 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         (10, [101], [("resume", 101)], [101], settling),
         *[(10, [101], [], [101], settling)] * 11,
         (10, [101], [], [], None),  # flat for 30 s
+        (1.5, [101, 105], [("pause", 105)], [105], paused_now),
+        (1, [101, 105, 106], [("pause", 106)], [105, 106], paused_now),
+        (2.5, [101, 105, 106], [], [105, 106], paused_now),  # a flap to warn
+        (1.5, [101, 105, 106], [("kill", 106)], [105], paused_now),
+        # The disk stall of the file cache read back after a stop stops nothing more.
+        (2.98, [101, 105], [], [105], paused_now, 50),
+        (3.0, [101, 105], [], [105], paused_now),  # a blip of ok does not end the episode
+        (2.98, [101, 105], [], [105], paused_now, 50),
+        (10, [101], [("resume", 105)], [], None),  # 105 ended: the rest of it runs again
+        *[(10, [101], [], [], None)] * 2,  # calm for 5 s ends the episode
         (1.5, [101, 103], [("pause", 103)], [103], paused_now),
         (1.5, [101, 103], [], [103], paused_now),
         (1.5, [101, 103], [("kill", 103)], [], "memory is short"),
@@ -541,10 +581,12 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
             101: ("make -j8", 60, None),
             102: ("python3 -m pytest -n 4", 120, lid),
             103: ("cargo build", 130, None),
+            105: ("cargo test", 125, None),
+            106: ("pytest -n 2", 127, None),
             104: ("python3 -m pytest -n 8", 140, None),
         }
         fake.frees[104] = 100 << 20
-        for n, (free, alive, told, paused, why) in enumerate(steps):
+        for n, (free, alive, told, paused, why, *io) in enumerate(steps):
             for pid in set(fake.procs) - {100} - set(alive):
                 del fake.procs[pid]
             for pid in alive:
@@ -554,7 +596,7 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
                     anon=GIB, lease=under,
                 ))  # fmt: skip
                 fake.commands[pid] = command
-            fake.available = int(free * GIB)
+            fake.available, fake.io = int(free * GIB), (io or [None])[0]
             fake.done.clear()
             mono.now += 2.5
             agent.tick()
@@ -592,7 +634,8 @@ def test_the_watchdog_pauses_stops_and_lets_run_and_says_so(sock_dir, tmp_path, 
         events = [(e["type"], e.get("pid")) for e in client.events()["events"]]
         assert [e for e in events if e[0] in ("paused", "resumed", "stopped")] == [
             ("paused", 102), ("stopped", 102), ("paused", 101), ("resumed", 101),
-            ("paused", 103), ("stopped", 103),
+            ("paused", 105), ("paused", 106), ("stopped", 106), ("paused", 103),
+            ("stopped", 103),
         ]  # fmt: skip
         reply = claude_code.Reply()
         claude_code.tell({"session_id": "mine"}, os.environ, reply, "post")

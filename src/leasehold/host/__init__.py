@@ -62,7 +62,8 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Protocol
 
-#: The seconds over which `Pressure.stall_full_recent` is measured, at least.
+#: The seconds over which `Pressure.stall_full_recent` and `stall_io_recent` are measured, at
+#: least.
 STALL_WINDOW_S = 2.0
 
 #: The operations `capabilities` reports on, in the order `doctor` lists them. `memory_hard` is
@@ -232,7 +233,10 @@ class Pressure:
     (a file or partition, whose free space is free memory), `zram` (compressed RAM, which an
     incompressible page fills at about one to one) or `mixed`; None with no swap.
     `zram_ratio` is how much zram's pages shrank (their size over the RAM zram uses for
-    them; None without zram, or before it holds anything). Shares are percentages. `how` is `exact`
+    them; None without zram, or before it holds anything). `mapped` is the memory of files mapped
+    into processes (`Mapped`), and `stall_io_recent` the share of the last `STALL_WINDOW_S`
+    seconds or so in which some task waited on the disk (from the kernel's running total; None
+    on this host's first reading). Shares are percentages. `how` is `exact`
     when the kernel gave it, `none` with a `reason` when nothing could be read. Each value is
     None when not known."""
 
@@ -251,6 +255,8 @@ class Pressure:
     compressed: int | None = None
     swap_kind: str | None = None
     zram_ratio: float | None = None
+    mapped: int | None = None
+    stall_io_recent: float | None = None
 
 
 @dataclass(frozen=True)

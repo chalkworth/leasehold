@@ -278,6 +278,13 @@ CRITICAL_BELOW = "2g"
 #: `hold_below`: under this much, with little swap free, the level is `warn`, where new heavy
 #: work would be held and nothing running is touched.
 HOLD_BELOW = "3g"
+#: The floor under which available memory is `critical` rises above `critical_below` to the
+#: highest `Mapped` (the files mapped into memory, which stand in for the file cache the desktop
+#: needs hot) over the last `mapped_window_s`, plus this much. The highest, since `Mapped` falls
+#: as that cache is evicted, just when the floor matters. `hold_below` rises with it, keeping
+#: its distance above `critical_below`.
+MAPPED_MARGIN = 1 << 29
+MAPPED_WINDOW_S = 300.0
 #: Available memory counts only once swap is nearly full: with no swap, or with less swap free
 #: than the larger of these (bytes, share of swap). While the kernel swaps, it keeps available
 #: memory near a floor that says nothing of a freeze.
@@ -285,6 +292,13 @@ SWAP_FREE = (_GIB, 0.10)
 #: Every task stalled on memory for more than this share (a percentage) of the last couple of
 #: seconds (`host.Pressure.stall_full_recent`) makes the level `critical` by itself.
 STALL_CRITICAL = 20.0
+#: `io_stall_critical`: some task waited on the disk for more than this share (a percentage) of
+#: the last couple of seconds (`host.Pressure.stall_io_recent`) while available memory is under
+#: the floor plus `IO_NEAR`: the machine is `critical`, whatever the swap. A page the kernel
+#: evicted and has to read back counts as a wait on the disk, not on memory, so this is what
+#: sees the file cache thrash that freezes a desktop.
+IO_STALL_CRITICAL = 30.0
+IO_NEAR = _GIB
 #: `min_size = "auto"`: the larger of these (bytes, share of RAM); a smaller tree is never chosen.
 MIN_SIZE = (_GIB // 4, 0.02)
 #: Without a runaway, a tree holding at least this share of RAM is chosen before the newest.
@@ -347,6 +361,11 @@ class WatchdogSettings(_Strict):
     act_at: Literal["warn", "critical"] = ACT_AT
     #: A tree paused this many seconds is stopped.
     max_pause_s: float = Field(MAX_PAUSE_S, ge=10)
+    #: The seconds over which the highest `Mapped` sets the floor (`MAPPED_MARGIN`).
+    mapped_window_s: float = Field(MAPPED_WINDOW_S, ge=10)
+    #: The share (a percentage) of the last couple of seconds some task waited on the disk
+    #: above which low available memory is `critical` (`IO_STALL_CRITICAL`).
+    io_stall_critical: float = Field(IO_STALL_CRITICAL, gt=0, le=100)
     #: Whether trees of sessions found by name (`auto-<pid>`), which never asked to join, may be
     #: chosen. They are watched and reported either way.
     choose_discovered: bool = False
