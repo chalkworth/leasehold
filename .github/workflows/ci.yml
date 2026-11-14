@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gate]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -25,7 +25,7 @@ jobs:
 
   test:
     name: test (3.12)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gate]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -50,7 +50,7 @@ jobs:
           if-no-files-found: warn
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gate]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -66,9 +66,9 @@ jobs:
           PY
       - name: It installs and runs from the wheel
         run: |
-          uv venv /tmp/try && uv pip install --python /tmp/try/bin/python dist/*.whl
-          /tmp/try/bin/leasehold --version
-          /tmp/try/bin/leasehold init --print > /dev/null
+          uv venv --clear "$RUNNER_TEMP/try" && uv pip install --python "$RUNNER_TEMP/try/bin/python" dist/*.whl
+          "$RUNNER_TEMP/try/bin/leasehold" --version
+          "$RUNNER_TEMP/try/bin/leasehold" init --print > /dev/null
       - uses: actions/upload-artifact@v7
         with:
           name: dist
