@@ -67,6 +67,19 @@ class Orphan:
 SRC = Path(leasehold.__file__).resolve().parent.parent
 #: The environment a child `python -m leasehold` runs with.
 CHILD_ENV = {**os.environ, "PYTHONPATH": str(SRC)}
+
+
+def session_env(root: Path) -> dict[str, str]:
+    """`CHILD_ENV` as a normal login session has it, with the runtime and state directories
+    under `root`, whatever session the tests run in: a user config's default socket and ledger
+    resolve there, as they would for a user who runs `leasehold init`."""
+    return {
+        **CHILD_ENV,
+        "XDG_RUNTIME_DIR": str(root / "run"),
+        "XDG_STATE_HOME": str(root / "state"),
+    }
+
+
 #: Whether commands get no scope here: the tests of scopes need a systemd user manager.
 NO_SCOPE = host.current().support("start").how == "none"
 

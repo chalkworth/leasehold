@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from support import cli
+from support import cli, session_env
 
 from leasehold import machine, template, upgrade
 
@@ -29,7 +29,9 @@ def test_a_new_config_keeps_the_built_in_heavy_weight(tmp_path, cpus, offered):
     if offered is not None:
         path.write_text(text.replace(f"# heavy_weight = {offered}", f"heavy_weight = {offered}"))
         assert machine.load(path).commands.heavy_weight == offered
-    doctor = cli(tmp_path / "none.sock", "--config", str(path), "doctor", "--json")
+    doctor = cli(
+        tmp_path / "none.sock", "--config", str(path), "doctor", "--json", env=session_env(tmp_path)
+    )
     checks = json.loads(doctor.stdout)
     warned = [c for c in checks if c["name"] == "two_at_once"]
     assert [c["level"] for c in warned] == (["warn"] if offered is not None else [])
