@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import inspect
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -244,8 +243,11 @@ def test_a_session_is_watched_with_its_footprint_and_an_agent_is_found_by_name(s
     )
     daemon = Daemon(config, MachineAgent(config, facts=FACTS, load=FakeLoad()))
     daemon.start()
+    # A script, so the kernel names the process after it; a copied `sleep` may be a multi-call
+    # binary (uutils coreutils) that refuses to run under a name it does not know.
     fake = tmp_path / "lh-fake-agent"
-    shutil.copy(shutil.which("sleep"), fake)
+    fake.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+    fake.chmod(0o755)
     agent = Orphan([str(fake), "30"])
     try:
 
