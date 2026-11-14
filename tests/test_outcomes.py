@@ -8,7 +8,7 @@ import json
 import math
 
 import pytest
-from support import FACTS, FakeLoad, cli, machine_config
+from support import FACTS, FakeLoad, cli, machine_config, session_env
 
 from leasehold import api, measure, template
 from leasehold.agent import MachineAgent
@@ -225,7 +225,9 @@ def test_doctor_checks_memory_learn(tmp_path, learn, contain, config, memory):
     assert 'learn = "shadow"' in text
     text = text.replace('learn = "shadow"', f"learn = {learn}")
     path.write_text(text.replace('mode = "auto"', f'mode = "{contain}"'))
-    doctor = cli(tmp_path / "none.sock", "--config", str(path), "doctor", "--json")
+    doctor = cli(
+        tmp_path / "none.sock", "--config", str(path), "doctor", "--json", env=session_env(tmp_path)
+    )
     checks = {c["name"]: c for c in json.loads(doctor.stdout)}
     assert checks["config"]["level"] == config
     assert ("learn" in checks["config"]["detail"]) == (config == "fail")
