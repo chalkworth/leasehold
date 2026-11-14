@@ -74,3 +74,7 @@ commit = true
 kind = "pr"
 file_issues = "deferred"
 on_failure = "stop"
+
+# Merging main into a passed branch keeps its pass, conflict resolutions included.
+[land]
+base_merges = "carry"
